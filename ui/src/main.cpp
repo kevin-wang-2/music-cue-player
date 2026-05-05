@@ -86,6 +86,12 @@ struct App {
     bool wantSaveAsDlg = false;
     bool wantTitleDlg  = false;
 
+    // Inline table-cell editing
+    int  inline_editRow  = -1;   // row being edited; -1 = none
+    int  inline_editCol  = -1;   // 0 = cue#, 2 = name, 4 = duration
+    char inline_editBuf[256] = {};
+    bool inline_needFocus = false;
+
     // Drop notification: shown briefly after files are dragged in
     std::string dropMsg;
     double      dropMsgExpiry = 0.0;  // glfwGetTime() deadline
@@ -459,7 +465,7 @@ static void renderCueTable(App& app) {
     ImGui::TableSetupColumn("Status",   ImGuiTableColumnFlags_WidthFixed,   90);
     ImGui::TableHeadersRow();
 
-    // Deferred mutations — applied after EndTable to avoid modifying the list mid-render.
+    // Deferred mutations applied after EndTable.
     int reorderSrc = -1, reorderDst = -1;
     int targetSetRow = -1, targetSetSrc = -1;
 
@@ -467,77 +473,145 @@ static void renderCueTable(App& app) {
         const mcp::Cue* c = app.cues.cueAt(i);
         if (!c) continue;
 
-        const bool playing = app.cues.isCuePlaying(i);
-        const bool pending = app.cues.isCuePending(i);
-        const bool isSel   = (i == selIdx);
+        const bool playing  = app.cues.isCuePlaying(i);
+        const bool pending  = app.cues.isCuePending(i);
+        const bool isSel    = (i == selIdx);
+        const bool isEditing = (app.inline_editRow == i);
 
         ImGui::TableNextRow();
 
-        // Row background tint
+        // Pre-fetch column screen-X positions for double-click column detection.
+        float colX[6];
+        for (int ci = 0; ci < 6; ++ci) {
+            ImGui::TableSetColumnIndex(ci);
+            colX[ci] = ImGui::GetCursorScreenPos().x;
+        }
+
         if (playing)
             ImGui::TableSetBgColor(ImGuiTableBgTarget_RowBg0, IM_COL32(30, 90, 40, 120));
         else if (pending)
             ImGui::TableSetBgColor(ImGuiTableBgTarget_RowBg0, IM_COL32(90, 70, 10, 120));
 
-        // Column 0: cue number
+        // ---- Col 0: cue number ------------------------------------------------
         ImGui::TableSetColumnIndex(0);
-        const char* qn = c->cueNumber.empty() ? "-" : c->cueNumber.c_str();
-        if (isSel) ImGui::TextColored(ImVec4(1, 0.85f, 0, 1), "▶ %s", qn);
-        else        ImGui::TextDisabled("  %s", qn);
+        if (isEditing && app.inline_editCol == 0) {
+            ImGui::SetNextItemWidth(ImGui::GetContentRegionAvail().x);
+            if (app.inline_needFocus) { ImGui::SetKeyboardFocusHere(); app.inline_needFocus = false; }
+            ImGui::InputText("##ie0", app.inline_editBuf, sizeof(app.inline_editBuf));
+            if (ImGui::IsItemDeactivated()) {
+                app.cues.setCueCueNumber(i, app.inline_editBuf);
+                syncSfFromCues(app);
+                app.inline_editRow = -1;
+            }
+        } else {
+            const char* qn = c->cueNumber.empty() ? "-" : c->cueNumber.c_str();
+            if (isSel) ImGui::TextColored(ImVec4(1, 0.85f, 0, 1), "▶ %s", qn);
+            else        ImGui::TextDisabled("  %s", qn);
+        }
 
-        // Column 1: type badge
+        // ---- Col 1: type badge ------------------------------------------------
         ImGui::TableSetColumnIndex(1);
         const std::string tstr = (c->type == mcp::CueType::Audio) ? "audio"
                                 : (c->type == mcp::CueType::Start) ? "start" : "stop";
         ImGui::TextColored(typeColor(tstr), "%s", tstr.c_str());
 
-        // Column 2: name — row selection + drag source + reorder drop target
+        // ---- Col 2: name — selectable / inline editor / DnD ------------------
         ImGui::TableSetColumnIndex(2);
-        char lbl[64]; std::snprintf(lbl, sizeof(lbl), "##row%d", i);
-        if (ImGui::Selectable(lbl, isSel, ImGuiSelectableFlags_SpanAllColumns, ImVec2(0, 0)))
-            app.cues.setSelectedIndex(i);
-
-        // Allow subsequent columns (Target) to receive hover despite SpanAllColumns.
-        ImGui::SetItemAllowOverlap();
-
-        // Drag source: grab any row to reorder
-        if (ImGui::BeginDragDropSource(ImGuiDragDropFlags_SourceAllowNullID)) {
-            ImGui::SetDragDropPayload("CUE_IDX", &i, sizeof(int));
-            ImGui::Text("Q%s  %s",
-                        c->cueNumber.empty() ? "-" : c->cueNumber.c_str(),
-                        c->name.c_str());
-            ImGui::EndDragDropSource();
-        }
-
-        // Drop target: reorder — upper-half = insert before, lower-half = insert after
-        if (ImGui::BeginDragDropTarget()) {
-            const float midY = (ImGui::GetItemRectMin().y + ImGui::GetItemRectMax().y) * 0.5f;
-            const bool  after = ImGui::GetMousePos().y > midY;
-            if (const ImGuiPayload* p = ImGui::AcceptDragDropPayload("CUE_IDX")) {
-                reorderSrc = *(const int*)p->Data;
-                reorderDst = after ? i + 1 : i;
+        if (isEditing && app.inline_editCol == 2) {
+            ImGui::SetNextItemWidth(ImGui::GetContentRegionAvail().x);
+            if (app.inline_needFocus) { ImGui::SetKeyboardFocusHere(); app.inline_needFocus = false; }
+            ImGui::InputText("##ie2", app.inline_editBuf, sizeof(app.inline_editBuf));
+            if (ImGui::IsItemDeactivated()) {
+                app.cues.setCueName(i, app.inline_editBuf);
+                syncSfFromCues(app);
+                app.inline_editRow = -1;
             }
-            ImGui::EndDragDropTarget();
+        } else {
+            char lbl[64]; std::snprintf(lbl, sizeof(lbl), "##row%d", i);
+            if (ImGui::Selectable(lbl, isSel, ImGuiSelectableFlags_SpanAllColumns, ImVec2(0, 0)))
+                app.cues.setSelectedIndex(i);
+            ImGui::SetItemAllowOverlap();
+
+            // Double-click → start inline edit for the column under the mouse.
+            // Col 3 (Target) and Col 5 (Status) are excluded.
+            if (ImGui::IsItemHovered() && ImGui::IsMouseDoubleClicked(0) && app.inline_editRow < 0) {
+                app.cues.setSelectedIndex(i);
+                const float mx  = ImGui::GetMousePos().x;
+
+                if (mx < colX[1]) {
+                    // Col 0: cue number
+                    app.inline_editRow = i; app.inline_editCol = 0;
+                    std::strncpy(app.inline_editBuf, c->cueNumber.c_str(), sizeof(app.inline_editBuf) - 1);
+                } else if (mx < colX[3]) {
+                    // Col 1 or 2: edit name (Type is display-only)
+                    app.inline_editRow = i; app.inline_editCol = 2;
+                    std::strncpy(app.inline_editBuf, c->name.c_str(), sizeof(app.inline_editBuf) - 1);
+                } else if (mx >= colX[4] && mx < colX[5] && c->type == mcp::CueType::Audio) {
+                    // Col 4: duration trim (audio cues only)
+                    app.inline_editRow = i; app.inline_editCol = 4;
+                    char tmp[32]; std::snprintf(tmp, sizeof(tmp), "%.3f", c->duration);
+                    std::strncpy(app.inline_editBuf, tmp, sizeof(app.inline_editBuf) - 1);
+                }
+                if (app.inline_editRow == i) {
+                    app.inline_editBuf[sizeof(app.inline_editBuf) - 1] = 0;
+                    app.inline_needFocus = true;
+                }
+            }
+
+            // DnD only when not inline-editing this row.
+            if (!isEditing) {
+                if (ImGui::BeginDragDropSource(ImGuiDragDropFlags_SourceAllowNullID)) {
+                    ImGui::SetDragDropPayload("CUE_IDX", &i, sizeof(int));
+                    ImGui::Text("Q%s  %s",
+                                c->cueNumber.empty() ? "-" : c->cueNumber.c_str(),
+                                c->name.c_str());
+                    ImGui::EndDragDropSource();
+                }
+
+                // Reorder drop target: draw an insertion line instead of row highlight.
+                if (ImGui::BeginDragDropTarget()) {
+                    const ImVec2 rMin = ImGui::GetItemRectMin();
+                    const ImVec2 rMax = ImGui::GetItemRectMax();
+                    const bool   after = ImGui::GetMousePos().y > (rMin.y + rMax.y) * 0.5f;
+                    const float  lineY = after ? rMax.y : rMin.y;
+
+                    // AcceptBeforeDelivery: draw line every frame while hovering.
+                    // AcceptNoDrawDefaultRect: suppress ImGui's full-row highlight.
+                    const ImGuiPayload* p = ImGui::AcceptDragDropPayload("CUE_IDX",
+                        ImGuiDragDropFlags_AcceptBeforeDelivery |
+                        ImGuiDragDropFlags_AcceptNoDrawDefaultRect);
+                    if (p) {
+                        if (p->IsDelivery()) {
+                            reorderSrc = *(const int*)p->Data;
+                            reorderDst = after ? i + 1 : i;
+                        }
+                        ImDrawList* dl = ImGui::GetWindowDrawList();
+                        dl->AddCircleFilled(ImVec2(rMin.x + 4, lineY), 3.5f, IM_COL32(80, 150, 255, 220));
+                        dl->AddLine(ImVec2(rMin.x + 8, lineY), ImVec2(rMax.x, lineY),
+                                    IM_COL32(80, 150, 255, 220), 2.0f);
+                    }
+                    ImGui::EndDragDropTarget();
+                }
+            }
+
+            ImGui::SameLine();
+            ImGui::Text("%s", c->name.c_str());
         }
 
-        ImGui::SameLine();
-        ImGui::Text("%s", c->name.c_str());
-
-        // Column 3: target — drop zone for start/stop cues
+        // ---- Col 3: target — DnD drop zone for start/stop -------------------
         ImGui::TableSetColumnIndex(3);
         if (c->type != mcp::CueType::Audio) {
             const mcp::Cue* tc = (c->targetIndex >= 0 && c->targetIndex < n)
                                   ? app.cues.cueAt(c->targetIndex) : nullptr;
             const std::string tdisplay = tc
                 ? ("Q" + (tc->cueNumber.empty() ? std::to_string(c->targetIndex) : tc->cueNumber))
-                : "  —";
+                : "  \xe2\x80\x94";  // — UTF-8 EM DASH
 
             const float cellW = ImGui::GetContentRegionAvail().x;
             const float cellH = ImGui::GetTextLineHeightWithSpacing();
             char tgtId[32]; std::snprintf(tgtId, sizeof(tgtId), "##tgt%d", i);
             ImGui::InvisibleButton(tgtId, ImVec2(cellW > 4 ? cellW : 60, cellH));
 
-            // Draw target label over the invisible button
             const ImVec2 tpos = {
                 ImGui::GetItemRectMin().x + 2,
                 ImGui::GetItemRectMin().y + (cellH - ImGui::GetTextLineHeight()) * 0.5f
@@ -556,17 +630,32 @@ static void renderCueTable(App& app) {
                 ImGui::EndDragDropTarget();
             }
         } else {
-            ImGui::TextDisabled("  —");
+            ImGui::TextDisabled("  \xe2\x80\x94");
         }
 
-        // Column 4: duration
+        // ---- Col 4: duration (or inline editor) ------------------------------
         ImGui::TableSetColumnIndex(4);
-        if (c->type == mcp::CueType::Audio)
+        if (isEditing && app.inline_editCol == 4) {
+            ImGui::SetNextItemWidth(ImGui::GetContentRegionAvail().x);
+            if (app.inline_needFocus) { ImGui::SetKeyboardFocusHere(); app.inline_needFocus = false; }
+            ImGui::InputText("##ie4", app.inline_editBuf, sizeof(app.inline_editBuf));
+            if (ImGui::IsItemHovered() || ImGui::IsItemActive())
+                ImGui::SetTooltip("seconds (0 = play to end)");
+            if (ImGui::IsItemDeactivated()) {
+                try {
+                    double d = std::stod(app.inline_editBuf);
+                    app.cues.setCueDuration(i, std::max(0.0, d));
+                    syncSfFromCues(app);
+                } catch (...) {}
+                app.inline_editRow = -1;
+            }
+        } else if (c->type == mcp::CueType::Audio) {
             ImGui::TextDisabled("%s", fmtDuration(app.cues.cueTotalSeconds(i)).c_str());
-        else
-            ImGui::TextDisabled("  —");
+        } else {
+            ImGui::TextDisabled("  \xe2\x80\x94");
+        }
 
-        // Column 5: status / playhead progress
+        // ---- Col 5: status / playhead progress --------------------------------
         ImGui::TableSetColumnIndex(5);
         if (playing) {
             const double pos   = app.cues.cuePlayheadSeconds(i);
@@ -575,12 +664,12 @@ static void renderCueTable(App& app) {
                 float pct = static_cast<float>(pos / total);
                 ImGui::ProgressBar(pct, ImVec2(-1, ImGui::GetTextLineHeight()), "");
             } else {
-                ImGui::TextColored(ImVec4(0.3f, 1, 0.4f, 1), "▶ playing");
+                ImGui::TextColored(ImVec4(0.3f, 1, 0.4f, 1), "playing");
             }
         } else if (pending) {
-            ImGui::TextColored(ImVec4(1, 0.75f, 0.2f, 1), "◷ pending");
+            ImGui::TextColored(ImVec4(1, 0.75f, 0.2f, 1), "pending");
         } else {
-            ImGui::TextDisabled("● idle");
+            ImGui::TextDisabled("idle");
         }
     }
 
@@ -588,12 +677,10 @@ static void renderCueTable(App& app) {
 
     // ---- Apply deferred reorder ---------------------------------------------
     if (reorderSrc >= 0 && reorderDst >= 0 && !app.sf.cueLists.empty()) {
-        // Skip obvious no-ops: same slot or adjacent (moving one step within itself).
         if (reorderSrc != reorderDst && reorderSrc + 1 != reorderDst) {
             auto& cds = app.sf.cueLists[0].cues;
             mcp::ShowFile::CueData moved = cds[reorderSrc];
             cds.erase(cds.begin() + reorderSrc);
-            // Adjust for the removal shifting indices above src down by one.
             int dst = reorderDst;
             if (reorderSrc < reorderDst) dst--;
             dst = std::clamp(dst, 0, (int)cds.size());
@@ -602,6 +689,7 @@ static void renderCueTable(App& app) {
             rebuildCueList(app, err);
             app.cues.setSelectedIndex(dst);
             app.insp_lastSel = -2;
+            app.inline_editRow = -1;
             app.dirty = true;
         }
     }
@@ -950,8 +1038,24 @@ int main(int argc, char** argv) {
     // FontGlobalScale maps those physical pixels back to logical pixels,
     // keeping widget layout sizes unchanged (no ScaleAllSizes needed).
     const float fontSize = std::round(13.0f * contentScale);
+
+    // Build glyph range: default Latin + the Unicode symbols used in the UI.
+    // Must be static — pointer must stay valid until the font atlas is built
+    // (deferred to the first ImGui_ImplOpenGL3_NewFrame call).
+    static ImVector<ImWchar> sGlyphRanges;
+    {
+        ImFontGlyphRangesBuilder b;
+        b.AddRanges(io.Fonts->GetGlyphRangesDefault());
+        b.AddChar(0x2014);  // — EM DASH
+        b.AddChar(0x2022);  // • BULLET
+        b.AddChar(0x25B6);  // ▶ BLACK RIGHT-POINTING TRIANGLE
+        b.AddChar(0x25CF);  // ● BLACK CIRCLE
+        b.AddChar(0x25F7);  // ◷ UPPER RIGHT QUADRANT CIRCULAR ARC
+        b.BuildRanges(&sGlyphRanges);
+    }
+
     if (fontPath)
-        io.Fonts->AddFontFromFileTTF(fontPath, fontSize);
+        io.Fonts->AddFontFromFileTTF(fontPath, fontSize, nullptr, sGlyphRanges.Data);
     else
         io.Fonts->AddFontDefault();
 
