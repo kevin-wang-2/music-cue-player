@@ -45,10 +45,28 @@ if(APPLE)
     target_compile_definitions(imgui_lib PUBLIC GL_SILENCE_DEPRECATION)
 endif()
 
+# ---- tinyfiledialogs -------------------------------------------------------
+FetchContent_Declare(
+    tinyfd
+    GIT_REPOSITORY https://github.com/native-toolkit/libtinyfiledialogs.git
+    GIT_TAG        master
+    GIT_SHALLOW    TRUE
+)
+FetchContent_MakeAvailable(tinyfd)
+
 # ---- mcp_ui ----------------------------------------------------------------
-add_executable(mcp_ui src/main.cpp)
+# Compile tinyfiledialogs.c directly into the executable (it's a single file).
+add_executable(mcp_ui
+    src/main.cpp
+    ${tinyfd_SOURCE_DIR}/tinyfiledialogs.c
+)
+target_include_directories(mcp_ui PRIVATE ${tinyfd_SOURCE_DIR})
 target_link_libraries(mcp_ui PRIVATE mcp_engine imgui_lib)
-target_compile_options(mcp_ui PRIVATE -Wall -Wextra)
+target_compile_options(mcp_ui PRIVATE
+    $<$<COMPILE_LANGUAGE:CXX>:-Wall -Wextra>
+    $<$<COMPILE_LANGUAGE:C>:-Wno-deprecated-declarations>
+)
 if(APPLE)
     target_compile_definitions(mcp_ui PRIVATE GL_SILENCE_DEPRECATION)
+    target_link_libraries(mcp_ui PRIVATE "-framework AppKit")
 endif()

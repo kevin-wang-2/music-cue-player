@@ -1,3 +1,5 @@
+#include "tinyfiledialogs.h"
+
 #include "engine/AudioEngine.h"
 #include "engine/CueList.h"
 #include "engine/Scheduler.h"
@@ -79,6 +81,9 @@ struct App {
     int      insp_lastSel    = -2;  // force refresh on first frame
 
     AddDialog addDlg;
+    bool wantOpenDlg   = false;
+    bool wantSaveAsDlg = false;
+    bool wantTitleDlg  = false;
 };
 
 // ---------------------------------------------------------------------------
@@ -452,38 +457,26 @@ static void renderMenuBar(App& app, GLFWwindow* /*win*/) {
             std::string err; rebuildCueList(app, err);
             app.insp_lastSel = -2;
         }
-
-        if (ImGui::MenuItem("Open…")) {
-            // Simple text-entry modal — native dialog deferred to future
-            ImGui::OpenPopup("Open Show File");
-        }
-
-        if (ImGui::MenuItem("Save", "Ctrl+S", false, !app.showPath.empty()))
+        // Set flags here; act on them AFTER EndMainMenuBar (menu popup stack
+        // must be closed before calling blocking tinyfd or ImGui::OpenPopup).
+        if (ImGui::MenuItem("Open…",    "Cmd+O")) app.wantOpenDlg   = true;
+        if (ImGui::MenuItem("Save",     "Cmd+S", false, !app.showPath.empty()))
             saveShow(app);
-
-        if (ImGui::MenuItem("Save As…"))
-            ImGui::OpenPopup("Save Show As");
-
+        if (ImGui::MenuItem("Save As…"))           app.wantSaveAsDlg = true;
         ImGui::Separator();
-        if (ImGui::MenuItem("Quit")) glfwSetWindowShouldClose(
-            glfwGetCurrentContext(), GLFW_TRUE);
-
+        if (ImGui::MenuItem("Quit"))
+            glfwSetWindowShouldClose(glfwGetCurrentContext(), GLFW_TRUE);
         ImGui::EndMenu();
     }
 
     if (ImGui::BeginMenu("Show")) {
-        if (app.sf.cueLists.empty() || app.sf.cueLists[0].cues.empty()) {
-            ImGui::TextDisabled("(no cues)");
-        } else {
-            if (ImGui::MenuItem("Title…"))
-                ImGui::OpenPopup("Edit Show Title");
-        }
+        if (ImGui::MenuItem("Title…")) app.wantTitleDlg = true;
         if (!app.engineOk)
             ImGui::TextColored(ImVec4(1,0.4f,0.4f,1), "  ⚠ No audio device");
         ImGui::EndMenu();
     }
 
-    // Right-align: engine status + dirty flag
+    // Right-align status
     {
         const char* marker = app.dirty ? " ●" : "";
         std::string right  = std::string(marker) + "  voices:" +
@@ -499,55 +492,53 @@ static void renderMenuBar(App& app, GLFWwindow* /*win*/) {
 
     ImGui::EndMainMenuBar();
 
-    // ---- Open file modal ---------------------------------------------------
-    ImGui::SetNextWindowSize(ImVec2(480, 0), ImGuiCond_Always);
-    if (ImGui::BeginPopupModal("Open Show File", nullptr,
-                               ImGuiWindowFlags_AlwaysAutoResize)) {
-        static char pathBuf[512] = {};
-        ImGui::SetNextItemWidth(440);
-        ImGui::InputText("Path", pathBuf, sizeof(pathBuf));
-        if (ImGui::Button("Open", ImVec2(80, 0))) {
+    // -----------------------------------------------------------------------
+    // Deferred actions — executed after the menu popup stack is fully closed.
+    // tinyfd calls block the main thread (audio keeps running on its thread).
+    // ImGui::OpenPopup must also be called outside any popup context.
+    // -----------------------------------------------------------------------
+
+    if (app.wantOpenDlg) {
+        app.wantOpenDlg = false;
+        const char* filters[] = {"*.json"};
+        const char* path = tinyfd_openFileDialog(
+            "Open Show File", app.showPath.c_str(), 1, filters, "JSON show files", 0);
+        if (path) {
             std::string err;
             mcp::ShowFile newSf;
-            if (newSf.load(pathBuf, err)) {
+            if (newSf.load(path, err)) {
                 app.cues.panic();
                 app.sf       = std::move(newSf);
-                app.showPath = pathBuf;
-                app.baseDir  = std::filesystem::path(pathBuf).parent_path().string();
+                app.showPath = path;
+                app.baseDir  = std::filesystem::path(path).parent_path().string();
                 app.dirty    = false;
                 app.insp_lastSel = -2;
                 rebuildCueList(app, err);
-                ImGui::CloseCurrentPopup();
             } else {
-                ImGui::OpenPopup("Open Error");
+                tinyfd_messageBox("Open failed", err.c_str(), "ok", "error", 1);
             }
-            // Show error inline if load failed
-            if (!err.empty()) ImGui::TextColored(ImVec4(1,0.3f,0.3f,1), "%s", err.c_str());
         }
-        ImGui::SameLine();
-        if (ImGui::Button("Cancel", ImVec2(80, 0))) ImGui::CloseCurrentPopup();
-        ImGui::EndPopup();
     }
 
-    // ---- Save As modal -----------------------------------------------------
-    ImGui::SetNextWindowSize(ImVec2(480, 0), ImGuiCond_Always);
-    if (ImGui::BeginPopupModal("Save Show As", nullptr,
-                               ImGuiWindowFlags_AlwaysAutoResize)) {
-        static char pathBuf[512] = {};
-        ImGui::SetNextItemWidth(440);
-        ImGui::InputText("Path", pathBuf, sizeof(pathBuf));
-        if (ImGui::Button("Save", ImVec2(80, 0))) {
-            app.showPath = pathBuf;
-            app.baseDir  = std::filesystem::path(pathBuf).parent_path().string();
+    if (app.wantSaveAsDlg) {
+        app.wantSaveAsDlg = false;
+        const char* filters[] = {"*.json"};
+        const char* path = tinyfd_saveFileDialog(
+            "Save Show As", app.showPath.empty() ? "show.json" : app.showPath.c_str(),
+            1, filters, "JSON show files");
+        if (path) {
+            app.showPath = path;
+            app.baseDir  = std::filesystem::path(path).parent_path().string();
             saveShow(app);
-            ImGui::CloseCurrentPopup();
         }
-        ImGui::SameLine();
-        if (ImGui::Button("Cancel", ImVec2(80, 0))) ImGui::CloseCurrentPopup();
-        ImGui::EndPopup();
     }
 
-    // ---- Edit title modal --------------------------------------------------
+    if (app.wantTitleDlg) {
+        app.wantTitleDlg = false;
+        ImGui::OpenPopup("Edit Show Title");
+    }
+
+    // ---- Edit title modal (only one needing a modal — others use tinyfd) ---
     ImGui::SetNextWindowSize(ImVec2(360, 0), ImGuiCond_Always);
     if (ImGui::BeginPopupModal("Edit Show Title", nullptr,
                                ImGuiWindowFlags_AlwaysAutoResize)) {
@@ -645,8 +636,10 @@ static void handleKeyboard(App& app) {
         app.cues.selectNext();
     if (ImGui::IsKeyPressed(ImGuiKey_UpArrow, false))
         app.cues.selectPrev();
-    if (ImGui::IsKeyPressed(ImGuiKey_S, false) && ImGui::GetIO().KeyMods == ImGuiMod_Super)
+    if (ImGui::IsKeyPressed(ImGuiKey_S, false) && (ImGui::GetIO().KeyMods & ImGuiMod_Super))
         saveShow(app);
+    if (ImGui::IsKeyPressed(ImGuiKey_O, false) && (ImGui::GetIO().KeyMods & ImGuiMod_Super))
+        app.wantOpenDlg = true;
 }
 
 // ---------------------------------------------------------------------------
