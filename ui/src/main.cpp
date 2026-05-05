@@ -84,6 +84,10 @@ struct App {
     bool wantOpenDlg   = false;
     bool wantSaveAsDlg = false;
     bool wantTitleDlg  = false;
+
+    // Drop notification: shown briefly after files are dragged in
+    std::string dropMsg;
+    double      dropMsgExpiry = 0.0;  // glfwGetTime() deadline
 };
 
 // ---------------------------------------------------------------------------
@@ -643,11 +647,61 @@ static void handleKeyboard(App& app) {
 }
 
 // ---------------------------------------------------------------------------
-// GLFW error callback
+// GLFW callbacks
 // ---------------------------------------------------------------------------
 
 static void glfwErrorCallback(int error, const char* desc) {
     std::fprintf(stderr, "GLFW error %d: %s\n", error, desc);
+}
+
+static void dropCallback(GLFWwindow* win, int count, const char** paths) {
+    App* app = static_cast<App*>(glfwGetWindowUserPointer(win));
+    if (!app) return;
+
+    int added = 0, failed = 0;
+
+    for (int i = 0; i < count; ++i) {
+        const std::filesystem::path absPath(paths[i]);
+
+        // Compute path to store in ShowFile: prefer relative to show base dir
+        std::string storePath = absPath.string();
+        if (!app->baseDir.empty()) {
+            std::error_code ec;
+            auto rel = std::filesystem::relative(absPath, app->baseDir, ec);
+            if (!ec && rel.string().substr(0, 2) != "..")
+                storePath = rel.string();
+        }
+
+        const std::string name = absPath.stem().string();
+
+        if (!app->cues.addCue(absPath.string(), name)) {
+            ++failed;
+            continue;
+        }
+
+        if (app->sf.cueLists.empty())
+            app->sf.cueLists.push_back({"main", "Main", {}});
+
+        mcp::ShowFile::CueData cd;
+        cd.type = "audio";
+        cd.path = storePath;
+        cd.name = name;
+        app->sf.cueLists[0].cues.push_back(cd);
+        app->dirty = true;
+        ++added;
+    }
+
+    // Build notification message
+    if (added > 0 || failed > 0) {
+        std::string msg;
+        if (added  > 0) msg += std::to_string(added)  + " cue(s) added";
+        if (failed > 0) {
+            if (!msg.empty()) msg += "  •  ";
+            msg += std::to_string(failed) + " failed (format/rate mismatch?)";
+        }
+        app->dropMsg       = std::move(msg);
+        app->dropMsgExpiry = glfwGetTime() + 3.0;
+    }
 }
 
 // ---------------------------------------------------------------------------
@@ -710,6 +764,10 @@ int main(int argc, char** argv) {
         app.sf = mcp::ShowFile::empty("Untitled Show");
     }
 
+    // Register drag-and-drop handler
+    glfwSetWindowUserPointer(win, &app);
+    glfwSetDropCallback(win, dropCallback);
+
     // ---- Render loop -------------------------------------------------------
     while (!glfwWindowShouldClose(win)) {
         glfwPollEvents();
@@ -754,6 +812,25 @@ int main(int argc, char** argv) {
         renderInspector(app);
 
         ImGui::End(); // ##main
+
+        // Drop notification toast
+        if (!app.dropMsg.empty() && glfwGetTime() < app.dropMsgExpiry) {
+            const ImGuiViewport* vp = ImGui::GetMainViewport();
+            ImGui::SetNextWindowPos(
+                ImVec2(vp->WorkPos.x + vp->WorkSize.x * 0.5f,
+                       vp->WorkPos.y + vp->WorkSize.y - 40.0f),
+                ImGuiCond_Always, ImVec2(0.5f, 1.0f));
+            ImGui::SetNextWindowBgAlpha(0.82f);
+            ImGui::Begin("##toast", nullptr,
+                ImGuiWindowFlags_NoDecoration | ImGuiWindowFlags_NoInputs |
+                ImGuiWindowFlags_NoNav | ImGuiWindowFlags_NoMove |
+                ImGuiWindowFlags_AlwaysAutoResize | ImGuiWindowFlags_NoSavedSettings |
+                ImGuiWindowFlags_NoFocusOnAppearing);
+            ImGui::TextColored(ImVec4(0.3f, 1.0f, 0.5f, 1.0f), "%s", app.dropMsg.c_str());
+            ImGui::End();
+        } else {
+            app.dropMsg.clear();
+        }
 
         renderAddDialog(app);
 
