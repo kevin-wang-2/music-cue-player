@@ -739,6 +739,47 @@ int main(int argc, char** argv) {
     style.Colors[ImGuiCol_TableRowBg]    = ImVec4(0.10f, 0.10f, 0.11f, 1.0f);
     style.Colors[ImGuiCol_TableRowBgAlt] = ImVec4(0.12f, 0.12f, 0.13f, 1.0f);
 
+    // ---- System font + HiDPI -----------------------------------------------
+    // Read the OS content scale (2.0 on Retina, 1.0 on standard displays).
+    float contentScale = 1.0f;
+    glfwGetWindowContentScale(win, &contentScale, nullptr);
+
+    // Try platform-specific system font paths, use first one that exists.
+    auto fontExists = [](const char* p) { return std::filesystem::exists(p); };
+    const char* fontPath = nullptr;
+#ifdef __APPLE__
+    if (fontExists("/System/Library/Fonts/SFNS.ttf"))
+        fontPath = "/System/Library/Fonts/SFNS.ttf";
+    else if (fontExists("/System/Library/Fonts/SFNSText.ttf"))
+        fontPath = "/System/Library/Fonts/SFNSText.ttf";
+    else if (fontExists("/System/Library/Fonts/Helvetica.ttc"))
+        fontPath = "/System/Library/Fonts/Helvetica.ttc";
+#elif defined(_WIN32)
+    if (fontExists("C:/Windows/Fonts/segoeui.ttf"))
+        fontPath = "C:/Windows/Fonts/segoeui.ttf";
+    else if (fontExists("C:/Windows/Fonts/arial.ttf"))
+        fontPath = "C:/Windows/Fonts/arial.ttf";
+#else
+    // Common Linux paths
+    if (fontExists("/usr/share/fonts/truetype/ubuntu/Ubuntu-R.ttf"))
+        fontPath = "/usr/share/fonts/truetype/ubuntu/Ubuntu-R.ttf";
+    else if (fontExists("/usr/share/fonts/truetype/dejavu/DejaVuSans.ttf"))
+        fontPath = "/usr/share/fonts/truetype/dejavu/DejaVuSans.ttf";
+    else if (fontExists("/usr/share/fonts/noto/NotoSans-Regular.ttf"))
+        fontPath = "/usr/share/fonts/noto/NotoSans-Regular.ttf";
+#endif
+
+    // Load at physical pixels so glyphs are sharp on HiDPI.
+    // ScaleAllSizes makes widget padding/spacing match.
+    const float fontSize = std::round(13.0f * contentScale);
+    if (fontPath)
+        io.Fonts->AddFontFromFileTTF(fontPath, fontSize);
+    else
+        io.Fonts->AddFontDefault();   // built-in fallback
+
+    if (contentScale > 1.0f)
+        style.ScaleAllSizes(contentScale);
+
     ImGui_ImplGlfw_InitForOpenGL(win, true);
     ImGui_ImplOpenGL3_Init("#version 330");
 
