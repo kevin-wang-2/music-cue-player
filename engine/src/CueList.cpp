@@ -1,7 +1,12 @@
 #include "engine/CueList.h"
 #include <algorithm>
+#include <cmath>
 
 namespace mcp {
+
+static float dBToLinear(double dB) {
+    return (dB <= -144.0) ? 0.0f : static_cast<float>(std::pow(10.0, dB / 20.0));
+}
 
 CueList::CueList(AudioEngine& engine, Scheduler& scheduler)
     : m_engine(engine), m_scheduler(scheduler) {}
@@ -87,6 +92,8 @@ const Cue* CueList::selectedCue() const { return cueAt(m_selectedIndex); }
 void CueList::setCuePreWait    (int i, double s)            { if (i>=0&&i<cueCount()) m_cues[i].preWaitSeconds = s; }
 void CueList::setCueStartTime  (int i, double s)            { if (i>=0&&i<cueCount()) m_cues[i].startTime      = s; }
 void CueList::setCueDuration   (int i, double s)            { if (i>=0&&i<cueCount()) m_cues[i].duration       = s; }
+void CueList::setCueLevel       (int i, double dB)           { if (i>=0&&i<cueCount()) m_cues[i].level          = dB; }
+void CueList::setCueTrim        (int i, double dB)           { if (i>=0&&i<cueCount()) m_cues[i].trim           = dB; }
 void CueList::setCueAutoContinue(int i, bool v)             { if (i>=0&&i<cueCount()) m_cues[i].autoContinue   = v; }
 void CueList::setCueAutoFollow  (int i, bool v)             { if (i>=0&&i<cueCount()) m_cues[i].autoFollow      = v; }
 void CueList::setCueName        (int i, const std::string& n){ if (i>=0&&i<cueCount()) m_cues[i].name          = n; }
@@ -117,9 +124,10 @@ bool CueList::scheduleVoice(int cueIndex) {
     const int64_t playFrames = voiceFrames(cue);
     if (playFrames <= 0) return false;
 
+    const float gain = dBToLinear(cue.level + cue.trim);
     const int slot = m_engine.scheduleVoice(
         cue.audioFile.samples().data() + startFrame * meta.channels,
-        playFrames, meta.channels, cueIndex);
+        playFrames, meta.channels, cueIndex, gain);
     if (slot < 0) return false;
 
     std::lock_guard<std::mutex> lk(m_slotMutex);

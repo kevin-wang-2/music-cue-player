@@ -24,6 +24,8 @@ static ShowFile::CueData parseCue(const json& j) {
     c.preWait         = jget<double>     (j, "preWait",         0.0);
     c.startTime       = jget<double>     (j, "startTime",       0.0);
     c.duration        = jget<double>     (j, "duration",        0.0);
+    c.level           = jget<double>     (j, "level",           0.0);
+    c.trim            = jget<double>     (j, "trim",            0.0);
     c.autoContinue    = jget<bool>       (j, "autoContinue",    false);
     c.autoFollow      = jget<bool>       (j, "autoFollow",      false);
     return c;
@@ -39,6 +41,8 @@ static json cueToJson(const ShowFile::CueData& c) {
         j["path"] = c.path;
         if (c.startTime != 0.0) j["startTime"] = c.startTime;
         if (c.duration  != 0.0) j["duration"]  = c.duration;
+        if (c.level     != 0.0) j["level"]     = c.level;
+        if (c.trim      != 0.0) j["trim"]      = c.trim;
     } else {
         j["target"]          = c.target;
         j["targetCueNumber"] = c.targetCueNumber;

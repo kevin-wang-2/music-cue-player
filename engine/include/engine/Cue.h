@@ -26,6 +26,10 @@ struct Cue {
     double startTime{0.0};   // seconds offset into the file (0 = from start)
     double duration{0.0};    // seconds to play (0 = to end of file)
 
+    // Gain (Audio cues only, dB; 0 = unity)
+    double level{0.0};   // output fader
+    double trim{0.0};    // fine trim on top of level
+
     // Post-trigger behaviour (all types)
     // autoContinue: immediately also trigger the next go() when this cue fires.
     //   Cascades: consecutive cues with autoContinue all fire from the same

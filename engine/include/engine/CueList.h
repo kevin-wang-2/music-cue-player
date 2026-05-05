@@ -69,6 +69,8 @@ public:
     void setCuePreWait    (int index, double seconds);
     void setCueStartTime  (int index, double seconds);   // audio cues only
     void setCueDuration   (int index, double seconds);   // audio cues only; 0=to end
+    void setCueLevel      (int index, double dB);        // audio cues only; 0=unity
+    void setCueTrim       (int index, double dB);        // audio cues only; 0=no trim
     void setCueAutoContinue(int index, bool enable);
     void setCueAutoFollow  (int index, bool enable);
     void setCueName       (int index, const std::string& name);

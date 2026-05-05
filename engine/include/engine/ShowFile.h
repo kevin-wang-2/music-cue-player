@@ -47,6 +47,9 @@ struct ShowFile {
         // Audio cues: playback region (0 = default = start/end of file)
         double      startTime{0.0};
         double      duration{0.0};
+        // Audio cues: gain (dB; 0 = unity)
+        double      level{0.0};
+        double      trim{0.0};
     };
 
     // ---- Cue list ----------------------------------------------------------

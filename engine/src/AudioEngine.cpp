@@ -15,13 +15,17 @@ struct VoiceSlot {
         int64_t      totalFrames{0};
         int          channels{0};
         int          tag{-1};
+        float        gain{1.0f};
     } pending;
 
-    std::atomic<bool> pendingReady{false};
-    std::atomic<bool> pendingClear{false};
+    std::atomic<bool>  pendingReady{false};
+    std::atomic<bool>  pendingClear{false};
 
-    // Written by audio thread at activation; activeTag and startEngineFrame
-    // are readable by the main thread for queries.
+    // gain is written by the main thread (setVoiceGain) and read by the audio
+    // thread every callback; atomic<float> provides the necessary ordering.
+    std::atomic<float> gain{1.0f};
+
+    // Written by audio thread at activation; readable by the main thread.
     const float*      samples{nullptr};
     int64_t           totalFrames{0};
     int               channels{0};
@@ -79,10 +83,11 @@ static int paCallback(const void* /*input*/, void* output,
         // Apply pending voice — voice starts at the first sample of this buffer.
         // The start is recorded in engine time so it stays valid across devices.
         if (v.pendingReady.load(std::memory_order_acquire)) {
-            v.samples         = v.pending.samples;
-            v.totalFrames     = v.pending.totalFrames;
-            v.channels        = v.pending.channels;
+            v.samples          = v.pending.samples;
+            v.totalFrames      = v.pending.totalFrames;
+            v.channels         = v.pending.channels;
             v.startEngineFrame = engStart;
+            v.gain.store(v.pending.gain, std::memory_order_relaxed);
             v.activeTag.store(v.pending.tag, std::memory_order_relaxed);
             v.active.store(true, std::memory_order_relaxed);
             v.pendingReady.store(false, std::memory_order_release);
@@ -107,10 +112,11 @@ static int paCallback(const void* /*input*/, void* output,
         const int64_t remaining = v.totalFrames - localStart;
         const int64_t toRead    = std::min(static_cast<int64_t>(frameCount), remaining);
 
-        const float* src = v.samples + localStart * v.channels;
+        const float* src  = v.samples + localStart * v.channels;
+        const float  gain = v.gain.load(std::memory_order_relaxed);
         for (int64_t f = 0; f < toRead; ++f)
             for (int ch = 0; ch < impl->outChannels; ++ch)
-                out[f * impl->outChannels + ch] += src[f * v.channels + ch];
+                out[f * impl->outChannels + ch] += src[f * v.channels + ch] * gain;
 
         if (toRead < static_cast<int64_t>(frameCount))
             v.active.store(false, std::memory_order_release);
@@ -168,16 +174,21 @@ int  AudioEngine::sampleRate()    const { return m_impl->sampleRate; }
 int  AudioEngine::channels()      const { return m_impl->outChannels; }
 
 int AudioEngine::scheduleVoice(const float* samples, int64_t totalFrames,
-                                int voiceChannels, int tag) {
+                                int voiceChannels, int tag, float gain) {
     for (int i = 0; i < kMaxVoices; ++i) {
         auto& v = m_impl->voices[i];
         if (v.active.load(std::memory_order_relaxed))       continue;
         if (v.pendingReady.load(std::memory_order_relaxed)) continue;
-        v.pending = {samples, totalFrames, voiceChannels, tag};
+        v.pending = {samples, totalFrames, voiceChannels, tag, gain};
         v.pendingReady.store(true, std::memory_order_release);
         return i;
     }
     return -1;
+}
+
+void AudioEngine::setVoiceGain(int slotId, float gain) {
+    if (slotId < 0 || slotId >= kMaxVoices) return;
+    m_impl->voices[slotId].gain.store(gain, std::memory_order_relaxed);
 }
 
 void AudioEngine::clearVoice(int slotId) {

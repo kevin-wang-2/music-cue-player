@@ -54,9 +54,14 @@ public:
     // Schedule a voice in the first free slot. Returns the slot ID [0, kMaxVoices)
     // or -1 if the pool is full. The caller must keep `samples` alive until the
     // voice finishes or is explicitly cleared.
-    // `tag` is an arbitrary identifier (e.g., cue index) used for bulk operations.
+    // `tag`  — arbitrary identifier (e.g., cue index) used for bulk operations.
+    // `gain` — linear amplitude gain applied every sample (1.0 = unity).
     int scheduleVoice(const float* samples, int64_t totalFrames,
-                      int voiceChannels, int tag = -1);
+                      int voiceChannels, int tag = -1, float gain = 1.0f);
+
+    // Update the gain of a running voice. Safe to call from the main thread
+    // while the audio thread is running (atomic store, no locking).
+    void setVoiceGain(int slotId, float gain);
 
     void clearVoice(int slotId);
     void clearVoicesByTag(int tag);

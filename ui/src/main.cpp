@@ -12,6 +12,7 @@
 #include <GLFW/glfw3.h>
 
 #include <algorithm>
+#include <cmath>
 #include <cstdio>
 #include <cstring>
 #include <filesystem>
@@ -21,6 +22,10 @@
 // ---------------------------------------------------------------------------
 // Helpers
 // ---------------------------------------------------------------------------
+
+static float dBToLinear(double dB) {
+    return (dB <= -144.0) ? 0.0f : static_cast<float>(std::pow(10.0, dB / 20.0));
+}
 
 static std::string fmtDuration(double s) {
     if (s <= 0.0) return "--:--";
@@ -77,6 +82,8 @@ struct App {
     float    insp_preWait     = 0.0f;
     float    insp_startTime   = 0.0f;
     float    insp_duration    = 0.0f;
+    float    insp_level       = 0.0f;   // dB
+    float    insp_trim        = 0.0f;   // dB
     bool     insp_ac          = false;
     bool     insp_af          = false;
     int      insp_lastSel     = -2;  // force refresh on first frame
@@ -159,6 +166,8 @@ static bool rebuildCueList(App& app, std::string& err) {
             app.cues.setCueCueNumber  (i, cd.cueNumber);
             app.cues.setCueStartTime  (i, cd.startTime);
             app.cues.setCueDuration   (i, cd.duration);
+            app.cues.setCueLevel      (i, cd.level);
+            app.cues.setCueTrim       (i, cd.trim);
             app.cues.setCueAutoContinue(i, cd.autoContinue);
             app.cues.setCueAutoFollow  (i, cd.autoFollow);
         } else if (cd.type == "audio") {
@@ -188,6 +197,8 @@ static void syncSfFromCues(App& app) {
         cds[i].preWait      = c->preWaitSeconds;
         cds[i].startTime    = c->startTime;
         cds[i].duration     = c->duration;
+        cds[i].level        = c->level;
+        cds[i].trim         = c->trim;
         cds[i].autoContinue = c->autoContinue;
         cds[i].autoFollow   = c->autoFollow;
     }
@@ -226,6 +237,8 @@ static void renderInspector(App& app) {
         app.insp_preWait   = static_cast<float>(c->preWaitSeconds);
         app.insp_startTime = static_cast<float>(c->startTime);
         app.insp_duration  = static_cast<float>(c->duration);
+        app.insp_level     = static_cast<float>(c->level);
+        app.insp_trim      = static_cast<float>(c->trim);
         app.insp_ac        = c->autoContinue;
         app.insp_af        = c->autoFollow;
         app.insp_lastSel   = sel;
@@ -282,6 +295,90 @@ static void renderInspector(App& app) {
         ImGui::TextDisabled("File: %s", c->path.c_str());
         ImGui::SetCursorPosX(8);
         ImGui::TextDisabled("Total: %s", fmtDuration(app.cues.cueTotalSeconds(sel)).c_str());
+
+        // ---- Level & Trim faders ----
+        ImGui::Spacing();
+        ImGui::Separator();
+        ImGui::Spacing();
+
+        // Helper: format a dB value for display
+        auto fmtdB = [](float dB, char* buf, int sz) {
+            if (dB <= -59.9f) std::snprintf(buf, sz, "-inf");
+            else              std::snprintf(buf, sz, "%+.1f", static_cast<double>(dB));
+        };
+
+        constexpr float kFaderW = 30.0f;
+        constexpr float kFaderH = 90.0f;
+        constexpr float kFaderMin = -60.0f;
+        constexpr float kFaderMax = 10.0f;
+
+        // Level fader
+        ImGui::SetCursorPosX(8);
+        ImGui::BeginGroup();
+        ImGui::TextDisabled("Level");
+        if (ImGui::VSliderFloat("##level", ImVec2(kFaderW, kFaderH),
+                                &app.insp_level, kFaderMin, kFaderMax, "")) {
+            app.cues.setCueLevel(sel, app.insp_level);
+            // Live gain update if the cue is currently playing
+            const int slot = app.cues.cueVoiceSlot(sel);
+            if (slot >= 0 && app.engine.isVoiceActive(slot))
+                app.engine.setVoiceGain(slot, dBToLinear(app.insp_level + app.insp_trim));
+            syncSfFromCues(app);
+        }
+        if (ImGui::IsItemHovered())
+            ImGui::SetTooltip("Output level fader\nDrag or double-click to reset");
+        if (ImGui::IsItemHovered() && ImGui::IsMouseDoubleClicked(0)) {
+            app.insp_level = 0.0f;
+            app.cues.setCueLevel(sel, 0.0);
+            const int slot = app.cues.cueVoiceSlot(sel);
+            if (slot >= 0 && app.engine.isVoiceActive(slot))
+                app.engine.setVoiceGain(slot, dBToLinear(0.0 + app.insp_trim));
+            syncSfFromCues(app);
+        }
+        char lvlBuf[16]; fmtdB(app.insp_level, lvlBuf, sizeof(lvlBuf));
+        ImGui::TextDisabled("%s dB", lvlBuf);
+        ImGui::EndGroup();
+
+        ImGui::SameLine(0, 16);
+
+        // Trim fader
+        ImGui::BeginGroup();
+        ImGui::TextDisabled("Trim");
+        if (ImGui::VSliderFloat("##trim", ImVec2(kFaderW, kFaderH),
+                                &app.insp_trim, kFaderMin, kFaderMax, "")) {
+            app.cues.setCueTrim(sel, app.insp_trim);
+            const int slot = app.cues.cueVoiceSlot(sel);
+            if (slot >= 0 && app.engine.isVoiceActive(slot))
+                app.engine.setVoiceGain(slot, dBToLinear(app.insp_level + app.insp_trim));
+            syncSfFromCues(app);
+        }
+        if (ImGui::IsItemHovered())
+            ImGui::SetTooltip("Fine trim on top of level\nDrag or double-click to reset");
+        if (ImGui::IsItemHovered() && ImGui::IsMouseDoubleClicked(0)) {
+            app.insp_trim = 0.0f;
+            app.cues.setCueTrim(sel, 0.0);
+            const int slot = app.cues.cueVoiceSlot(sel);
+            if (slot >= 0 && app.engine.isVoiceActive(slot))
+                app.engine.setVoiceGain(slot, dBToLinear(app.insp_level + 0.0));
+            syncSfFromCues(app);
+        }
+        char trmBuf[16]; fmtdB(app.insp_trim, trmBuf, sizeof(trmBuf));
+        ImGui::TextDisabled("%s dB", trmBuf);
+        ImGui::EndGroup();
+
+        ImGui::SameLine(0, 24);
+
+        // Combined gain display
+        ImGui::BeginGroup();
+        ImGui::Spacing();
+        const float combined = app.insp_level + app.insp_trim;
+        char cmbBuf[24];
+        if (combined <= -59.9f) std::snprintf(cmbBuf, sizeof(cmbBuf), "-inf dB");
+        else std::snprintf(cmbBuf, sizeof(cmbBuf), "%+.1f dB", static_cast<double>(combined));
+        ImGui::TextDisabled("Combined");
+        ImGui::Text("%s", cmbBuf);
+        ImGui::EndGroup();
+
     } else {
         const mcp::Cue* tc = app.cues.cueAt(c->targetIndex);
         ImGui::SameLine(0, 20);
