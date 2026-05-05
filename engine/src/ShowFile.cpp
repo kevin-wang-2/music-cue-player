@@ -15,29 +15,33 @@ static T jget(const json& j, const char* key, T def) {
 
 static ShowFile::CueData parseCue(const json& j) {
     ShowFile::CueData c;
-    c.type         = jget<std::string>(j, "type",         "");
-    c.name         = jget<std::string>(j, "name",         "");
-    c.path         = jget<std::string>(j, "path",         "");
-    c.target       = jget<int>        (j, "target",       -1);
-    c.preWait      = jget<double>     (j, "preWait",      0.0);
-    c.startTime    = jget<double>     (j, "startTime",    0.0);
-    c.duration     = jget<double>     (j, "duration",     0.0);
-    c.autoContinue = jget<bool>       (j, "autoContinue", false);
-    c.autoFollow   = jget<bool>       (j, "autoFollow",   false);
+    c.type            = jget<std::string>(j, "type",            "");
+    c.cueNumber       = jget<std::string>(j, "cueNumber",       "");
+    c.name            = jget<std::string>(j, "name",            "");
+    c.path            = jget<std::string>(j, "path",            "");
+    c.target          = jget<int>        (j, "target",          -1);
+    c.targetCueNumber = jget<std::string>(j, "targetCueNumber", "");
+    c.preWait         = jget<double>     (j, "preWait",         0.0);
+    c.startTime       = jget<double>     (j, "startTime",       0.0);
+    c.duration        = jget<double>     (j, "duration",        0.0);
+    c.autoContinue    = jget<bool>       (j, "autoContinue",    false);
+    c.autoFollow      = jget<bool>       (j, "autoFollow",      false);
     return c;
 }
 
 static json cueToJson(const ShowFile::CueData& c) {
     json j;
-    j["type"]    = c.type;
-    j["name"]    = c.name;
-    j["preWait"] = c.preWait;
+    j["type"]      = c.type;
+    j["cueNumber"] = c.cueNumber;
+    j["name"]      = c.name;
+    j["preWait"]   = c.preWait;
     if (c.type == "audio") {
         j["path"] = c.path;
         if (c.startTime != 0.0) j["startTime"] = c.startTime;
         if (c.duration  != 0.0) j["duration"]  = c.duration;
     } else {
-        j["target"] = c.target;
+        j["target"]          = c.target;
+        j["targetCueNumber"] = c.targetCueNumber;
     }
     if (c.autoContinue) j["autoContinue"] = true;
     if (c.autoFollow)   j["autoFollow"]   = true;

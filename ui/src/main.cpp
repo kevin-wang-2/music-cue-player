@@ -49,12 +49,12 @@ static ImVec4 typeColor(const std::string& t) {
 // ---------------------------------------------------------------------------
 
 struct AddDialog {
-    bool     open      = false;
-    int      type      = 0;          // 0=audio 1=start 2=stop
-    char     path[512] = {};
-    char     name[256] = {};
-    float    preWait   = 0.0f;
-    int      target    = 0;
+    bool  open          = false;
+    int   type          = 0;     // 0=audio 1=start 2=stop
+    char  path[512]     = {};
+    char  name[256]     = {};
+    float preWait       = 0.0f;
+    char  targetCueNum[32] = {}; // user types a cue number here (start/stop)
     std::string errorMsg;
 };
 
@@ -72,13 +72,14 @@ struct App {
     std::string      engineError;
 
     // Inspector editing buffers (for selected cue)
-    char     insp_name[256]  = {};
-    float    insp_preWait    = 0.0f;
-    float    insp_startTime  = 0.0f;
-    float    insp_duration   = 0.0f;
-    bool     insp_ac         = false;
-    bool     insp_af         = false;
-    int      insp_lastSel    = -2;  // force refresh on first frame
+    char     insp_cueNum[32]  = {};
+    char     insp_name[256]   = {};
+    float    insp_preWait     = 0.0f;
+    float    insp_startTime   = 0.0f;
+    float    insp_duration    = 0.0f;
+    bool     insp_ac          = false;
+    bool     insp_af          = false;
+    int      insp_lastSel     = -2;  // force refresh on first frame
 
     AddDialog addDlg;
     bool wantOpenDlg   = false;
@@ -91,15 +92,53 @@ struct App {
 };
 
 // ---------------------------------------------------------------------------
+// Cue-number helpers
+// ---------------------------------------------------------------------------
+
+// Return the first "1", "2", "3", ... string not already used as a cue number.
+static std::string nextCueNumber(const mcp::ShowFile& sf) {
+    const auto& cues = sf.cueLists.empty() ? std::vector<mcp::ShowFile::CueData>{} : sf.cueLists[0].cues;
+    int n = 1;
+    while (true) {
+        std::string candidate = std::to_string(n);
+        bool taken = false;
+        for (const auto& cd : cues)
+            if (cd.cueNumber == candidate) { taken = true; break; }
+        if (!taken) return candidate;
+        ++n;
+    }
+}
+
+// Find array index of the cue whose cueNumber == num; returns -1 if not found or num is empty.
+static int findCueByNumber(const mcp::ShowFile& sf, const std::string& num) {
+    if (num.empty() || sf.cueLists.empty()) return -1;
+    for (int i = 0; i < (int)sf.cueLists[0].cues.size(); ++i)
+        if (sf.cueLists[0].cues[i].cueNumber == num) return i;
+    return -1;
+}
+
+// ---------------------------------------------------------------------------
 // Show file helpers
 // ---------------------------------------------------------------------------
 
 static bool rebuildCueList(App& app, std::string& err) {
     app.cues.clear();
     if (app.sf.cueLists.empty()) return true;
+    auto& cds  = app.sf.cueLists[0].cues;
     const auto base = std::filesystem::path(app.baseDir);
-    for (int i = 0; i < (int)app.sf.cueLists[0].cues.size(); ++i) {
-        const auto& cd = app.sf.cueLists[0].cues[i];
+
+    // Pass 1: for start/stop cues, resolve targetCueNumber → target index if needed.
+    // Empty cue numbers are intentionally preserved — they are valid but cannot be referenced.
+    for (auto& cd : cds) {
+        if ((cd.type == "start" || cd.type == "stop") && !cd.targetCueNumber.empty()) {
+            int idx = findCueByNumber(app.sf, cd.targetCueNumber);
+            if (idx >= 0) cd.target = idx;
+        }
+    }
+
+    // Pass 2: build CueList.
+    for (int i = 0; i < (int)cds.size(); ++i) {
+        const auto& cd = cds[i];
         bool ok = true;
         if (cd.type == "audio") {
             auto p = std::filesystem::path(cd.path);
@@ -111,12 +150,13 @@ static bool rebuildCueList(App& app, std::string& err) {
             app.cues.addStopCue(cd.target, cd.name, cd.preWait);
         }
         if (ok) {
+            app.cues.setCueCueNumber  (i, cd.cueNumber);
             app.cues.setCueStartTime  (i, cd.startTime);
             app.cues.setCueDuration   (i, cd.duration);
             app.cues.setCueAutoContinue(i, cd.autoContinue);
             app.cues.setCueAutoFollow  (i, cd.autoFollow);
         } else if (cd.type == "audio") {
-            err += "  [" + std::to_string(i) + "] failed: " + cd.path + "\n";
+            err += "  [" + cd.cueNumber + "] failed: " + cd.path + "\n";
         }
     }
     return true;
@@ -137,6 +177,7 @@ static void syncSfFromCues(App& app) {
     for (int i = 0; i < app.cues.cueCount() && i < (int)cds.size(); ++i) {
         const auto* c = app.cues.cueAt(i);
         if (!c) continue;
+        cds[i].cueNumber    = c->cueNumber;
         cds[i].name         = c->name;
         cds[i].preWait      = c->preWaitSeconds;
         cds[i].startTime    = c->startTime;
@@ -174,7 +215,8 @@ static void renderInspector(App& app) {
 
     // Refresh editing buffers when selection changes
     if (app.insp_lastSel != sel) {
-        std::strncpy(app.insp_name, c->name.c_str(), sizeof(app.insp_name) - 1);
+        std::strncpy(app.insp_cueNum, c->cueNumber.c_str(), sizeof(app.insp_cueNum) - 1);
+        std::strncpy(app.insp_name,   c->name.c_str(),      sizeof(app.insp_name)   - 1);
         app.insp_preWait   = static_cast<float>(c->preWaitSeconds);
         app.insp_startTime = static_cast<float>(c->startTime);
         app.insp_duration  = static_cast<float>(c->duration);
@@ -183,8 +225,21 @@ static void renderInspector(App& app) {
         app.insp_lastSel   = sel;
     }
 
+    const char* typeStr = c->type == mcp::CueType::Audio ? "audio"
+                        : c->type == mcp::CueType::Start ? "start" : "stop";
+
+    // Row 1: Q number | Name | type badge
     ImGui::SetCursorPosX(8);
-    ImGui::SetNextItemWidth(280);
+    ImGui::SetNextItemWidth(60);
+    if (ImGui::InputText("##cuenum", app.insp_cueNum, sizeof(app.insp_cueNum),
+                         ImGuiInputTextFlags_EnterReturnsTrue)) {
+        app.cues.setCueCueNumber(sel, app.insp_cueNum);
+        syncSfFromCues(app);
+    }
+    if (ImGui::IsItemHovered()) ImGui::SetTooltip("Cue number (user-visible, editable)");
+
+    ImGui::SameLine(0, 8);
+    ImGui::SetNextItemWidth(240);
     if (ImGui::InputText("Name", app.insp_name, sizeof(app.insp_name),
                          ImGuiInputTextFlags_EnterReturnsTrue)) {
         app.cues.setCueName(sel, app.insp_name);
@@ -192,11 +247,7 @@ static void renderInspector(App& app) {
     }
 
     ImGui::SameLine();
-    ImGui::TextColored(typeColor(c->type == mcp::CueType::Audio ? "audio"
-                                 : c->type == mcp::CueType::Start ? "start" : "stop"),
-                       "  [%s]",
-                       c->type == mcp::CueType::Audio ? "audio"
-                       : c->type == mcp::CueType::Start ? "start" : "stop");
+    ImGui::TextColored(typeColor(typeStr), "  [%s]", typeStr);
 
     ImGui::Spacing();
     ImGui::SetCursorPosX(8);
@@ -228,8 +279,10 @@ static void renderInspector(App& app) {
     } else {
         const mcp::Cue* tc = app.cues.cueAt(c->targetIndex);
         ImGui::SameLine(0, 20);
-        ImGui::TextDisabled("→ [%d] %s", c->targetIndex,
-                            tc ? tc->name.c_str() : "?");
+        if (tc)
+            ImGui::TextDisabled("→ Q%s  \"%s\"", tc->cueNumber.c_str(), tc->name.c_str());
+        else
+            ImGui::TextDisabled("→ (unresolved)");
     }
 
     ImGui::Spacing();
@@ -287,11 +340,22 @@ static void renderAddDialog(App& app) {
         ImGui::InputText("File path", app.addDlg.path, sizeof(app.addDlg.path));
         ImGui::TextDisabled("  Tip: path relative to show file, or absolute");
     } else {
-        const int n = app.cues.cueCount();
-        ImGui::SetNextItemWidth(80);
-        ImGui::InputInt("Target cue #", &app.addDlg.target);
-        app.addDlg.target = std::clamp(app.addDlg.target, 0, std::max(0, n - 1));
-        if (n == 0) ImGui::TextColored(ImVec4(1,0.5f,0,1), "  No cues to target yet");
+        ImGui::SetNextItemWidth(120);
+        ImGui::InputText("Target cue number", app.addDlg.targetCueNum,
+                         sizeof(app.addDlg.targetCueNum));
+        // Show which cue would be targeted
+        if (app.addDlg.targetCueNum[0]) {
+            int idx = findCueByNumber(app.sf, app.addDlg.targetCueNum);
+            if (idx >= 0) {
+                const mcp::Cue* tc = app.cues.cueAt(idx);
+                ImGui::SameLine();
+                ImGui::TextColored(ImVec4(0.4f,1,0.4f,1), "→ \"%s\"",
+                                   tc ? tc->name.c_str() : "?");
+            } else {
+                ImGui::SameLine();
+                ImGui::TextColored(ImVec4(1,0.4f,0.4f,1), "not found");
+            }
+        }
     }
 
     ImGui::SetNextItemWidth(260);
@@ -306,6 +370,9 @@ static void renderAddDialog(App& app) {
     if (ImGui::Button("Add", ImVec2(80, 0))) {
         app.addDlg.errorMsg.clear();
         mcp::ShowFile::CueData cd;
+
+        // Auto-assign next cue number for the new cue
+        cd.cueNumber = nextCueNumber(app.sf);
 
         if (app.addDlg.type == 0) {
             cd.type = "audio";
@@ -323,16 +390,28 @@ static void renderAddDialog(App& app) {
                 app.addDlg.errorMsg = "Could not load audio file (check path/format)";
                 goto done;
             }
+            const int newIdx = app.cues.cueCount() - 1;
+            app.cues.setCueCueNumber(newIdx, cd.cueNumber);
         } else {
-            cd.type    = (app.addDlg.type == 1) ? "start" : "stop";
-            cd.target  = app.addDlg.target;
-            cd.name    = app.addDlg.name[0] ? app.addDlg.name
-                         : (cd.type + "(" + std::to_string(cd.target) + ")");
-            cd.preWait = app.addDlg.preWait;
+            // Resolve target cue number → array index
+            const std::string tnum(app.addDlg.targetCueNum);
+            int tIdx = tnum.empty() ? -1 : findCueByNumber(app.sf, tnum);
+            if (!tnum.empty() && tIdx < 0) {
+                app.addDlg.errorMsg = "Cue number \"" + tnum + "\" not found";
+                goto done;
+            }
+            cd.type             = (app.addDlg.type == 1) ? "start" : "stop";
+            cd.target           = tIdx;
+            cd.targetCueNumber  = tnum;
+            cd.name             = app.addDlg.name[0] ? app.addDlg.name
+                                  : (cd.type + "(Q" + tnum + ")");
+            cd.preWait          = app.addDlg.preWait;
             if (cd.type == "start")
                 app.cues.addStartCue(cd.target, cd.name, cd.preWait);
             else
                 app.cues.addStopCue (cd.target, cd.name, cd.preWait);
+            const int newIdx = app.cues.cueCount() - 1;
+            app.cues.setCueCueNumber(newIdx, cd.cueNumber);
         }
 
         if (app.sf.cueLists.empty()) app.sf.cueLists.push_back({"main", "Main", {}});
@@ -340,8 +419,9 @@ static void renderAddDialog(App& app) {
         app.dirty = true;
 
         // Reset dialog fields
-        std::memset(app.addDlg.path, 0, sizeof(app.addDlg.path));
-        std::memset(app.addDlg.name, 0, sizeof(app.addDlg.name));
+        std::memset(app.addDlg.path,         0, sizeof(app.addDlg.path));
+        std::memset(app.addDlg.name,         0, sizeof(app.addDlg.name));
+        std::memset(app.addDlg.targetCueNum, 0, sizeof(app.addDlg.targetCueNum));
         app.addDlg.preWait = 0.0f;
         ImGui::CloseCurrentPopup();
     }
@@ -396,10 +476,11 @@ static void renderCueTable(App& app) {
             ImGui::TableSetBgColor(ImGuiTableBgTarget_RowBg0,
                                    IM_COL32(90, 70, 10, 120));
 
-        // Column 0: index + selection arrow
+        // Column 0: cue number (user-visible) + selection arrow
         ImGui::TableSetColumnIndex(0);
-        if (isSel) ImGui::TextColored(ImVec4(1,0.85f,0,1), "▶ %d", i);
-        else        ImGui::Text("   %d", i);
+        const char* qn = c->cueNumber.empty() ? "-" : c->cueNumber.c_str();
+        if (isSel) ImGui::TextColored(ImVec4(1,0.85f,0,1), "▶ %s", qn);
+        else        ImGui::TextDisabled("  %s", qn);
 
         // Column 1: type badge
         ImGui::TableSetColumnIndex(1);
@@ -769,16 +850,17 @@ int main(int argc, char** argv) {
         fontPath = "/usr/share/fonts/noto/NotoSans-Regular.ttf";
 #endif
 
-    // Load at physical pixels so glyphs are sharp on HiDPI.
-    // ScaleAllSizes makes widget padding/spacing match.
+    // Load font at physical pixel size so glyphs are sharp on HiDPI.
+    // FontGlobalScale maps those physical pixels back to logical pixels,
+    // keeping widget layout sizes unchanged (no ScaleAllSizes needed).
     const float fontSize = std::round(13.0f * contentScale);
     if (fontPath)
         io.Fonts->AddFontFromFileTTF(fontPath, fontSize);
     else
-        io.Fonts->AddFontDefault();   // built-in fallback
+        io.Fonts->AddFontDefault();
 
     if (contentScale > 1.0f)
-        style.ScaleAllSizes(contentScale);
+        io.FontGlobalScale = 1.0f / contentScale;
 
     ImGui_ImplGlfw_InitForOpenGL(win, true);
     ImGui_ImplOpenGL3_Init("#version 330");

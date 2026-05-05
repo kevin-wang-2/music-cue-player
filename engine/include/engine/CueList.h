@@ -72,6 +72,7 @@ public:
     void setCueAutoContinue(int index, bool enable);
     void setCueAutoFollow  (int index, bool enable);
     void setCueName       (int index, const std::string& name);
+    void setCueCueNumber  (int index, const std::string& number);
 
     // --- Playback controls --------------------------------------------------
 

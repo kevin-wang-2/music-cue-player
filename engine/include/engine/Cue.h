@@ -9,6 +9,7 @@ enum class CueType { Audio, Start, Stop };
 
 struct Cue {
     CueType     type{CueType::Audio};
+    std::string cueNumber;   // user-visible Q number (e.g. "1", "2", "1a") — separate from array index
     std::string name;
 
     // Audio cues

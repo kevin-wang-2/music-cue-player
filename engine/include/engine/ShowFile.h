@@ -33,11 +33,13 @@ struct ShowFile {
     // ---- Cue data ----------------------------------------------------------
     struct CueData {
         std::string type;         // "audio" | "start" | "stop" | … (extensible)
+        std::string cueNumber;    // user-visible Q number ("1", "2", "1a", …) — independent of array index
         std::string name;
         // Audio cues
         std::string path;         // relative to the show file's directory
         // Start / Stop cues
-        int         target{-1};  // index into the same cue list
+        int         target{-1};         // resolved array index (internal)
+        std::string targetCueNumber;    // user-visible reference stored in file
         // All types
         double      preWait{0.0};
         bool        autoContinue{false};

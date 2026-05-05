@@ -90,6 +90,7 @@ void CueList::setCueDuration   (int i, double s)            { if (i>=0&&i<cueCou
 void CueList::setCueAutoContinue(int i, bool v)             { if (i>=0&&i<cueCount()) m_cues[i].autoContinue   = v; }
 void CueList::setCueAutoFollow  (int i, bool v)             { if (i>=0&&i<cueCount()) m_cues[i].autoFollow      = v; }
 void CueList::setCueName        (int i, const std::string& n){ if (i>=0&&i<cueCount()) m_cues[i].name          = n; }
+void CueList::setCueCueNumber   (int i, const std::string& n){ if (i>=0&&i<cueCount()) m_cues[i].cueNumber     = n; }
 
 // ---------------------------------------------------------------------------
 // Internal helpers
