@@ -27,6 +27,7 @@ bool CueList::addCue(const std::string& path, const std::string& name,
     m_cues.push_back(std::move(cue));
     std::lock_guard<std::mutex> lk(m_slotMutex);
     m_lastSlot.push_back(-1);
+    m_pendingEventId.push_back(-1);
     return true;
 }
 
@@ -41,6 +42,7 @@ bool CueList::addStartCue(int targetIndex, const std::string& name, double preWa
     m_cues.push_back(std::move(cue));
     std::lock_guard<std::mutex> lk(m_slotMutex);
     m_lastSlot.push_back(-1);
+    m_pendingEventId.push_back(-1);
     return true;
 }
 
@@ -55,6 +57,7 @@ bool CueList::addStopCue(int targetIndex, const std::string& name, double preWai
     m_cues.push_back(std::move(cue));
     std::lock_guard<std::mutex> lk(m_slotMutex);
     m_lastSlot.push_back(-1);
+    m_pendingEventId.push_back(-1);
     return true;
 }
 
@@ -63,6 +66,7 @@ void CueList::clear() {
     m_cues.clear();
     std::lock_guard<std::mutex> lk(m_slotMutex);
     m_lastSlot.clear();
+    m_pendingEventId.clear();
     m_selectedIndex = 0;
 }
 
@@ -80,11 +84,12 @@ const Cue* CueList::cueAt(int index) const {
 }
 const Cue* CueList::selectedCue() const { return cueAt(m_selectedIndex); }
 
-void CueList::setCuePreWait    (int i, double s) { if (i>=0&&i<cueCount()) m_cues[i].preWaitSeconds = s; }
-void CueList::setCueStartTime  (int i, double s) { if (i>=0&&i<cueCount()) m_cues[i].startTime      = s; }
-void CueList::setCueDuration   (int i, double s) { if (i>=0&&i<cueCount()) m_cues[i].duration       = s; }
-void CueList::setCueAutoContinue(int i, bool v)  { if (i>=0&&i<cueCount()) m_cues[i].autoContinue   = v; }
-void CueList::setCueAutoFollow  (int i, bool v)  { if (i>=0&&i<cueCount()) m_cues[i].autoFollow      = v; }
+void CueList::setCuePreWait    (int i, double s)            { if (i>=0&&i<cueCount()) m_cues[i].preWaitSeconds = s; }
+void CueList::setCueStartTime  (int i, double s)            { if (i>=0&&i<cueCount()) m_cues[i].startTime      = s; }
+void CueList::setCueDuration   (int i, double s)            { if (i>=0&&i<cueCount()) m_cues[i].duration       = s; }
+void CueList::setCueAutoContinue(int i, bool v)             { if (i>=0&&i<cueCount()) m_cues[i].autoContinue   = v; }
+void CueList::setCueAutoFollow  (int i, bool v)             { if (i>=0&&i<cueCount()) m_cues[i].autoFollow      = v; }
+void CueList::setCueName        (int i, const std::string& n){ if (i>=0&&i<cueCount()) m_cues[i].name          = n; }
 
 // ---------------------------------------------------------------------------
 // Internal helpers
@@ -176,12 +181,21 @@ bool CueList::go(int64_t originFrame) {
     while (m_selectedIndex < cueCount()) {
         const int    idx = m_selectedIndex++;
         const auto&  cue = m_cues[idx];
-        const double pw  = cue.preWaitSeconds;
+
+        // A cue that is already playing or pending cannot be re-triggered.
+        // Advance the selection past it but leave it running.
+        if (isCuePlaying(idx) || isCuePending(idx)) break;
+
+        const double pw = cue.preWaitSeconds;
 
         if (pw > 0.0) {
             const std::string lbl = "cue[" + std::to_string(idx) + "] " + cue.name;
-            m_scheduler.scheduleFromFrame(originFrame, pw,
-                                          [this, idx]() { fire(idx); }, lbl);
+            const int evtId = m_scheduler.scheduleFromFrame(originFrame, pw,
+                [this, idx]() {
+                    { std::lock_guard<std::mutex> lk(m_slotMutex); m_pendingEventId[idx] = -1; }
+                    fire(idx);
+                }, lbl);
+            { std::lock_guard<std::mutex> lk(m_slotMutex); m_pendingEventId[idx] = evtId; }
             anyFired = true;
         } else {
             anyFired |= fire(idx);
@@ -205,8 +219,12 @@ bool CueList::start(int index, int64_t originFrame) {
     if (pw > 0.0) {
         if (originFrame < 0) originFrame = m_engine.enginePlayheadFrames();
         const std::string lbl = "cue[" + std::to_string(index) + "] " + cue.name;
-        m_scheduler.scheduleFromFrame(originFrame, pw,
-                                      [this, index]() { fire(index); }, lbl);
+        const int evtId = m_scheduler.scheduleFromFrame(originFrame, pw,
+            [this, index]() {
+                { std::lock_guard<std::mutex> lk(m_slotMutex); m_pendingEventId[index] = -1; }
+                fire(index);
+            }, lbl);
+        { std::lock_guard<std::mutex> lk(m_slotMutex); m_pendingEventId[index] = evtId; }
         return true;
     }
     return fire(index);
@@ -214,6 +232,10 @@ bool CueList::start(int index, int64_t originFrame) {
 
 void CueList::stop(int index) {
     if (index < 0 || index >= cueCount()) return;
+    // Cancel any pending prewait for this cue before clearing voices.
+    int evtId = -1;
+    { std::lock_guard<std::mutex> lk(m_slotMutex); evtId = m_pendingEventId[index]; m_pendingEventId[index] = -1; }
+    if (evtId >= 0) m_scheduler.cancel(evtId);
     m_engine.clearVoicesByTag(index);
 }
 
@@ -230,6 +252,13 @@ bool CueList::isAnyCuePlaying() const { return m_engine.activeVoiceCount() > 0; 
 bool CueList::isCuePlaying(int index) const {
     if (index < 0 || index >= cueCount()) return false;
     return m_engine.anyVoiceActiveWithTag(index);
+}
+
+bool CueList::isCuePending(int index) const {
+    if (index < 0 || index >= cueCount()) return false;
+    int evtId;
+    { std::lock_guard<std::mutex> lk(m_slotMutex); evtId = m_pendingEventId[index]; }
+    return m_scheduler.isPending(evtId);
 }
 
 int CueList::activeCueCount() const {
@@ -257,6 +286,15 @@ int64_t CueList::cuePlayheadFrames(int index) const {
 double CueList::cuePlayheadSeconds(int index) const {
     const int sr = m_engine.sampleRate();
     return sr > 0 ? static_cast<double>(cuePlayheadFrames(index)) / sr : 0.0;
+}
+
+double CueList::cueTotalSeconds(int index) const {
+    if (index < 0 || index >= cueCount()) return 0.0;
+    const auto& cue = m_cues[index];
+    if (cue.type != CueType::Audio || !cue.audioFile.isLoaded()) return 0.0;
+    const int64_t frames = voiceFrames(cue);
+    const int sr = cue.audioFile.metadata().sampleRate;
+    return (sr > 0) ? static_cast<double>(frames) / sr : 0.0;
 }
 
 } // namespace mcp

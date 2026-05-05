@@ -71,6 +71,7 @@ public:
     void setCueDuration   (int index, double seconds);   // audio cues only; 0=to end
     void setCueAutoContinue(int index, bool enable);
     void setCueAutoFollow  (int index, bool enable);
+    void setCueName       (int index, const std::string& name);
 
     // --- Playback controls --------------------------------------------------
 
@@ -87,6 +88,7 @@ public:
 
     bool isAnyCuePlaying() const;
     bool isCuePlaying(int index) const;
+    bool isCuePending(int index) const;   // prewait scheduled but not yet fired
     int  activeCueCount() const;
 
     // Most-recently activated voice slot for cue[index], or -1 if none.
@@ -96,6 +98,10 @@ public:
     // Returns 0 if that cue has no active voice.
     int64_t cuePlayheadFrames(int index) const;
     double  cuePlayheadSeconds(int index) const;
+
+    // Total playable duration of cue[index] in seconds (respects startTime/duration).
+    // Returns 0 for non-audio cues or unloaded files.
+    double cueTotalSeconds(int index) const;
 
 private:
     // Execute the cue's action immediately (called after prewait, or directly).
@@ -112,10 +118,11 @@ private:
     std::vector<Cue> m_cues;
     int m_selectedIndex{0};
 
-    // Protected by m_slotMutex: written by scheduleVoice() (possibly from the
-    // scheduler thread), read by cueVoiceSlot() / cuePlayheadFrames().
+    // Protected by m_slotMutex: written by scheduleVoice() / go() (possibly
+    // from the scheduler thread), read from any thread.
     mutable std::mutex m_slotMutex;
     std::vector<int>   m_lastSlot;
+    std::vector<int>   m_pendingEventId;  // scheduler event ID, -1 = none
 };
 
 } // namespace mcp

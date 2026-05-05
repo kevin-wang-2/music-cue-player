@@ -54,6 +54,7 @@ public:
     void cancelAll();
 
     int  pendingCount() const;
+    bool isPending(int eventId) const;
 
     // When enabled, prints scheduling and firing info to stderr.
     void setDebugLog(bool enable) { m_debugLog.store(enable); }
