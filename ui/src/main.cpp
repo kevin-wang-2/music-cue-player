@@ -504,9 +504,8 @@ static void renderMenuBar(App& app, GLFWwindow* /*win*/) {
 
     if (app.wantOpenDlg) {
         app.wantOpenDlg = false;
-        const char* filters[] = {"*.json"};
         const char* path = tinyfd_openFileDialog(
-            "Open Show File", app.showPath.c_str(), 1, filters, "JSON show files", 0);
+            "Open Show File", app.showPath.c_str(), 0, nullptr, nullptr, 0);
         if (path) {
             std::string err;
             mcp::ShowFile newSf;
@@ -526,10 +525,9 @@ static void renderMenuBar(App& app, GLFWwindow* /*win*/) {
 
     if (app.wantSaveAsDlg) {
         app.wantSaveAsDlg = false;
-        const char* filters[] = {"*.json"};
         const char* path = tinyfd_saveFileDialog(
             "Save Show As", app.showPath.empty() ? "show.json" : app.showPath.c_str(),
-            1, filters, "JSON show files");
+            0, nullptr, nullptr);
         if (path) {
             app.showPath = path;
             app.baseDir  = std::filesystem::path(path).parent_path().string();
