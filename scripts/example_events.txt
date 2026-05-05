@@ -1,0 +1,7 @@
+# Event timeline for example.json
+# Format: <time_s>  <command> [arg]
+
+0.0   go        # [0] A - Immediate: plays now
+0.0   go        # [1] A - After 2s:  plays after 2s prewait
+0.0   go        # [2] Stop A:        stops cue[0] after 2s  → seamless A→A crossover
+4.0   panic

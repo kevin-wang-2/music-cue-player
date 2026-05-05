@@ -1,0 +1,28 @@
+# cue_runner example script
+#
+# Cue section (before ---):
+#   audio <file> [prewait_s]     — play audio file
+#   start <index> [prewait_s]    — trigger cue[index]'s audio
+#   stop  <index> [prewait_s]    — stop all voices of cue[index]
+#
+# Event section (after ---):
+#   <time_s>  go               — fire selected cue, advance selection
+#   <time_s>  start <index>    — fire cue[index], selection unchanged
+#   <time_s>  stop  <index>    — stop cue[index] immediately
+#   <time_s>  panic            — cancel pending fires + stop all
+
+# --- Cue list ---
+audio  A.wav             # [0]
+audio  A.wav  4          # [1]
+stop   0      4          # [2]
+audio  B.wav  0.5        # [3]  plays with 0.5 s pre-wait
+stop   3                 # [4]  stops cue[1]'s voices
+start  3                 # [45]  replays cue[1]'s audio
+
+---
+
+# --- Events ---
+0.0   go        # fire [0]: A.wav plays immediately
+0.0   go
+0.0   go
+8.0   panic

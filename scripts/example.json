@@ -1,0 +1,24 @@
+{
+  "mcp_version": "1.0",
+  "show": {
+    "title": "Example Show"
+  },
+  "engine": {
+    "sampleRate": 48000,
+    "channels": 2
+  },
+  "cueLists": [
+    {
+      "id": "main",
+      "name": "Main",
+      "cues": [
+        { "type": "audio", "name": "A - Immediate",  "path": "A.wav", "preWait": 0.0 },
+        { "type": "audio", "name": "A - After 2s",   "path": "A.wav", "preWait": 2.0 },
+        { "type": "stop",  "name": "Stop A (cue 0)", "target": 0,     "preWait": 2.0 },
+        { "type": "audio", "name": "B - After 0.5s", "path": "B.wav", "preWait": 0.5 },
+        { "type": "stop",  "name": "Stop B (cue 3)", "target": 3,     "preWait": 0.0 },
+        { "type": "start", "name": "Replay B",       "target": 3,     "preWait": 0.0 }
+      ]
+    }
+  ]
+}
