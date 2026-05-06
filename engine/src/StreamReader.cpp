@@ -79,6 +79,11 @@ void StreamReader::requestStop() {
     m_stopThread.store(true, std::memory_order_release);
 }
 
+void StreamReader::devamp(bool stopAfter, bool preVamp) {
+    m_preVamp.store(preVamp, std::memory_order_release);
+    m_devampMode.store(stopAfter ? 2 : 1, std::memory_order_release);
+}
+
 // ---------------------------------------------------------------------------
 // Routing
 
@@ -200,8 +205,12 @@ void StreamReader::ioThread() {
     }
 
     // Iterate through segments in order.
-    for (const auto& seg : m_segments) {
+    bool preVampActive = false;   // set when devamp fires with preVamp=true
+    for (int segIdx = 0; segIdx < (int)m_segments.size(); ++segIdx) {
+        const auto& seg = m_segments[static_cast<size_t>(segIdx)];
         if (m_stopThread.load(std::memory_order_relaxed)) break;
+        // Pre-vamp: after devamp has fired, skip segments that loop more than once.
+        if (preVampActive && seg.loops != 1) continue;
 
         const int64_t segStartFrame = std::min(
             static_cast<int64_t>(seg.startSecs * fileSR),
@@ -218,6 +227,22 @@ void StreamReader::ioThread() {
         int loopsDone = 0;
         while ((seg.loops == 0 || loopsDone < seg.loops)
                && !m_stopThread.load(std::memory_order_relaxed)) {
+
+            // Record segment/loop start marker BEFORE writing any audio for this
+            // iteration.  writePos at this point is the ring position where the
+            // first frame of this loop will be written, so that readPos can be
+            // compared against it to determine the current file position.
+            {
+                const int mc = m_segMarkerCount.load(std::memory_order_relaxed);
+                if (mc < kMaxSegMarkers) {
+                    m_segMarkers[static_cast<size_t>(mc)] = {
+                        m_writePos.load(std::memory_order_relaxed),
+                        segIdx,
+                        seg.startSecs
+                    };
+                    m_segMarkerCount.store(mc + 1, std::memory_order_release);
+                }
+            }
 
             dec->seekToFrame(segStartFrame);
             if (needSRC && srcState) src_reset(srcState);
@@ -276,6 +301,36 @@ void StreamReader::ioThread() {
             }
 
             ++loopsDone;
+
+            // Devamp: if a signal arrived, exit the current-segment loop early.
+            const int dm = m_devampMode.exchange(0, std::memory_order_acq_rel);
+            if (dm != 0) {
+                m_devampFired.store(true, std::memory_order_release);
+                if (dm == 2) {
+                    m_stopThread.store(true, std::memory_order_release);
+                } else if (m_preVamp.load(std::memory_order_acquire)) {
+                    preVampActive = true;
+                }
+                break;  // exit segment loop; outer for sees m_stopThread if dm==2
+            }
+        }
+
+        // Fix: consume any devamp flag that arrived between the last per-loop
+        // exchange(0) and the while-condition going false (natural segment end).
+        // Without this, the flag would be picked up by the NEXT segment's first
+        // loop iteration, firing devamp at the wrong boundary.
+        {
+            const int dm_post = m_devampMode.exchange(0, std::memory_order_acq_rel);
+            if (dm_post != 0) {
+                m_devampFired.store(true, std::memory_order_release);
+                if (dm_post == 2) {
+                    m_stopThread.store(true, std::memory_order_release);
+                } else if (m_preVamp.load(std::memory_order_acquire)) {
+                    preVampActive = true;
+                }
+                // dm_post==1: segment ended naturally at this boundary — devamp is
+                // satisfied here.  preVampActive handles subsequent segment skipping.
+            }
         }
     }
 

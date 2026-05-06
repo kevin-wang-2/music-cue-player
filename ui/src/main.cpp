@@ -30,19 +30,25 @@ static float dBToLinear(double dB) {
     return (dB <= -144.0) ? 0.0f : static_cast<float>(std::pow(10.0, dB / 20.0));
 }
 
-static std::string fmtDuration(double s) {
-    if (s <= 0.0) return "--:--";
-    const int m  = static_cast<int>(s) / 60;
-    const int sc = static_cast<int>(s) % 60;
-    const int ms = static_cast<int>((s - std::floor(s)) * 10);
+static std::string fmtTime(double s) {
+    if (s < 0.0) s = 0.0;
+    const int totalMs  = static_cast<int>(std::round(s * 1000.0));
+    const int ms       = totalMs % 1000;
+    const int totalSec = totalMs / 1000;
+    const int sec      = totalSec % 60;
+    const int min      = totalSec / 60;
     char buf[32];
-    std::snprintf(buf, sizeof(buf), "%d:%02d.%d", m, sc, ms);
+    std::snprintf(buf, sizeof(buf), "%d:%02d.%03d", min, sec, ms);
     return buf;
 }
 
+static std::string fmtDuration(double s) {
+    if (s <= 0.0) return "--:--.---";
+    return fmtTime(s);
+}
+
 static std::string fmtPlayhead(double s) {
-    if (s <= 0.0) return "0:00.0";
-    return fmtDuration(s);
+    return fmtTime(s < 0.0 ? 0.0 : s);
 }
 
 static ImVec4 typeColor(const std::string& t) {
@@ -50,7 +56,8 @@ static ImVec4 typeColor(const std::string& t) {
     if (t == "start") return ImVec4(0.40f, 0.90f, 0.50f, 1.0f);
     if (t == "stop")  return ImVec4(1.00f, 0.45f, 0.45f, 1.0f);
     if (t == "fade")  return ImVec4(0.95f, 0.70f, 0.20f, 1.0f);
-    if (t == "arm")   return ImVec4(0.75f, 0.40f, 0.95f, 1.0f);
+    if (t == "arm")    return ImVec4(0.75f, 0.40f, 0.95f, 1.0f);
+    if (t == "devamp") return ImVec4(1.00f, 0.60f, 0.10f, 1.0f);
     return ImVec4(0.70f, 0.70f, 0.70f, 1.0f);
 }
 
@@ -164,6 +171,8 @@ struct App {
     bool   tl_loopFocus   {false};
     char   tl_markerNameBuf[64]{};
     bool   tl_markerNameFocus{false};
+
+    double tl_armSec{-1.0};   // position of the yellow arm cursor; -1 = not set
 };
 
 // ---------------------------------------------------------------------------
@@ -203,10 +212,11 @@ static bool rebuildCueList(App& app, std::string& err) {
     auto& cds  = app.sf.cueLists[0].cues;
     const auto base = std::filesystem::path(app.baseDir);
 
-    // Pass 1: resolve targetCueNumber → target index for start/stop/fade/arm cues.
+    // Pass 1: resolve targetCueNumber → target index for start/stop/fade/arm/devamp cues.
     // Empty cue numbers are intentionally preserved — they are valid but cannot be referenced.
     for (auto& cd : cds) {
-        if ((cd.type == "start" || cd.type == "stop" || cd.type == "fade" || cd.type == "arm") &&
+        if ((cd.type == "start" || cd.type == "stop" || cd.type == "fade"
+             || cd.type == "arm" || cd.type == "devamp") &&
             !cd.targetCueNumber.empty()) {
             int idx = findCueByNumber(app.sf, cd.targetCueNumber);
             if (idx >= 0) cd.target = idx;
@@ -236,6 +246,8 @@ static bool rebuildCueList(App& app, std::string& err) {
                                 cd.fadeStopWhenDone, cd.name, cd.preWait);
         } else if (cd.type == "arm") {
             app.cues.addArmCue(cd.target, cd.name, cd.preWait);
+        } else if (cd.type == "devamp") {
+            app.cues.addDevampCue(cd.target, cd.name, cd.preWait, cd.devampMode);
         }
         if (ok) {
             app.cues.setCueCueNumber  (i, cd.cueNumber);
@@ -247,6 +259,10 @@ static bool rebuildCueList(App& app, std::string& err) {
             app.cues.setCueAutoFollow  (i, cd.autoFollow);
             if (cd.type == "arm")
                 app.cues.setCueArmStartTime(i, cd.armStartTime);
+            if (cd.type == "devamp") {
+                app.cues.setCueDevampMode   (i, cd.devampMode);
+                app.cues.setCueDevampPreVamp(i, cd.devampPreVamp);
+            }
             // Markers and slice loops
             if (cd.type == "audio") {
                 std::vector<mcp::Cue::TimeMarker> cueMarkers;
@@ -301,6 +317,11 @@ static void syncSfFromCues(App& app) {
         cds[i].autoFollow   = c->autoFollow;
         if (c->type == mcp::CueType::Arm)
             cds[i].armStartTime = c->armStartTime;
+        if (c->type == mcp::CueType::Devamp) {
+            cds[i].target        = c->targetIndex;
+            cds[i].devampMode    = c->devampMode;
+            cds[i].devampPreVamp = c->devampPreVamp;
+        }
         if (c->type == mcp::CueType::Audio) {
             cds[i].markers.clear();
             for (const auto& m : c->markers)
@@ -416,13 +437,15 @@ static void renderInspector(App& app) {
         app.tl_drag      = -2;
         app.tl_selMarker = -1;
         app.tl_editLoop  = -1;
+        app.tl_armSec    = -1.0;
         app.insp_lastSel = sel;
     }
 
-    const char* typeStr = c->type == mcp::CueType::Audio ? "audio"
-                        : c->type == mcp::CueType::Start ? "start"
-                        : c->type == mcp::CueType::Stop  ? "stop"
-                        : c->type == mcp::CueType::Arm   ? "arm"
+    const char* typeStr = c->type == mcp::CueType::Audio  ? "audio"
+                        : c->type == mcp::CueType::Start  ? "start"
+                        : c->type == mcp::CueType::Stop   ? "stop"
+                        : c->type == mcp::CueType::Arm    ? "arm"
+                        : c->type == mcp::CueType::Devamp ? "devamp"
                         : "fade";
 
     // Multi-select helpers
@@ -652,6 +675,56 @@ static void renderInspector(App& app) {
                     else
                         ImGui::TextDisabled("Target: (none — set via drag-drop in cue list)");
                 }
+            } else if (c->type == mcp::CueType::Devamp) {
+                // ---- Devamp inspector ----
+                ImGui::SetCursorPosX(8);
+                const mcp::Cue* tc = app.cues.cueAt(c->targetIndex);
+                if (tc)
+                    ImGui::TextDisabled("Target: Q%s  \"%s\"", tc->cueNumber.c_str(), tc->name.c_str());
+                else
+                    ImGui::TextDisabled("Target: (unresolved)");
+
+                ImGui::Spacing();
+                ImGui::SetCursorPosX(8);
+
+                // Choice 1: next slice vs next cue
+                int dm = c->devampMode;
+                const bool wantNextCue = (dm >= 1);
+                ImGui::TextUnformatted("After slice ends:");
+                ImGui::SetCursorPosX(14);
+                bool r0 = !wantNextCue;
+                if (ImGui::RadioButton("Advance to next slice", r0)) {
+                    app.cues.setCueDevampMode(sel, 0);
+                    syncSfFromCues(app);
+                }
+                ImGui::SetCursorPosX(14);
+                bool r1 = wantNextCue;
+                if (ImGui::RadioButton("Start next cue", r1)) {
+                    if (dm == 0) app.cues.setCueDevampMode(sel, 1);
+                    syncSfFromCues(app);
+                }
+
+                if (wantNextCue) {
+                    // Choice 2: stop or keep current cue
+                    ImGui::SetCursorPosX(14);
+                    bool stopCurrent = (dm == 1);
+                    if (ImGui::Checkbox("Stop this cue after slice", &stopCurrent)) {
+                        app.cues.setCueDevampMode(sel, stopCurrent ? 1 : 2);
+                        syncSfFromCues(app);
+                    }
+                }
+
+                // Pre-vamp option (always shown)
+                ImGui::Spacing();
+                ImGui::SetCursorPosX(8);
+                bool pv = c->devampPreVamp;
+                if (ImGui::Checkbox("Pre-vamp (skip following looping slices)", &pv)) {
+                    app.cues.setCueDevampPreVamp(sel, pv);
+                    syncSfFromCues(app);
+                }
+                if (ImGui::IsItemHovered())
+                    ImGui::SetTooltip("After devamp point, skip any subsequent slices with loop count != 1");
+
             } else {
                 // Start / Stop / Arm
                 ImGui::SetCursorPosX(8);
@@ -977,6 +1050,8 @@ static void renderInspector(App& app) {
                     ImGui::GetCursorScreenPos().x,
                     ImGui::GetCursorScreenPos().y
                 };
+                const float waveTop = canvasPos.y + kRulerH;
+                const float waveBot = waveTop + kWaveH;
 
                 auto secToX = [&](double t) -> float {
                     return canvasPos.x + static_cast<float>((t - app.tl_viewStart) / app.tl_viewDur * canvasW);
@@ -1034,9 +1109,11 @@ static void renderInspector(App& app) {
                         }
                         if (!hitMarker) {
                             app.tl_selMarker = -1;
-                            // Click in waveform body → arm at this position
-                            if (mp.y > canvasPos.y + kRulerH && mpSec >= 0.0 && mpSec <= fileDur) {
+                            // Click in waveform body (not ruler, not loop label strip) → arm at this position
+                            if (mp.y > canvasPos.y + kRulerH && mp.y < waveBot
+                                && mpSec >= 0.0 && mpSec <= fileDur) {
                                 app.cues.arm(sel, mpSec);
+                                app.tl_armSec = mpSec;
                             }
                         }
                     }
@@ -1105,14 +1182,7 @@ static void renderInspector(App& app) {
                 // Background
                 dl->AddRectFilled(canvasPos, canvasMax, IM_COL32(12, 14, 22, 255));
 
-                // Inactive region shading (before startTime and after endTime)
-                const float sx = secToX(startSec), ex = secToX(endSec);
-                const float waveTop = canvasPos.y + kRulerH;
-                const float waveBot = waveTop + kWaveH;
-                if (sx > canvasPos.x)
-                    dl->AddRectFilled(canvasPos, {sx, waveBot}, IM_COL32(0, 0, 0, 100));
-                if (ex < canvasMax.x)
-                    dl->AddRectFilled({ex, canvasPos.y}, {canvasMax.x, waveBot}, IM_COL32(0, 0, 0, 100));
+                // (waveTop / waveBot declared in canvas geometry section above)
 
                 // Slice backgrounds (alternating subtle tints between markers)
                 {
@@ -1153,8 +1223,13 @@ static void renderInspector(App& app) {
                             }
                             const float y0 = chMid - mx * half;
                             const float y1 = chMid - mn * half;
+                            const double tMid = (tL + tR) * 0.5;
+                            const bool active = (tMid >= startSec && tMid <= endSec);
+                            const ImU32 wfCol = active
+                                ? IM_COL32(100, 160, 220, 200)
+                                : IM_COL32(70, 70, 85, 100);
                             dl->AddLine({canvasPos.x + px, y0}, {canvasPos.x + px, y1},
-                                        IM_COL32(100, 160, 220, 200), 1.0f);
+                                        wfCol, 1.0f);
                         }
                     }
                 } else {
@@ -1190,22 +1265,14 @@ static void renderInspector(App& app) {
                     const float tx = secToX(t);
                     if (tx < canvasPos.x || tx > canvasPos.x + canvasW) continue;
                     dl->AddLine({tx, rulerBot - 8.0f}, {tx, rulerBot}, IM_COL32(180,180,180,120), 1.0f);
-                    char buf[24];
-                    if (tickStep < 0.1) std::snprintf(buf, sizeof(buf), "%.2f", t);
-                    else if (tickStep < 1.0) std::snprintf(buf, sizeof(buf), "%.1f", t);
-                    else {
-                        const int m = static_cast<int>(t) / 60;
-                        const int s = static_cast<int>(t) % 60;
-                        if (m > 0) std::snprintf(buf, sizeof(buf), "%d:%02d", m, s);
-                        else       std::snprintf(buf, sizeof(buf), "%d", (int)t);
-                    }
-                    dl->AddText({tx + 2, rulerTop + 2}, IM_COL32(160,160,160,200), buf);
+                    const std::string tickLabel = fmtTime(t);
+                    dl->AddText({tx + 2, rulerTop + 2}, IM_COL32(160,160,160,200), tickLabel.c_str());
                 }
 
-                // Playhead
+                // Playhead — use voice readPos + segment markers for accuracy
                 if (app.cues.isCuePlaying(sel)) {
-                    const double ph = c->startTime + app.cues.cuePlayheadSeconds(sel);
-                    const float phx = secToX(ph);
+                    const double filePh = app.cues.cuePlayheadFileSeconds(sel);
+                    const float phx = secToX(filePh);
                     if (phx >= canvasPos.x && phx <= canvasPos.x + canvasW) {
                         dl->AddLine({phx, rulerTop}, {phx, canvasPos.y + kTotalH},
                                     IM_COL32(100, 255, 120, 200), 1.5f);
@@ -1215,6 +1282,21 @@ static void renderInspector(App& app) {
                             {phx - 5, rulerTop},
                             {phx + 5, rulerTop},
                             IM_COL32(100, 255, 120, 220));
+                    }
+                }
+
+                // Yellow arm cursor (set on waveform click)
+                if (app.tl_armSec >= 0.0) {
+                    const float ax = secToX(app.tl_armSec);
+                    if (ax >= canvasPos.x && ax <= canvasPos.x + canvasW) {
+                        dl->AddLine({ax, waveTop}, {ax, waveBot},
+                                    IM_COL32(255, 220, 0, 180), 1.0f);
+                        // Upward triangle at bottom of waveform
+                        dl->AddTriangleFilled(
+                            {ax,     waveBot},
+                            {ax - 5, waveBot + 7},
+                            {ax + 5, waveBot + 7},
+                            IM_COL32(255, 220, 0, 220));
                     }
                 }
 
@@ -1231,12 +1313,12 @@ static void renderInspector(App& app) {
                         col);
                 };
 
-                // Start handle (green)
+                // Start handle (white)
                 drawHandle(secToX(startSec),
-                           IM_COL32( 80, 220, 100, 230), IM_COL32( 80, 220, 100, 120));
-                // End handle (lighter green)
+                           IM_COL32(255, 255, 255, 220), IM_COL32(255, 255, 255, 100));
+                // End handle (white, slightly dimmer)
                 drawHandle(secToX(endSec),
-                           IM_COL32(160, 220, 160, 200), IM_COL32(160, 220, 160, 80));
+                           IM_COL32(255, 255, 255, 180), IM_COL32(255, 255, 255, 70));
 
                 // Markers (amber)
                 for (int mi = 0; mi < (int)c->markers.size(); ++mi) {
@@ -1305,26 +1387,29 @@ static void renderInspector(App& app) {
                                 app.tl_editLoop = -1;
                             }
                         } else {
-                            // Display label — click to edit
+                            // Display label — manual hit test (nested InvisibleButton
+                            // cannot compete with the outer canvas InvisibleButton)
                             char lbl[16];
-                            if (lc == 0) std::snprintf(lbl, sizeof(lbl), u8"∞");  // ∞
+                            if (lc == 0) std::snprintf(lbl, sizeof(lbl), u8"∞");
                             else         std::snprintf(lbl, sizeof(lbl), "%d", lc);
                             const float tw = ImGui::CalcTextSize(lbl).x;
                             const float lx = midX - tw * 0.5f;
-                            dl->AddText({lx, loopTop + 2},
-                                        lc == 0 ? IM_COL32(255,160,60,240) : IM_COL32(180,200,255,200),
-                                        lbl);
-                            // Clickable region
-                            ImGui::SetCursorScreenPos({lx - 4, loopTop + 1});
-                            ImGui::InvisibleButton(("##lc" + std::to_string(bi)).c_str(),
-                                                    {tw + 8, kLoopH - 2});
-                            if (ImGui::IsItemHovered()) ImGui::SetTooltip("Click to edit loop count (non-numeric = ∞)");
-                            if (ImGui::IsItemClicked()) {
-                                app.tl_editLoop = bi;
-                                app.tl_loopFocus = true;
-                                if (lc == 0) std::strncpy(app.tl_loopBuf, u8"∞", sizeof(app.tl_loopBuf) - 1);
-                                else {
-                                    std::snprintf(app.tl_loopBuf, sizeof(app.tl_loopBuf), "%d", lc);
+
+                            const bool lcHit = hovered
+                                && mp.x >= lx - 4 && mp.x <= lx + tw + 4
+                                && mp.y >= loopTop && mp.y < loopTop + kLoopH;
+                            const ImU32 lblCol = lcHit
+                                ? (lc == 0 ? IM_COL32(255,200,100,255) : IM_COL32(220,230,255,255))
+                                : (lc == 0 ? IM_COL32(255,160, 60,240) : IM_COL32(180,200,255,200));
+                            dl->AddText({lx, loopTop + 2}, lblCol, lbl);
+
+                            if (lcHit) {
+                                ImGui::SetTooltip("Click to edit loop count (non-numeric = \xe2\x88\x9e)");
+                                if (lmbClick) {
+                                    app.tl_editLoop  = bi;
+                                    app.tl_loopFocus = true;
+                                    if (lc == 0) std::strncpy(app.tl_loopBuf, u8"∞", sizeof(app.tl_loopBuf) - 1);
+                                    else         std::snprintf(app.tl_loopBuf, sizeof(app.tl_loopBuf), "%d", lc);
                                 }
                             }
                         }
@@ -1340,7 +1425,7 @@ static void renderInspector(App& app) {
                     ImGui::SameLine(0, 12);
                     ImGui::SetNextItemWidth(120);
                     float mt = static_cast<float>(c->markers[mi].time);
-                    if (ImGui::DragFloat("##mtime", &mt, 0.001f, 0.0f, static_cast<float>(fileDur), "%.4f s")) {
+                    if (ImGui::DragFloat("##mtime", &mt, 0.001f, 0.0f, static_cast<float>(fileDur), "%.3f s")) {
                         app.cues.setCueMarkerTime(sel, mi, mt);
                         syncSfFromCues(app);
                     }
@@ -1373,7 +1458,7 @@ static void renderInspector(App& app) {
                 if (hovered && rmbClick) s_ctxTime = mpSec;
                 if (ImGui::BeginPopup("##tl_ctx")) {
                     char addLbl[48];
-                    std::snprintf(addLbl, sizeof(addLbl), "Add marker at %.3f s", s_ctxTime);
+                    std::snprintf(addLbl, sizeof(addLbl), "Add marker at %s", fmtTime(s_ctxTime).c_str());
                     if (ImGui::MenuItem(addLbl)) {
                         app.cues.addCueMarker(sel, s_ctxTime);
                         syncSfFromCues(app);
@@ -1688,6 +1773,8 @@ static bool isCueBroken(const mcp::Cue* c) {
                 for (const auto& cell : row) if (cell.enabled) { any = true; break; }
         return !any;
     }
+    case mcp::CueType::Devamp:
+        return c->targetIndex < 0;
     }
     return true;
 }
@@ -1710,13 +1797,14 @@ static void addCueDirectly(App& app, const std::string& type) {
         cd.name = "Audio Cue";
         cd.path = "";
         app.cues.addBrokenAudioCue("", cd.name);
-    } else if (type == "start" || type == "stop" || type == "arm") {
+    } else if (type == "start" || type == "stop" || type == "arm" || type == "devamp") {
         cd.target          = tIdx;
         cd.targetCueNumber = selNum;
         cd.name = type + (selNum.empty() ? "" : "(Q" + selNum + ")");
-        if      (type == "start") app.cues.addStartCue(tIdx, cd.name);
-        else if (type == "stop")  app.cues.addStopCue (tIdx, cd.name);
-        else                      app.cues.addArmCue  (tIdx, cd.name);
+        if      (type == "start")  app.cues.addStartCue (tIdx, cd.name);
+        else if (type == "stop")   app.cues.addStopCue  (tIdx, cd.name);
+        else if (type == "arm")    app.cues.addArmCue   (tIdx, cd.name);
+        else                       app.cues.addDevampCue(tIdx, cd.name);
     } else if (type == "fade") {
         const bool targetIsAudio = (selCue && selCue->type == mcp::CueType::Audio);
         const int  fadeTIdx = targetIsAudio ? tIdx : -1;
@@ -1831,10 +1919,11 @@ static void renderCueTable(App& app) {
 
         // ---- Col 1: type badge ------------------------------------------------
         ImGui::TableSetColumnIndex(1);
-        const std::string tstr = (c->type == mcp::CueType::Audio) ? "audio"
-                                : (c->type == mcp::CueType::Start) ? "start"
-                                : (c->type == mcp::CueType::Stop)  ? "stop"
-                                : (c->type == mcp::CueType::Arm)   ? "arm"
+        const std::string tstr = (c->type == mcp::CueType::Audio)  ? "audio"
+                                : (c->type == mcp::CueType::Start)  ? "start"
+                                : (c->type == mcp::CueType::Stop)   ? "stop"
+                                : (c->type == mcp::CueType::Arm)    ? "arm"
+                                : (c->type == mcp::CueType::Devamp) ? "devamp"
                                 : "fade";
         ImGui::TextColored(typeColor(tstr), "%s", tstr.c_str());
 
@@ -1898,10 +1987,15 @@ static void renderCueTable(App& app) {
                         app.cues.setSelectedIndex(i);
                     }
                     const int nSel = (int)app.multiSel.size();
-                    if (nSel == 1 && app.cues.cueAt(i) &&
-                        app.cues.cueAt(i)->type == mcp::CueType::Audio)
-                        if (ImGui::MenuItem("Arm"))
-                            app.cues.arm(i);
+                    if (nSel == 1 && app.cues.cueAt(i)) {
+                        const auto ctype = app.cues.cueAt(i)->type;
+                        if (ctype == mcp::CueType::Audio)
+                            if (ImGui::MenuItem("Arm")) app.cues.arm(i);
+                        if (ctype == mcp::CueType::Audio || ctype == mcp::CueType::Start
+                            || ctype == mcp::CueType::Stop || ctype == mcp::CueType::Arm)
+                            if (ImGui::MenuItem("Add Devamp Cue for this"))
+                                addCueDirectly(app, "devamp");
+                    }
                     ImGui::Separator();
                     char copyLbl[32]; std::snprintf(copyLbl, sizeof(copyLbl),
                         "Copy%s", nSel > 1 ? " (selection)" : "");
@@ -2345,7 +2439,8 @@ static void renderToolbar(App& app) {
         { "\xe2\x96\xb6", "start", "Add Start Cue",  {0.40f, 0.90f, 0.50f, 1.0f} },
         { "\xe2\x96\xa0", "stop",  "Add Stop Cue",   {1.00f, 0.45f, 0.45f, 1.0f} },
         { "~",            "fade",  "Add Fade Cue",   {0.95f, 0.70f, 0.20f, 1.0f} },
-        { "\xe2\x97\x8e", "arm",   "Add Arm Cue",    {0.75f, 0.40f, 0.95f, 1.0f} },
+        { "\xe2\x97\x8e", "arm",    "Add Arm Cue",    {0.75f, 0.40f, 0.95f, 1.0f} },
+        { "D",            "devamp", "Add Devamp Cue", {1.00f, 0.60f, 0.10f, 1.0f} },
     };
     const ImVec2 kBtnSz(28, 22);
     for (const auto& b : kBtns) {
@@ -2383,8 +2478,10 @@ static void handleKeyboard(App& app) {
         const int64_t origin = app.engine.enginePlayheadFrames();
         app.cues.go(origin);
     }
-    if (ImGui::IsKeyPressed(ImGuiKey_Escape, false))
+    if (ImGui::IsKeyPressed(ImGuiKey_Escape, false)) {
         app.cues.softPanic(0.5);
+        app.tl_armSec = -1.0;
+    }
     if (ImGui::IsKeyPressed(ImGuiKey_DownArrow, false)) {
         app.cues.selectNext();
         // Reset multi-selection to the newly focused row
@@ -2607,6 +2704,7 @@ int main(int argc, char** argv) {
         b.AddChar(0x25CE);  // ◎ BULLSEYE           (arm cue button)
         b.AddChar(0x25CF);  // ● BLACK CIRCLE
         b.AddChar(0x25F7);  // ◷ UPPER RIGHT QUADRANT CIRCULAR ARC
+        b.AddChar(0x221E);  // ∞ INFINITY
         b.BuildRanges(&sGlyphRanges);
     }
 

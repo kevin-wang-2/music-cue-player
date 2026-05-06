@@ -106,6 +106,39 @@ public:
     // Signal the I/O thread to stop.  Idempotent, safe from any thread.
     void requestStop();
 
+    // Devamp: after the current loop iteration of the current segment finishes,
+    // either advance to the next segment (stopAfter=false) or stop completely
+    // (stopAfter=true).  If preVamp=true, subsequent segments with loops != 1 are
+    // automatically skipped after the devamp point.
+    // Safe to call from any thread during playback.
+    void devamp(bool stopAfter, bool preVamp = false);
+
+    // True once the IO thread has processed a devamp signal (segment transition
+    // occurred or stop was initiated).  Cleared by clearDevampFired().
+    bool wasDevampFired() const { return m_devampFired.load(std::memory_order_acquire); }
+    void clearDevampFired()     { m_devampFired.store(false, std::memory_order_release); }
+
+    // Segment/loop start markers written by the IO thread.
+    // Each entry records the ring writePos at the start of a loop iteration,
+    // the segment index, and the file start position (seconds).
+    // Consumers compare the current readPos against these to find the
+    // file position currently being played.
+    struct SegMarker {
+        int64_t writePos{0};
+        int     segIdx{0};
+        double  fileStartSecs{0.0};
+    };
+    static constexpr int kMaxSegMarkers = 512;
+
+    int       segMarkerCount()  const { return m_segMarkerCount.load(std::memory_order_acquire); }
+    SegMarker segMarkerAt(int i) const { return m_segMarkers[static_cast<size_t>(i)]; }
+    int       targetSampleRate() const { return m_targetSR; }
+
+    // Frames consumed by the audio callback so far (monotonically increasing).
+    // Directly reflects the ring-buffer read position — more accurate than the
+    // engine's global playhead counter for determining file position.
+    int64_t   readPos() const { return m_readPos.load(std::memory_order_acquire); }
+
 private:
     void ioThread();
 
@@ -124,6 +157,13 @@ private:
     std::atomic<int64_t> m_readPos{0};
     std::atomic<bool>    m_fileDone{false};
     std::atomic<bool>    m_stopThread{false};
+    std::atomic<int>     m_devampMode{0};    // 0=none, 1=nextSlice, 2=stop
+    std::atomic<bool>    m_devampFired{false};
+    std::atomic<bool>    m_preVamp{false};   // skip looping segments after devamp
+
+    // Segment/loop start markers (written by IO thread only).
+    std::array<SegMarker, kMaxSegMarkers> m_segMarkers{};
+    std::atomic<int>                      m_segMarkerCount{0};
 
     // Routing state (set once before voice starts; outLevGains may be updated live).
     std::vector<float> m_xpGains;     // [m_fileCh * m_xpOutCh], NaN = no route

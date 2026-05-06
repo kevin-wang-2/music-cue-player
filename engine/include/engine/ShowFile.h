@@ -63,6 +63,10 @@ struct ShowFile {
         std::vector<TimeMarker> markers;
         std::vector<int>        sliceLoops;  // [i] = loops for slice i; 0 = infinite
 
+        // Devamp cues
+        int         devampMode{0};        // 0=NextSlice, 1=go()+StopCurrent, 2=go()+KeepCurrent
+        bool        devampPreVamp{false}; // skip subsequent looping slices after devamp
+
         // Fade cues
         std::string fadeCurve{"linear"};
         bool        fadeStopWhenDone{false};

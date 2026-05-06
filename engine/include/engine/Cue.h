@@ -10,7 +10,7 @@
 
 namespace mcp {
 
-enum class CueType { Audio, Start, Stop, Fade, Arm };
+enum class CueType { Audio, Start, Stop, Fade, Arm, Devamp };
 
 // Per-audio-cue channel routing.
 // outLevelDb[o]  — per-output-channel level in dB (0.0 = unity).
@@ -31,10 +31,16 @@ struct Cue {
     std::string path;
     AudioFile   audioFile;
 
-    // Start/Stop/Arm cues: index of the target cue in the same CueList
+    // Start/Stop/Arm/Devamp cues: index of the target cue in the same CueList
     int    targetIndex{-1};
     // Arm cues only: pre-load the target audio from this offset (seconds). 0 = from start.
     double armStartTime{0.0};
+
+    // Devamp cues
+    // devampMode: 0=NextSlice, 1=NextCue+StopCurrent, 2=NextCue+KeepCurrent
+    int    devampMode{0};
+    // After devamp: also skip any following slices/segments with loops != 1.
+    bool   devampPreVamp{false};
 
     // Timing (all types)
     double preWaitSeconds{0.0};
@@ -73,8 +79,9 @@ struct Cue {
     bool autoFollow{false};
 
     bool isLoaded() const {
-        if (type == CueType::Audio) return audioFile.isLoaded();
-        if (type == CueType::Fade)  return fadeData != nullptr;
+        if (type == CueType::Audio)  return audioFile.isLoaded();
+        if (type == CueType::Fade)   return fadeData != nullptr;
+        if (type == CueType::Devamp) return targetIndex >= 0;
         return true;
     }
 };

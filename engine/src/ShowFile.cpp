@@ -65,6 +65,10 @@ static ShowFile::CueData parseCue(const json& j) {
         c.sliceLoops.resize(static_cast<size_t>(want));
     }
 
+    // Devamp cue parameters
+    c.devampMode    = jget<int> (j, "devampMode",    0);
+    c.devampPreVamp = jget<bool>(j, "devampPreVamp", false);
+
     // Fade cue parameters
     c.fadeCurve        = jget<std::string>(j, "fadeCurve",        "linear");
     c.fadeStopWhenDone = jget<bool>       (j, "fadeStopWhenDone", false);
@@ -162,6 +166,11 @@ static json cueToJson(const ShowFile::CueData& c) {
         j["targetCueNumber"] = c.targetCueNumber;
         if (c.type == "arm" && c.armStartTime != 0.0)
             j["armStartTime"] = c.armStartTime;
+    } else if (c.type == "devamp") {
+        j["target"]          = c.target;
+        j["targetCueNumber"] = c.targetCueNumber;
+        if (c.devampMode != 0)  j["devampMode"]    = c.devampMode;
+        if (c.devampPreVamp)    j["devampPreVamp"]  = true;
     } else if (c.type == "fade") {
         j["targetCueNumber"]  = c.targetCueNumber;
         j["fadeCurve"]        = c.fadeCurve;

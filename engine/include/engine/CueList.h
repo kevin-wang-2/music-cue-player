@@ -76,6 +76,15 @@ public:
     // armStartTime: pre-load from this offset (seconds); 0 = from start of file.
     bool addArmCue(int targetIndex, const std::string& name = "", double preWait = 0.0);
 
+    // Append a Devamp cue.  When fired, waits for cue[targetIndex] to finish its
+    // current slice loop iteration and then:
+    //   devampMode 0: advance to next slice (classic devamp / "exit vamp")
+    //   devampMode 1: stop cue[targetIndex], then start cue[nextCueIdx]
+    //   devampMode 2: advance cue[targetIndex] to next slice AND start cue[nextCueIdx]
+    // nextCueIdx == -1 means the cue immediately after targetIndex in the list.
+    bool addDevampCue(int targetIndex, const std::string& name = "", double preWait = 0.0,
+                      int devampMode = 0);
+
     void clear();
     int  cueCount() const;
 
@@ -99,6 +108,10 @@ public:
     void setCueName       (int index, const std::string& name);
     void setCueArmStartTime(int index, double seconds);  // Arm cues only
     void setCueCueNumber  (int index, const std::string& number);
+
+    // Devamp cue setters (no-op if cue[index] is not a Devamp cue).
+    void setCueDevampMode   (int index, int mode);      // 0/1/2 — see addDevampCue
+    void setCueDevampPreVamp(int index, bool enabled);  // skip following looping slices
 
     // Audio cue routing setters.
     // outCh / srcCh: 0-based channel indices.
@@ -176,6 +189,12 @@ public:
     int64_t cuePlayheadFrames(int index) const;
     double  cuePlayheadSeconds(int index) const;
 
+    // File-position playhead for cue[index] in seconds from start of file.
+    // Uses the voice's ring-buffer readPos and segment markers recorded by the
+    // IO thread, so it stays accurate even after devamp cuts a loop short.
+    // Returns 0 if the cue has no active voice.  Call from the main thread only.
+    double  cuePlayheadFileSeconds(int index) const;
+
     // Total playable duration of cue[index] in seconds (respects startTime/duration).
     // Returns 0 for non-audio cues or unloaded files.
     double cueTotalSeconds(int index) const;
@@ -201,6 +220,13 @@ private:
     Scheduler&   m_scheduler;
     std::vector<Cue> m_cues;
     int m_selectedIndex{0};
+
+    // Pending devamp follow-up actions: call go() when the trigger fires.
+    // waitForStop=true → wait for voice to go inactive (mode 1);
+    // waitForStop=false → wait for StreamReader devampFired signal (mode 2).
+    // Accessed only from the main thread — no lock needed.
+    struct FollowUp { int watchCueIdx; bool waitForStop; };
+    std::vector<FollowUp> m_followUps;
 
     // Protected by m_slotMutex: written by scheduleVoice() / go() (possibly
     // from the scheduler thread), read from any thread.

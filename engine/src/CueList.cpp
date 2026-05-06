@@ -121,6 +121,23 @@ bool CueList::addArmCue(int targetIndex, const std::string& name, double preWait
     return true;
 }
 
+bool CueList::addDevampCue(int targetIndex, const std::string& name, double preWait,
+                            int devampMode) {
+    Cue cue;
+    cue.type           = CueType::Devamp;
+    cue.targetIndex    = targetIndex;
+    cue.devampMode     = devampMode;
+    cue.preWaitSeconds = preWait;
+    cue.name           = name.empty()
+                             ? ("devamp(Q" + std::to_string(targetIndex) + ")")
+                             : name;
+    m_cues.push_back(std::move(cue));
+    std::lock_guard<std::mutex> lk(m_slotMutex);
+    m_lastSlot.push_back(-1);
+    m_pendingEventId.push_back(-1);
+    return true;
+}
+
 void CueList::clear() {
     panic();
     // Signal all active I/O threads to stop early.
@@ -183,13 +200,48 @@ bool CueList::isArmed(int index) const {
 
 void CueList::softPanic(double fadeSecs) {
     m_scheduler.cancelAll();
-    // Signal active I/O threads to stop filling (they're about to be faded out).
+    m_followUps.clear();
     for (auto& s : m_slotStream)
         if (s) s->requestStop();
     m_engine.softPanic(fadeSecs);
+    std::lock_guard<std::mutex> lk(m_slotMutex);
+    for (auto& cue : m_cues) {
+        if (cue.armedStream) {
+            cue.armedStream->requestStop();
+            cue.armedStream.reset();
+        }
+    }
 }
 
 void CueList::update() {
+    // Process devamp follow-ups: fire the next cue when the trigger condition fires.
+    for (auto it = m_followUps.begin(); it != m_followUps.end(); ) {
+        bool triggered = false;
+        if (it->waitForStop) {
+            // Mode 1: wait for the target voice to go inactive
+            triggered = !isCuePlaying(it->watchCueIdx);
+        } else {
+            // Mode 2: wait for StreamReader to signal segment transition
+            StreamReader* raw = nullptr;
+            {
+                std::lock_guard<std::mutex> lk(m_slotMutex);
+                const int slot = m_lastSlot[it->watchCueIdx];
+                if (slot >= 0 && m_slotStream[slot])
+                    raw = m_slotStream[slot].get();
+            }
+            if (raw && raw->wasDevampFired()) {
+                raw->clearDevampFired();
+                triggered = true;
+            }
+        }
+        if (triggered) {
+            it = m_followUps.erase(it);
+            go();
+        } else {
+            ++it;
+        }
+    }
+
     // Release StreamReader resources for voice slots that have finished playing.
     // Guard: skip slots with pendingReady==true — the callback holds a raw pointer
     // to the StreamReader stored in m_slotStream and will dereference it once it
@@ -229,6 +281,9 @@ void CueList::setCueAutoFollow  (int i, bool v)             { if (i>=0&&i<cueCou
 void CueList::setCueName        (int i, const std::string& n){ if (i>=0&&i<cueCount()) m_cues[i].name          = n; }
 void CueList::setCueArmStartTime(int i, double s)            { if (i>=0&&i<cueCount()) m_cues[i].armStartTime   = s; }
 void CueList::setCueCueNumber   (int i, const std::string& n){ if (i>=0&&i<cueCount()) m_cues[i].cueNumber     = n; }
+
+void CueList::setCueDevampMode   (int i, int mode) { if (i>=0&&i<cueCount()&&m_cues[i].type==CueType::Devamp) m_cues[i].devampMode    = mode; }
+void CueList::setCueDevampPreVamp(int i, bool v)   { if (i>=0&&i<cueCount()&&m_cues[i].type==CueType::Devamp) m_cues[i].devampPreVamp = v; }
 
 // ---------------------------------------------------------------------------
 // Routing setters
@@ -547,6 +602,42 @@ bool CueList::fire(int idx) {
             break;
         }
 
+        case CueType::Devamp: {
+            const int ti = cue.targetIndex;
+            if (ti < 0 || ti >= cueCount()) break;
+
+            // Get the raw StreamReader pointer for the target cue's active voice.
+            // Obtained under the mutex; valid as long as the voice stays active.
+            StreamReader* raw = nullptr;
+            int slot = -1;
+            {
+                std::lock_guard<std::mutex> lk(m_slotMutex);
+                slot = m_lastSlot[ti];
+                if (slot >= 0 && m_slotStream[slot])
+                    raw = m_slotStream[slot].get();
+            }
+            if (!raw || !m_engine.isVoiceActive(slot)) break;
+
+            if (cue.devampMode == 0) {
+                // Mode 0: advance to next slice (classic devamp)
+                raw->devamp(false, cue.devampPreVamp);
+            } else {
+                // Modes 1/2: call go() at the end of the current slice.
+                // Pre-arm the currently-selected cue for a seamless start.
+                if (m_selectedIndex >= 0 && m_selectedIndex < cueCount())
+                    arm(m_selectedIndex);
+
+                raw->clearDevampFired();
+                const bool stopCurrent = (cue.devampMode == 1);
+                raw->devamp(stopCurrent, cue.devampPreVamp);
+
+                // Register follow-up: call go() when trigger fires
+                m_followUps.push_back({ti, stopCurrent});
+            }
+            result = true;
+            break;
+        }
+
         case CueType::Fade: {
             const auto fd = cue.fadeData;
             if (!fd) break;
@@ -748,6 +839,14 @@ void CueList::stop(int index) {
 void CueList::panic() {
     m_scheduler.cancelAll();
     m_engine.clearAllVoices();
+    m_followUps.clear();
+    std::lock_guard<std::mutex> lk(m_slotMutex);
+    for (auto& cue : m_cues) {
+        if (cue.armedStream) {
+            cue.armedStream->requestStop();
+            cue.armedStream.reset();
+        }
+    }
 }
 
 // ---------------------------------------------------------------------------
@@ -792,6 +891,40 @@ int64_t CueList::cuePlayheadFrames(int index) const {
 double CueList::cuePlayheadSeconds(int index) const {
     const int sr = m_engine.sampleRate();
     return sr > 0 ? static_cast<double>(cuePlayheadFrames(index)) / sr : 0.0;
+}
+
+double CueList::cuePlayheadFileSeconds(int index) const {
+    if (index < 0 || index >= cueCount()) return 0.0;
+
+    StreamReader* raw = nullptr;
+    int targetSR = 0;
+    int64_t rp = 0;
+    {
+        std::lock_guard<std::mutex> lk(m_slotMutex);
+        const int slot = m_lastSlot[static_cast<size_t>(index)];
+        if (slot < 0 || !m_slotStream[static_cast<size_t>(slot)]
+                     || !m_engine.isVoiceActive(slot))
+            return 0.0;
+        raw      = m_slotStream[static_cast<size_t>(slot)].get();
+        targetSR = raw->targetSampleRate();
+        rp       = raw->readPos();
+    }
+    if (!raw || targetSR <= 0) return 0.0;
+
+    const int mc = raw->segMarkerCount();
+    if (mc == 0) return 0.0;
+
+    // Binary-search for the last marker with writePos <= rp.
+    // Markers are appended in writePos order (IO thread writes monotonically).
+    int bestIdx = 0;
+    for (int i = 1; i < mc; ++i) {
+        if (raw->segMarkerAt(i).writePos <= rp) bestIdx = i;
+        else break;
+    }
+
+    const StreamReader::SegMarker sm = raw->segMarkerAt(bestIdx);
+    const double elapsed = static_cast<double>(rp - sm.writePos) / targetSR;
+    return sm.fileStartSecs + elapsed;
 }
 
 double CueList::cueTotalSeconds(int index) const {
