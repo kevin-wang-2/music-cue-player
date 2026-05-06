@@ -102,7 +102,10 @@ static int paCallback(const void* /*input*/, void* output,
 
         if (!v.active.load(std::memory_order_relaxed)) continue;
 
-        if (v.channels != impl->outChannels) {
+        // For in-memory voices, channel counts must match (direct array indexing).
+        // Streaming voices are always scheduled with engine.channels() so this
+        // check is satisfied; StreamReader::read() handles internal remapping.
+        if (!v.streaming && v.channels != impl->outChannels) {
             v.active.store(false, std::memory_order_release);
             continue;
         }

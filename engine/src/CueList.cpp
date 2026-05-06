@@ -26,11 +26,8 @@ bool CueList::addCue(const std::string& path, const std::string& name,
     // Metadata-only load: validates format without reading all PCM data.
     if (!cue.audioFile.loadMetadata(path)) return false;
 
-    if (m_engine.isInitialized()) {
-        const auto& meta = cue.audioFile.metadata();
-        if (meta.sampleRate != m_engine.sampleRate()) return false;
-        if (meta.channels   != m_engine.channels())   return false;
-    }
+    // SR / channel-count mismatches are handled by SRC and channel mapping in
+    // StreamReader — any format accepted here as long as it can be opened.
 
     m_cues.push_back(std::move(cue));
     std::lock_guard<std::mutex> lk(m_slotMutex);
@@ -141,16 +138,10 @@ bool CueList::arm(int index) {
     const auto& cue = m_cues[index];
     if (cue.type != CueType::Audio || !cue.audioFile.isLoaded()) return false;
 
-    const auto& meta = cue.audioFile.metadata();
-    const int64_t startFrame = std::min(
-        static_cast<int64_t>(cue.startTime * meta.sampleRate), meta.frameCount);
-    const int64_t playFrames = voiceFrames(cue);
-
+    const int sr = m_engine.isInitialized() ? m_engine.sampleRate() : 48000;
+    const int ch = m_engine.isInitialized() ? m_engine.channels()   : 2;
     auto reader = std::make_shared<StreamReader>(
-        cue.path,
-        m_engine.isInitialized() ? m_engine.sampleRate() : meta.sampleRate,
-        m_engine.isInitialized() ? m_engine.channels()   : meta.channels,
-        startFrame, playFrames);
+        cue.path, sr, ch, cue.startTime, cue.duration);
     if (reader->hasError()) return false;
 
     std::lock_guard<std::mutex> lk(m_slotMutex);
@@ -262,38 +253,39 @@ static int64_t voiceFrames(const Cue& cue) {
         : avail;
 }
 
-bool CueList::scheduleVoice(int cueIndex) {
-    const auto& cue  = m_cues[cueIndex];
-    const auto& meta = cue.audioFile.metadata();
-
-    const int64_t startFrame = std::min(
-        static_cast<int64_t>(cue.startTime * meta.sampleRate), meta.frameCount);
-    const int64_t playFrames = voiceFrames(cue);
-    if (playFrames <= 0) return false;
+int64_t CueList::scheduleVoice(int cueIndex) {
+    const auto& cue = m_cues[cueIndex];
 
     // Take the pre-armed stream if available; otherwise do a cold start.
     std::shared_ptr<StreamReader> reader;
     {
         std::lock_guard<std::mutex> lk(m_slotMutex);
-        reader = std::move(m_cues[cueIndex].armedStream);  // consume arm
+        reader = std::move(m_cues[cueIndex].armedStream);
     }
 
     if (!reader || reader->hasError()) {
         reader = std::make_shared<StreamReader>(
             cue.path, m_engine.sampleRate(), m_engine.channels(),
-            startFrame, playFrames);
-        if (reader->hasError()) return false;
+            cue.startTime, cue.duration);
+        if (reader->hasError()) return -1;
     }
 
+    const int64_t totalFrames = reader->totalOutputFrames();
+    // 0 means unknown length (stream); still valid — isDone() will stop the voice.
+    if (totalFrames < 0) return -1;
+
     const float gain = levelGain(cue.level, cue.trim);
+    // Pass engine.channels() as voiceChannels so the callback's channel check
+    // always passes — StreamReader::read() handles the actual channel mapping.
     const int slot = m_engine.scheduleStreamingVoice(
-        reader.get(), playFrames, meta.channels, cueIndex, gain);
-    if (slot < 0) return false;
+        reader.get(), totalFrames > 0 ? totalFrames : INT64_MAX / 2,
+        m_engine.channels(), cueIndex, gain);
+    if (slot < 0) return -1;
 
     std::lock_guard<std::mutex> lk(m_slotMutex);
     m_lastSlot[cueIndex] = slot;
-    m_slotStream[slot] = std::move(reader);  // keep alive until voice stops
-    return true;
+    m_slotStream[slot] = std::move(reader);
+    return totalFrames > 0 ? totalFrames : voiceFrames(cue);
 }
 
 bool CueList::fire(int idx) {
@@ -302,16 +294,19 @@ bool CueList::fire(int idx) {
     int64_t followFrames = 0;   // frames until autoFollow should trigger go()
 
     switch (cue.type) {
-        case CueType::Audio:
-            result       = scheduleVoice(idx);
-            followFrames = result ? voiceFrames(cue) : 0;
+        case CueType::Audio: {
+            const int64_t out = scheduleVoice(idx);
+            result       = (out >= 0);
+            followFrames = result ? out : 0;
             break;
+        }
 
         case CueType::Start: {
             const int ti = cue.targetIndex;
             if (ti >= 0 && ti < cueCount() && m_cues[ti].type == CueType::Audio) {
-                result       = scheduleVoice(ti);
-                followFrames = result ? voiceFrames(m_cues[ti]) : 0;
+                const int64_t out = scheduleVoice(ti);
+                result       = (out >= 0);
+                followFrames = result ? out : 0;
             }
             break;
         }

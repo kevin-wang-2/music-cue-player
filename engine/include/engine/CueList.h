@@ -158,7 +158,8 @@ private:
     bool fire(int cueIndex);
 
     // Shared by fire() (Audio path) — may be called from the scheduler thread.
-    bool scheduleVoice(int cueIndex);
+    // Returns total output frames at engine SR, or -1 on failure.
+    int64_t scheduleVoice(int cueIndex);
 
     AudioEngine& m_engine;
     Scheduler&   m_scheduler;

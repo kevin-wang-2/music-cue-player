@@ -1,4 +1,5 @@
 #include "engine/AudioFile.h"
+#include "engine/AudioDecoder.h"
 #include <sndfile.h>
 
 namespace mcp {
@@ -39,13 +40,12 @@ bool AudioFile::load(const std::string& path) {
 bool AudioFile::loadMetadata(const std::string& path) {
     unload();
     m_path = path;
-    SF_INFO info{};
-    SNDFILE* file = sf_open(path.c_str(), SFM_READ, &info);
-    if (!file) { m_error = sf_strerror(nullptr); return false; }
-    m_metadata.sampleRate = info.samplerate;
-    m_metadata.channels   = info.channels;
-    m_metadata.frameCount = info.frames;
-    sf_close(file);
+    std::string err;
+    auto dec = AudioDecoder::open(path, err);
+    if (!dec) { m_error = err; return false; }
+    m_metadata.sampleRate = dec->nativeSampleRate();
+    m_metadata.channels   = dec->nativeChannels();
+    m_metadata.frameCount = dec->nativeFrameCount();
     m_loaded = true;
     m_error.clear();
     return true;
