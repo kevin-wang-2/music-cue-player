@@ -118,6 +118,15 @@ public:
     void setCueFadeCurve        (int index, FadeData::Curve curve);
     void setCueFadeStopWhenDone (int index, bool v);
 
+    // Time-marker / slice-loop setters (audio cues only).
+    // Markers must be kept sorted by time; sliceLoops size = markers.size()+1.
+    void setCueMarkers   (int index, const std::vector<Cue::TimeMarker>& markers);
+    void setCueSliceLoops(int index, const std::vector<int>& loops);
+    void setCueMarkerTime(int index, int markerIdx, double time);
+    void setCueMarkerName(int index, int markerIdx, const std::string& name);
+    void addCueMarker    (int index, double time, const std::string& name = "");
+    void removeCueMarker (int index, int markerIdx);
+
     // --- ARM ----------------------------------------------------------------
 
     // Pre-buffer audio for cue[index] so that the next go()/start() fires

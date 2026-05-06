@@ -35,14 +35,27 @@ namespace mcp {
 // --------
 //   ~StreamReader() calls requestStop() then joins the I/O thread.
 //   For fast destruction call requestStop() before dropping the last reference.
+// One contiguous region of a file, played `loops` times in sequence.
+// endSecs == 0.0 means "to end of file from startSecs".
+// loops  == 0   means infinite (play until requestStop()).
+struct LoopSegment {
+    double startSecs{0.0};
+    double endSecs{0.0};
+    int    loops{1};
+};
+
 class StreamReader {
 public:
     static constexpr int64_t kRingFrames = 65536;  // ~1.36 s at 48 kHz
     static constexpr int64_t kArmFrames  = 8192;   // ~170 ms arm threshold
 
-    // Open `path`, seek to startTimeSecs, start I/O thread.
-    // targetSR / targetCh: engine's sample rate and channel count.
-    // durationSecs == 0 means play to end of file.
+    // Multi-segment constructor.  Segments are played in order; each is
+    // looped `segment.loops` times before advancing to the next one.
+    StreamReader(const std::string& path,
+                 int targetSR, int targetCh,
+                 std::vector<LoopSegment> segments);
+
+    // Convenience constructor for the common single-region, non-looping case.
     StreamReader(const std::string& path,
                  int    targetSR, int targetCh,
                  double startTimeSecs  = 0.0,
@@ -96,15 +109,14 @@ public:
 private:
     void ioThread();
 
-    std::string   m_path;
-    std::string   m_error;
-    AudioMetadata m_meta;
-    int           m_targetSR{0};
-    int           m_fileSR{0};
-    int           m_fileCh{0};
-    double        m_startTimeSecs{0.0};
-    double        m_durationSecs{0.0};
-    int64_t       m_totalOutputFrames{0};
+    std::string              m_path;
+    std::string              m_error;
+    AudioMetadata            m_meta;
+    int                      m_targetSR{0};
+    int                      m_fileSR{0};
+    int                      m_fileCh{0};
+    std::vector<LoopSegment> m_segments;
+    int64_t                  m_totalOutputFrames{0};
 
     // SPSC ring: kRingFrames * fileCh interleaved floats, at targetSR.
     std::vector<float>   m_ring;

@@ -2,6 +2,7 @@
 #include <cstdint>
 #include <memory>
 #include <string>
+#include <vector>
 
 namespace mcp {
 
@@ -28,5 +29,16 @@ public:
     // Returns actual frames read; 0 == EOF.
     virtual int64_t readFloat(float* buf, int64_t nFrames) = 0;
 };
+
+// Build min/max peak arrays for waveform display.
+// Produces peaks for up to 2 channels (stereo files → 2 channels; else 1).
+// fileDurationSecs and fileChannels are filled on success.
+// Returns false if the file cannot be opened.
+bool buildWaveformPeaks(const std::string& path,
+                         int numBuckets,
+                         std::vector<float> minPeaks[2],
+                         std::vector<float> maxPeaks[2],
+                         double& fileDurationSecs,
+                         int& fileChannels);
 
 } // namespace mcp

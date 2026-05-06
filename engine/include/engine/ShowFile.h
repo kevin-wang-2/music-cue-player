@@ -58,6 +58,11 @@ struct ShowFile {
         // Audio cues: crosspoint matrix entries (only enabled cells are stored)
         struct XpEntry { int s{0}; int o{0}; float db{0.0f}; };
         std::vector<XpEntry> xpEntries;
+        // Time markers (audio cues only) — absolute file positions, sorted by time
+        struct TimeMarker { double time{0.0}; std::string name; };
+        std::vector<TimeMarker> markers;
+        std::vector<int>        sliceLoops;  // [i] = loops for slice i; 0 = infinite
+
         // Fade cues
         std::string fadeCurve{"linear"};
         bool        fadeStopWhenDone{false};

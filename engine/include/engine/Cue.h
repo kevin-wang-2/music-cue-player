@@ -57,6 +57,17 @@ struct Cue {
     // Protected by CueList::m_slotMutex when accessed from multiple threads.
     std::shared_ptr<StreamReader> armedStream;
 
+    // Time markers within the audio file (audio cues only).
+    // Times are absolute file positions (seconds).  Sorted by time.
+    // Together with startTime / duration they define playback slices.
+    struct TimeMarker {
+        double      time{0.0};
+        std::string name;
+    };
+    std::vector<TimeMarker> markers;    // sorted by time
+    std::vector<int>        sliceLoops; // [i] = loop count for slice i; 0 = infinite; 1 = once
+                                        // size = markers.size() + 1 (auto-maintained)
+
     // Post-trigger behaviour (all types)
     bool autoContinue{false};
     bool autoFollow{false};

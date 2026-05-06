@@ -242,4 +242,68 @@ std::unique_ptr<AudioDecoder> AudioDecoder::open(const std::string& path,
     return nullptr;
 }
 
+// ---------------------------------------------------------------------------
+// Waveform peak building
+
+bool buildWaveformPeaks(const std::string& path,
+                         int numBuckets,
+                         std::vector<float> minPeaks[2],
+                         std::vector<float> maxPeaks[2],
+                         double& fileDurationSecs,
+                         int& fileChannels) {
+    std::string err;
+    auto dec = AudioDecoder::open(path, err);
+    if (!dec) return false;
+
+    const int     fileCh    = dec->nativeChannels();
+    const int     fileSR    = dec->nativeSampleRate();
+    const int64_t fileFrames = dec->nativeFrameCount();
+    if (fileCh <= 0 || fileSR <= 0 || fileFrames <= 0) return false;
+
+    fileDurationSecs = static_cast<double>(fileFrames) / fileSR;
+    fileChannels     = fileCh;
+
+    // We display 1 channel for mono/multi, 2 channels for stereo.
+    const int dispCh = (fileCh == 2) ? 2 : 1;
+
+    for (int c = 0; c < 2; ++c) {
+        minPeaks[c].assign(static_cast<size_t>(numBuckets), 0.0f);
+        maxPeaks[c].assign(static_cast<size_t>(numBuckets), 0.0f);
+    }
+    std::vector<bool> hasData(static_cast<size_t>(numBuckets), false);
+    std::vector<bool> hasData1(static_cast<size_t>(numBuckets), false);
+
+    constexpr int64_t kBuf = 4096;
+    std::vector<float> buf(static_cast<size_t>(kBuf * fileCh));
+    int64_t framePos = 0;
+
+    while (true) {
+        const int64_t got = dec->readFloat(buf.data(), kBuf);
+        if (got <= 0) break;
+        for (int64_t f = 0; f < got; ++f, ++framePos) {
+            const int bi = static_cast<int>(framePos * numBuckets / fileFrames);
+            if (bi >= numBuckets) break;
+            const float s0 = buf[f * fileCh + 0];
+            if (!hasData[static_cast<size_t>(bi)]) {
+                minPeaks[0][static_cast<size_t>(bi)] = maxPeaks[0][static_cast<size_t>(bi)] = s0;
+                hasData[static_cast<size_t>(bi)] = true;
+            } else {
+                if (s0 < minPeaks[0][static_cast<size_t>(bi)]) minPeaks[0][static_cast<size_t>(bi)] = s0;
+                if (s0 > maxPeaks[0][static_cast<size_t>(bi)]) maxPeaks[0][static_cast<size_t>(bi)] = s0;
+            }
+            if (dispCh == 2) {
+                const float s1 = buf[f * fileCh + 1];
+                if (!hasData1[static_cast<size_t>(bi)]) {
+                    minPeaks[1][static_cast<size_t>(bi)] = maxPeaks[1][static_cast<size_t>(bi)] = s1;
+                    hasData1[static_cast<size_t>(bi)] = true;
+                } else {
+                    if (s1 < minPeaks[1][static_cast<size_t>(bi)]) minPeaks[1][static_cast<size_t>(bi)] = s1;
+                    if (s1 > maxPeaks[1][static_cast<size_t>(bi)]) maxPeaks[1][static_cast<size_t>(bi)] = s1;
+                }
+            }
+        }
+    }
+    return true;
+}
+
 } // namespace mcp

@@ -1,5 +1,6 @@
 #include "tinyfiledialogs.h"
 
+#include "engine/AudioDecoder.h"
 #include "engine/AudioEngine.h"
 #include "engine/CueList.h"
 #include "engine/Scheduler.h"
@@ -135,6 +136,34 @@ struct App {
     // Drop notification: shown briefly after files are dragged in
     std::string dropMsg;
     double      dropMsgExpiry = 0.0;  // glfwGetTime() deadline
+
+    // ---- Time & Loops tab state ----
+
+    // Waveform peak cache (one slot — invalidated when path changes)
+    struct WfPeaks {
+        std::string        path;
+        std::vector<float> minPk[2];  // per-channel (up to 2)
+        std::vector<float> maxPk[2];
+        double             fileDur{0.0};
+        int                fileCh{0};
+        bool               valid{false};
+    } wfCache;
+
+    // View window (seconds)
+    double tl_viewStart{0.0};
+    double tl_viewDur  {0.0};   // 0 = show full file
+
+    // Drag state: -2=none, -1=startHandle, -3=endHandle, >=0=markerIdx
+    int    tl_drag        {-2};
+    double tl_dragValOrig {0.0};
+    float  tl_dragPxOrig  {0.0f};
+
+    int    tl_selMarker   {-1};    // selected marker
+    int    tl_editLoop    {-1};    // slice whose loop count is being edited
+    char   tl_loopBuf[16] {};
+    bool   tl_loopFocus   {false};
+    char   tl_markerNameBuf[64]{};
+    bool   tl_markerNameFocus{false};
 };
 
 // ---------------------------------------------------------------------------
@@ -218,6 +247,13 @@ static bool rebuildCueList(App& app, std::string& err) {
             app.cues.setCueAutoFollow  (i, cd.autoFollow);
             if (cd.type == "arm")
                 app.cues.setCueArmStartTime(i, cd.armStartTime);
+            // Markers and slice loops
+            if (cd.type == "audio") {
+                std::vector<mcp::Cue::TimeMarker> cueMarkers;
+                for (const auto& m : cd.markers) cueMarkers.push_back({m.time, m.name});
+                app.cues.setCueMarkers(i, cueMarkers);
+                app.cues.setCueSliceLoops(i, cd.sliceLoops);
+            }
             // Apply routing for audio cues
             if (cd.type == "audio") {
                 for (int o = 0; o < (int)cd.outLevelDb.size(); ++o)
@@ -265,6 +301,12 @@ static void syncSfFromCues(App& app) {
         cds[i].autoFollow   = c->autoFollow;
         if (c->type == mcp::CueType::Arm)
             cds[i].armStartTime = c->armStartTime;
+        if (c->type == mcp::CueType::Audio) {
+            cds[i].markers.clear();
+            for (const auto& m : c->markers)
+                cds[i].markers.push_back({m.time, m.name});
+            cds[i].sliceLoops = c->sliceLoops;
+        }
         // Audio routing
         if (c->type == mcp::CueType::Audio) {
             cds[i].outLevelDb = c->routing.outLevelDb;
@@ -368,6 +410,12 @@ static void renderInspector(App& app) {
         }
         if (c->type == mcp::CueType::Arm)
             app.insp_armStartTime = static_cast<float>(c->armStartTime);
+        // Reset Time & Loops view when cue changes
+        app.tl_viewStart = 0.0;
+        app.tl_viewDur   = 0.0;
+        app.tl_drag      = -2;
+        app.tl_selMarker = -1;
+        app.tl_editLoop  = -1;
         app.insp_lastSel = sel;
     }
 
@@ -882,6 +930,472 @@ static void renderInspector(App& app) {
                 ImGui::EndTabItem();
             }
         }  // end Trim tab
+
+        // Time & Loops tab — audio cues, single select only
+        if (c->type == mcp::CueType::Audio && !isMultiEdit) {
+            if (ImGui::BeginTabItem("Time & Loops")) {
+                // ---- Ensure waveform peaks are cached ----
+                {
+                    const std::string absPath = [&]{
+                        auto p = std::filesystem::path(c->path);
+                        if (!p.is_absolute() && !app.baseDir.empty())
+                            p = std::filesystem::path(app.baseDir) / p;
+                        return p.string();
+                    }();
+                    if (!app.wfCache.valid || app.wfCache.path != absPath) {
+                        app.wfCache = App::WfPeaks{};
+                        app.wfCache.path = absPath;
+                        app.wfCache.valid = mcp::buildWaveformPeaks(
+                            absPath, 2000,
+                            app.wfCache.minPk, app.wfCache.maxPk,
+                            app.wfCache.fileDur, app.wfCache.fileCh);
+                        app.tl_viewStart = 0.0;
+                        app.tl_viewDur   = 0.0;
+                    }
+                }
+                const double fileDur = app.wfCache.valid ? app.wfCache.fileDur : 0.0;
+                const int    fileCh  = app.wfCache.valid ? app.wfCache.fileCh  : 1;
+                const int    dispCh  = (fileCh == 2) ? 2 : 1;  // channels to display
+
+                // ---- View range ----
+                if (app.tl_viewDur <= 0.0 || app.tl_viewDur > fileDur)
+                    app.tl_viewDur = (fileDur > 0.0) ? fileDur : 1.0;
+                app.tl_viewStart = std::clamp(app.tl_viewStart, 0.0,
+                                              std::max(0.0, fileDur - app.tl_viewDur));
+
+                const double viewEnd  = app.tl_viewStart + app.tl_viewDur;
+
+                // ---- Canvas geometry ----
+                constexpr float kRulerH = 20.0f;
+                constexpr float kLoopH  = 18.0f;
+                const float     kWaveH  = 110.0f;   // total waveform zone
+                const float     kPerChH = (dispCh == 2) ? (kWaveH - 4.0f) * 0.5f : kWaveH;
+                const float     kTotalH = kRulerH + kWaveH + kLoopH;
+
+                const float canvasW = ImGui::GetContentRegionAvail().x - 8.0f;
+                const ImVec2 canvasPos = {
+                    ImGui::GetCursorScreenPos().x,
+                    ImGui::GetCursorScreenPos().y
+                };
+
+                auto secToX = [&](double t) -> float {
+                    return canvasPos.x + static_cast<float>((t - app.tl_viewStart) / app.tl_viewDur * canvasW);
+                };
+                auto xToSec = [&](float x) -> double {
+                    return app.tl_viewStart + (x - canvasPos.x) / canvasW * app.tl_viewDur;
+                };
+
+                // Invisible button for all interactions
+                ImGui::InvisibleButton("##tl_canvas", ImVec2(canvasW, kTotalH));
+                const bool hovered  = ImGui::IsItemHovered();
+                const bool lmbDown  = ImGui::IsMouseDown(0);
+                const bool lmbClick = ImGui::IsMouseClicked(0);
+                const bool rmbClick = ImGui::IsMouseClicked(1);
+                const ImVec2 mp     = ImGui::GetMousePos();
+                const double mpSec  = xToSec(mp.x);
+
+                // Snap threshold in pixels
+                constexpr float kSnapPx = 7.0f;
+
+                // ---- Handle positions ----
+                const double startSec = c->startTime;
+                const double endSec   = (c->duration > 0.0)
+                    ? c->startTime + c->duration : fileDur;
+
+                // ---- Drag logic ----
+                if (hovered && lmbClick) {
+                    // Check start handle
+                    if (std::abs(secToX(startSec) - mp.x) < kSnapPx
+                        && mp.y < canvasPos.y + kRulerH + 8.0f) {
+                        app.tl_drag        = -1;
+                        app.tl_dragValOrig = startSec;
+                        app.tl_dragPxOrig  = mp.x;
+                    }
+                    // Check end handle
+                    else if (std::abs(secToX(endSec) - mp.x) < kSnapPx
+                             && mp.y < canvasPos.y + kRulerH + 8.0f) {
+                        app.tl_drag        = -3;
+                        app.tl_dragValOrig = endSec;
+                        app.tl_dragPxOrig  = mp.x;
+                    }
+                    else {
+                        // Check markers
+                        bool hitMarker = false;
+                        for (int mi = 0; mi < (int)c->markers.size(); ++mi) {
+                            if (std::abs(secToX(c->markers[mi].time) - mp.x) < kSnapPx
+                                && mp.y < canvasPos.y + kRulerH + 8.0f) {
+                                app.tl_drag        = mi;
+                                app.tl_dragValOrig = c->markers[mi].time;
+                                app.tl_dragPxOrig  = mp.x;
+                                app.tl_selMarker   = mi;
+                                hitMarker = true;
+                                break;
+                            }
+                        }
+                        if (!hitMarker) {
+                            app.tl_selMarker = -1;
+                            // Click in waveform body → arm at this position
+                            if (mp.y > canvasPos.y + kRulerH && mpSec >= 0.0 && mpSec <= fileDur) {
+                                app.cues.arm(sel, mpSec);
+                            }
+                        }
+                    }
+                }
+
+                if (!lmbDown && app.tl_drag != -2) {
+                    if (app.tl_drag >= 0) {
+                        // Finalise marker move: sort markers by time
+                        const int mi = app.tl_drag;
+                        app.cues.setCueMarkerTime(sel, mi, c->markers[mi].time);
+                        syncSfFromCues(app);
+                    }
+                    app.tl_drag = -2;
+                }
+
+                if (app.tl_drag != -2 && lmbDown) {
+                    const double delta = (mp.x - app.tl_dragPxOrig) / canvasW * app.tl_viewDur;
+                    if (app.tl_drag == -1) {
+                        // Move start handle (clamp to [0, endSec])
+                        double ns = std::clamp(app.tl_dragValOrig + delta, 0.0, endSec - 0.001);
+                        app.cues.setCueStartTime(sel, ns);
+                        app.insp_startTime = static_cast<float>(ns);
+                        syncSfFromCues(app);
+                    } else if (app.tl_drag == -3) {
+                        // Move end handle → changes duration
+                        double ne = std::clamp(app.tl_dragValOrig + delta, startSec + 0.001, fileDur);
+                        double nd = ne - c->startTime;
+                        app.cues.setCueDuration(sel, nd);
+                        app.insp_duration = static_cast<float>(nd);
+                        syncSfFromCues(app);
+                    } else {
+                        // Move marker
+                        const int mi = app.tl_drag;
+                        double nt = std::clamp(app.tl_dragValOrig + delta, startSec + 0.001, endSec - 0.001);
+                        // Temporarily update just for display (committed on release)
+                        app.cues.setCueMarkerTime(sel, mi, nt);
+                        syncSfFromCues(app);
+                    }
+                }
+
+                // Scroll-wheel zoom
+                if (hovered) {
+                    const float wheel = ImGui::GetIO().MouseWheel;
+                    if (std::abs(wheel) > 0.01f) {
+                        const double pivot = mpSec;  // zoom around mouse
+                        const double factor = (wheel > 0) ? 0.8 : 1.25;
+                        app.tl_viewDur = std::clamp(app.tl_viewDur * factor,
+                                                     0.05, fileDur > 0 ? fileDur : 60.0);
+                        app.tl_viewStart = pivot - (pivot - app.tl_viewStart) * factor;
+                        app.tl_viewStart = std::clamp(app.tl_viewStart, 0.0,
+                                                       std::max(0.0, fileDur - app.tl_viewDur));
+                    }
+                    // Right-drag to pan
+                    if (ImGui::IsMouseDragging(1, 2.0f)) {
+                        const float dx = ImGui::GetIO().MouseDelta.x;
+                        const double shift = -dx / canvasW * app.tl_viewDur;
+                        app.tl_viewStart = std::clamp(app.tl_viewStart + shift,
+                                                       0.0, std::max(0.0, fileDur - app.tl_viewDur));
+                    }
+                }
+
+                // ---- Draw canvas ----
+                ImDrawList* dl = ImGui::GetWindowDrawList();
+                const ImVec2 canvasMax = { canvasPos.x + canvasW, canvasPos.y + kTotalH };
+
+                // Background
+                dl->AddRectFilled(canvasPos, canvasMax, IM_COL32(12, 14, 22, 255));
+
+                // Inactive region shading (before startTime and after endTime)
+                const float sx = secToX(startSec), ex = secToX(endSec);
+                const float waveTop = canvasPos.y + kRulerH;
+                const float waveBot = waveTop + kWaveH;
+                if (sx > canvasPos.x)
+                    dl->AddRectFilled(canvasPos, {sx, waveBot}, IM_COL32(0, 0, 0, 100));
+                if (ex < canvasMax.x)
+                    dl->AddRectFilled({ex, canvasPos.y}, {canvasMax.x, waveBot}, IM_COL32(0, 0, 0, 100));
+
+                // Slice backgrounds (alternating subtle tints between markers)
+                {
+                    std::vector<double> bounds;
+                    bounds.push_back(startSec);
+                    for (const auto& m : c->markers) bounds.push_back(m.time);
+                    bounds.push_back(endSec);
+                    for (int bi = 0; bi + 1 < (int)bounds.size(); ++bi) {
+                        const float bx = std::max(canvasPos.x, secToX(bounds[static_cast<size_t>(bi)]));
+                        const float bex = std::min(canvasMax.x, secToX(bounds[static_cast<size_t>(bi+1)]));
+                        if (bex > bx && bi % 2 == 1)
+                            dl->AddRectFilled({bx, waveTop}, {bex, waveBot}, IM_COL32(255,255,255, 8));
+                    }
+                }
+
+                // Waveform
+                if (app.wfCache.valid && fileDur > 0.0) {
+                    const int nBuckets = (int)app.wfCache.minPk[0].size();
+                    for (int ch = 0; ch < dispCh; ++ch) {
+                        const float chTop = waveTop + ch * (kPerChH + 4.0f);
+                        const float chMid = chTop + kPerChH * 0.5f;
+                        const float half  = kPerChH * 0.48f;
+                        // Centre line
+                        dl->AddLine({canvasPos.x, chMid}, {canvasPos.x + canvasW, chMid},
+                                    IM_COL32(255,255,255,20), 1.0f);
+                        // Peaks — one vertical line per pixel column
+                        const int cols = std::max(1, static_cast<int>(canvasW));
+                        for (int px = 0; px < cols; ++px) {
+                            const double tL = app.tl_viewStart + px       * app.tl_viewDur / canvasW;
+                            const double tR = app.tl_viewStart + (px + 1) * app.tl_viewDur / canvasW;
+                            const int bL = std::clamp(static_cast<int>(tL / fileDur * nBuckets), 0, nBuckets - 1);
+                            const int bR = std::clamp(static_cast<int>(tR / fileDur * nBuckets), 0, nBuckets - 1);
+                            float mn = app.wfCache.minPk[ch][static_cast<size_t>(bL)];
+                            float mx = app.wfCache.maxPk[ch][static_cast<size_t>(bL)];
+                            for (int b = bL + 1; b <= bR; ++b) {
+                                mn = std::min(mn, app.wfCache.minPk[ch][static_cast<size_t>(b)]);
+                                mx = std::max(mx, app.wfCache.maxPk[ch][static_cast<size_t>(b)]);
+                            }
+                            const float y0 = chMid - mx * half;
+                            const float y1 = chMid - mn * half;
+                            dl->AddLine({canvasPos.x + px, y0}, {canvasPos.x + px, y1},
+                                        IM_COL32(100, 160, 220, 200), 1.0f);
+                        }
+                    }
+                } else {
+                    const float mid = waveTop + kWaveH * 0.5f;
+                    dl->AddLine({canvasPos.x, mid}, {canvasPos.x + canvasW, mid},
+                                IM_COL32(255,255,255,30), 1.0f);
+                }
+
+                // ---- Ruler ----
+                const float rulerTop = canvasPos.y;
+                const float rulerBot = rulerTop + kRulerH;
+                dl->AddRectFilled({canvasPos.x, rulerTop}, {canvasPos.x + canvasW, rulerBot},
+                                  IM_COL32(20, 24, 36, 255));
+
+                // Ruler ticks: choose a nice interval that gives ~80px between ticks
+                auto niceInterval = [](double viewDur, float canvasW) -> double {
+                    const double secPerPx = viewDur / canvasW;
+                    const double rawStep  = secPerPx * 80.0;
+                    // round to 0.01, 0.025, 0.05, 0.1, 0.25, 0.5, 1, 2, 5, 10 …
+                    const double pow10 = std::pow(10.0, std::floor(std::log10(rawStep)));
+                    const double frac  = rawStep / pow10;
+                    double step;
+                    if      (frac < 1.5) step = 1.0   * pow10;
+                    else if (frac < 3.0) step = 2.5   * pow10;
+                    else if (frac < 7.0) step = 5.0   * pow10;
+                    else                 step = 10.0  * pow10;
+                    return step;
+                };
+                const double tickStep = niceInterval(app.tl_viewDur, canvasW);
+                const double firstTick = std::floor(app.tl_viewStart / tickStep) * tickStep;
+                for (double t = firstTick; t <= viewEnd + tickStep * 0.01; t += tickStep) {
+                    if (t < 0.0) continue;
+                    const float tx = secToX(t);
+                    if (tx < canvasPos.x || tx > canvasPos.x + canvasW) continue;
+                    dl->AddLine({tx, rulerBot - 8.0f}, {tx, rulerBot}, IM_COL32(180,180,180,120), 1.0f);
+                    char buf[24];
+                    if (tickStep < 0.1) std::snprintf(buf, sizeof(buf), "%.2f", t);
+                    else if (tickStep < 1.0) std::snprintf(buf, sizeof(buf), "%.1f", t);
+                    else {
+                        const int m = static_cast<int>(t) / 60;
+                        const int s = static_cast<int>(t) % 60;
+                        if (m > 0) std::snprintf(buf, sizeof(buf), "%d:%02d", m, s);
+                        else       std::snprintf(buf, sizeof(buf), "%d", (int)t);
+                    }
+                    dl->AddText({tx + 2, rulerTop + 2}, IM_COL32(160,160,160,200), buf);
+                }
+
+                // Playhead
+                if (app.cues.isCuePlaying(sel)) {
+                    const double ph = c->startTime + app.cues.cuePlayheadSeconds(sel);
+                    const float phx = secToX(ph);
+                    if (phx >= canvasPos.x && phx <= canvasPos.x + canvasW) {
+                        dl->AddLine({phx, rulerTop}, {phx, canvasPos.y + kTotalH},
+                                    IM_COL32(100, 255, 120, 200), 1.5f);
+                        // Triangle at top
+                        dl->AddTriangleFilled(
+                            {phx, rulerBot},
+                            {phx - 5, rulerTop},
+                            {phx + 5, rulerTop},
+                            IM_COL32(100, 255, 120, 220));
+                    }
+                }
+
+                // ---- Handles + markers + loop labels ----
+                auto drawHandle = [&](float hx, ImU32 col, ImU32 lineCol) {
+                    if (hx < canvasPos.x || hx > canvasPos.x + canvasW) return;
+                    // vertical line
+                    dl->AddLine({hx, rulerBot}, {hx, waveBot}, lineCol, 1.5f);
+                    // downward triangle in ruler
+                    dl->AddTriangleFilled(
+                        {hx, rulerBot},
+                        {hx - 5, rulerTop + 3},
+                        {hx + 5, rulerTop + 3},
+                        col);
+                };
+
+                // Start handle (green)
+                drawHandle(secToX(startSec),
+                           IM_COL32( 80, 220, 100, 230), IM_COL32( 80, 220, 100, 120));
+                // End handle (lighter green)
+                drawHandle(secToX(endSec),
+                           IM_COL32(160, 220, 160, 200), IM_COL32(160, 220, 160, 80));
+
+                // Markers (amber)
+                for (int mi = 0; mi < (int)c->markers.size(); ++mi) {
+                    const float mx_   = secToX(c->markers[mi].time);
+                    if (mx_ < canvasPos.x || mx_ > canvasPos.x + canvasW) continue;
+                    const bool selM   = (app.tl_selMarker == mi);
+                    const ImU32 mcol  = selM
+                        ? IM_COL32(255, 220,  60, 255)
+                        : IM_COL32(220, 160,  40, 200);
+                    // Dashed vertical line
+                    for (float dy = rulerBot; dy < waveBot; dy += 5.0f)
+                        dl->AddLine({mx_, dy}, {mx_, std::min(dy + 3.0f, waveBot)}, mcol & 0x80FFFFFF, 1.0f);
+                    // Triangle
+                    dl->AddTriangleFilled(
+                        {mx_, rulerBot},
+                        {mx_ - 5, rulerTop + 3},
+                        {mx_ + 5, rulerTop + 3},
+                        mcol);
+                    // Name label below triangle
+                    if (!c->markers[mi].name.empty()) {
+                        const float labY = rulerTop + kRulerH * 0.85f;
+                        dl->AddText({mx_ + 4, labY - 8},
+                                    IM_COL32(220, 180, 80, 220),
+                                    c->markers[mi].name.c_str());
+                    }
+                    // Marker index badge
+                    char ibuf[8]; std::snprintf(ibuf, sizeof(ibuf), "%d", mi + 1);
+                    dl->AddText({mx_ + 3, rulerTop + 3}, IM_COL32(255, 220, 80, 180), ibuf);
+                }
+
+                // Loop count labels — one per slice, at the bottom zone
+                {
+                    const float loopTop = waveBot;
+                    std::vector<double> bounds;
+                    bounds.push_back(startSec);
+                    for (const auto& m : c->markers) bounds.push_back(m.time);
+                    bounds.push_back(endSec);
+
+                    for (int bi = 0; bi + 1 < (int)bounds.size(); ++bi) {
+                        const double bL  = bounds[static_cast<size_t>(bi)];
+                        const double bR  = bounds[static_cast<size_t>(bi + 1)];
+                        const float  blX = std::max(canvasPos.x, secToX(bL));
+                        const float  brX = std::min(canvasPos.x + canvasW, secToX(bR));
+                        if (brX <= blX + 2.0f) continue;
+
+                        const int lc  = (bi < (int)c->sliceLoops.size()) ? c->sliceLoops[bi] : 1;
+                        const float midX = (blX + brX) * 0.5f;
+
+                        if (app.tl_editLoop == bi) {
+                            // Inline text input
+                            ImGui::SetCursorScreenPos({midX - 16, loopTop + 1});
+                            ImGui::SetNextItemWidth(32);
+                            if (app.tl_loopFocus) { ImGui::SetKeyboardFocusHere(); app.tl_loopFocus = false; }
+                            ImGui::InputText("##loopIn", app.tl_loopBuf, sizeof(app.tl_loopBuf),
+                                             ImGuiInputTextFlags_EnterReturnsTrue);
+                            if (ImGui::IsItemDeactivated()) {
+                                // Parse: numeric → loop count; non-numeric → infinite (0)
+                                int newLc = 1;
+                                bool isNum = true;
+                                for (const char* p = app.tl_loopBuf; *p; ++p)
+                                    if (!std::isdigit(static_cast<unsigned char>(*p))) { isNum = false; break; }
+                                if (isNum && app.tl_loopBuf[0] != '\0') newLc = std::max(0, std::stoi(app.tl_loopBuf));
+                                else if (!isNum) newLc = 0;  // infinite
+                                app.cues.setCueSliceLoops(sel, [&]{ auto sl = c->sliceLoops; if (bi < (int)sl.size()) sl[static_cast<size_t>(bi)] = newLc; return sl; }());
+                                syncSfFromCues(app);
+                                app.tl_editLoop = -1;
+                            }
+                        } else {
+                            // Display label — click to edit
+                            char lbl[16];
+                            if (lc == 0) std::snprintf(lbl, sizeof(lbl), u8"∞");  // ∞
+                            else         std::snprintf(lbl, sizeof(lbl), "%d", lc);
+                            const float tw = ImGui::CalcTextSize(lbl).x;
+                            const float lx = midX - tw * 0.5f;
+                            dl->AddText({lx, loopTop + 2},
+                                        lc == 0 ? IM_COL32(255,160,60,240) : IM_COL32(180,200,255,200),
+                                        lbl);
+                            // Clickable region
+                            ImGui::SetCursorScreenPos({lx - 4, loopTop + 1});
+                            ImGui::InvisibleButton(("##lc" + std::to_string(bi)).c_str(),
+                                                    {tw + 8, kLoopH - 2});
+                            if (ImGui::IsItemHovered()) ImGui::SetTooltip("Click to edit loop count (non-numeric = ∞)");
+                            if (ImGui::IsItemClicked()) {
+                                app.tl_editLoop = bi;
+                                app.tl_loopFocus = true;
+                                if (lc == 0) std::strncpy(app.tl_loopBuf, u8"∞", sizeof(app.tl_loopBuf) - 1);
+                                else {
+                                    std::snprintf(app.tl_loopBuf, sizeof(app.tl_loopBuf), "%d", lc);
+                                }
+                            }
+                        }
+                    }
+                }
+
+                // Selected marker editor
+                if (app.tl_selMarker >= 0 && app.tl_selMarker < (int)c->markers.size()) {
+                    const int mi = app.tl_selMarker;
+                    ImGui::Spacing();
+                    ImGui::SetCursorPosX(8);
+                    ImGui::TextColored(ImVec4(1.0f, 0.82f, 0.3f, 1.0f), "Marker %d", mi + 1);
+                    ImGui::SameLine(0, 12);
+                    ImGui::SetNextItemWidth(120);
+                    float mt = static_cast<float>(c->markers[mi].time);
+                    if (ImGui::DragFloat("##mtime", &mt, 0.001f, 0.0f, static_cast<float>(fileDur), "%.4f s")) {
+                        app.cues.setCueMarkerTime(sel, mi, mt);
+                        syncSfFromCues(app);
+                    }
+                    ImGui::SameLine(0, 8);
+                    if (!app.tl_markerNameFocus && !app.tl_markerNameBuf[0]) {
+                        std::strncpy(app.tl_markerNameBuf, c->markers[mi].name.c_str(),
+                                     sizeof(app.tl_markerNameBuf) - 1);
+                    }
+                    ImGui::SetNextItemWidth(140);
+                    ImGui::InputText("Name##mn", app.tl_markerNameBuf, sizeof(app.tl_markerNameBuf));
+                    if (ImGui::IsItemDeactivatedAfterEdit()) {
+                        app.cues.setCueMarkerName(sel, mi, app.tl_markerNameBuf);
+                        syncSfFromCues(app);
+                    }
+                    ImGui::SameLine(0, 8);
+                    if (ImGui::SmallButton("Delete##md")) {
+                        app.cues.removeCueMarker(sel, mi);
+                        syncSfFromCues(app);
+                        app.tl_selMarker = -1;
+                    }
+                }
+
+                // Right-click context menu
+                if (hovered && rmbClick && !ImGui::IsMouseDragging(1)) {
+                    ImGui::OpenPopup("##tl_ctx");
+                    // We'll pass the right-click time via a static
+                }
+                // Capture the right-click time for the popup
+                static double s_ctxTime = 0.0;
+                if (hovered && rmbClick) s_ctxTime = mpSec;
+                if (ImGui::BeginPopup("##tl_ctx")) {
+                    char addLbl[48];
+                    std::snprintf(addLbl, sizeof(addLbl), "Add marker at %.3f s", s_ctxTime);
+                    if (ImGui::MenuItem(addLbl)) {
+                        app.cues.addCueMarker(sel, s_ctxTime);
+                        syncSfFromCues(app);
+                        app.tl_selMarker = static_cast<int>(c->markers.size()) - 1;
+                    }
+                    if (!app.wfCache.valid)
+                        ImGui::TextDisabled("(waveform not available)");
+                    ImGui::EndPopup();
+                }
+
+                // Reset view button
+                ImGui::SameLine();
+                ImGui::SetCursorPosX(8);
+                if (ImGui::SmallButton("Fit")) {
+                    app.tl_viewStart = 0.0;
+                    app.tl_viewDur   = fileDur > 0 ? fileDur : 1.0;
+                }
+                if (ImGui::IsItemHovered()) ImGui::SetTooltip("Fit view to full file");
+
+                ImGui::EndTabItem();
+            }
+        }  // end Time & Loops tab
 
         // Levels tab — fade cues (fade target faders)
         if (c->type == mcp::CueType::Fade && fd_raw) {

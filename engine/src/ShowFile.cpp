@@ -45,6 +45,26 @@ static ShowFile::CueData parseCue(const json& j) {
         }
     }
 
+    // Time markers
+    if (j.contains("markers") && j["markers"].is_array()) {
+        for (const auto& m : j["markers"]) {
+            ShowFile::CueData::TimeMarker tm;
+            tm.time = jget<double>     (m, "time", 0.0);
+            tm.name = jget<std::string>(m, "name", "");
+            c.markers.push_back(tm);
+        }
+    }
+    if (j.contains("sliceLoops") && j["sliceLoops"].is_array()) {
+        for (const auto& v : j["sliceLoops"])
+            c.sliceLoops.push_back(v.get<int>());
+    }
+    // Ensure sliceLoops has the right size (markers.size()+1).
+    {
+        const int want = (int)c.markers.size() + 1;
+        while ((int)c.sliceLoops.size() < want) c.sliceLoops.push_back(1);
+        c.sliceLoops.resize(static_cast<size_t>(want));
+    }
+
     // Fade cue parameters
     c.fadeCurve        = jget<std::string>(j, "fadeCurve",        "linear");
     c.fadeStopWhenDone = jget<bool>       (j, "fadeStopWhenDone", false);
@@ -92,6 +112,26 @@ static json cueToJson(const ShowFile::CueData& c) {
     j["cueNumber"] = c.cueNumber;
     j["name"]      = c.name;
     j["preWait"]   = c.preWait;
+
+    if (c.type == "audio" && !c.markers.empty()) {
+        json arr = json::array();
+        for (const auto& m : c.markers) {
+            json mj; mj["time"] = m.time;
+            if (!m.name.empty()) mj["name"] = m.name;
+            arr.push_back(mj);
+        }
+        j["markers"] = arr;
+        // Only write sliceLoops when any differs from 1 (default)
+        bool anyNonOne = false;
+        for (int v : c.sliceLoops) if (v != 1) { anyNonOne = true; break; }
+        if (anyNonOne) {
+            json la = json::array();
+            for (int v : c.sliceLoops) la.push_back(v);
+            j["sliceLoops"] = la;
+        }
+    } else if (!c.markers.empty()) {
+        // Keep markers for non-audio types (should not happen but be safe)
+    }
 
     if (c.type == "audio") {
         j["path"] = c.path;

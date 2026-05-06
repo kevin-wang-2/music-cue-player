@@ -325,6 +325,49 @@ void CueList::setCueFadeStopWhenDone(int i, bool v) {
 }
 
 // ---------------------------------------------------------------------------
+// Marker / slice-loop setters
+
+static void normaliseSliceLoops(Cue& cue) {
+    const int want = (int)cue.markers.size() + 1;
+    while ((int)cue.sliceLoops.size() < want) cue.sliceLoops.push_back(1);
+    cue.sliceLoops.resize(static_cast<size_t>(want));
+}
+
+void CueList::setCueMarkers(int i, const std::vector<Cue::TimeMarker>& m) {
+    if (i < 0 || i >= cueCount()) return;
+    m_cues[i].markers = m;
+    normaliseSliceLoops(m_cues[i]);
+}
+void CueList::setCueSliceLoops(int i, const std::vector<int>& l) {
+    if (i < 0 || i >= cueCount()) return;
+    m_cues[i].sliceLoops = l;
+    normaliseSliceLoops(m_cues[i]);
+}
+void CueList::setCueMarkerTime(int i, int mi, double t) {
+    if (i < 0 || i >= cueCount() || mi < 0 || mi >= (int)m_cues[i].markers.size()) return;
+    m_cues[i].markers[static_cast<size_t>(mi)].time = t;
+    std::stable_sort(m_cues[i].markers.begin(), m_cues[i].markers.end(),
+                     [](const Cue::TimeMarker& a, const Cue::TimeMarker& b){ return a.time < b.time; });
+}
+void CueList::setCueMarkerName(int i, int mi, const std::string& n) {
+    if (i < 0 || i >= cueCount() || mi < 0 || mi >= (int)m_cues[i].markers.size()) return;
+    m_cues[i].markers[static_cast<size_t>(mi)].name = n;
+}
+void CueList::addCueMarker(int i, double time, const std::string& name) {
+    if (i < 0 || i >= cueCount()) return;
+    Cue::TimeMarker tm; tm.time = time; tm.name = name;
+    m_cues[i].markers.push_back(tm);
+    std::stable_sort(m_cues[i].markers.begin(), m_cues[i].markers.end(),
+                     [](const Cue::TimeMarker& a, const Cue::TimeMarker& b){ return a.time < b.time; });
+    normaliseSliceLoops(m_cues[i]);
+}
+void CueList::removeCueMarker(int i, int mi) {
+    if (i < 0 || i >= cueCount() || mi < 0 || mi >= (int)m_cues[i].markers.size()) return;
+    m_cues[i].markers.erase(m_cues[i].markers.begin() + mi);
+    normaliseSliceLoops(m_cues[i]);
+}
+
+// ---------------------------------------------------------------------------
 // Live routing update (called from fade callbacks in the scheduler thread)
 // These do NOT modify the Cue struct — fades are live-voice-only multipliers.
 
@@ -384,6 +427,36 @@ void CueList::applyRoutingToReader(const Cue& cue, StreamReader& reader,
     reader.setRouting(std::move(xpGains), std::move(outLevGains), outCh);
 }
 
+// Build a segment list from a cue's markers and sliceLoops.
+// Each marker divides the [startTime, endTime] range into a slice;
+// each slice is played `sliceLoops[i]` times.
+static std::vector<LoopSegment> buildSegments(const Cue& cue) {
+    std::vector<LoopSegment> segs;
+
+    // Boundary times: use -1.0 as "end of file" sentinel.
+    const double endSec = (cue.duration > 0.0) ? cue.startTime + cue.duration : -1.0;
+
+    std::vector<double> bounds;
+    bounds.push_back(cue.startTime);
+    for (const auto& m : cue.markers) {
+        if (m.time > cue.startTime && (endSec < 0.0 || m.time < endSec))
+            bounds.push_back(m.time);
+    }
+    bounds.push_back(endSec);  // -1 = play to file end
+
+    for (int bi = 0; bi < (int)bounds.size() - 1; ++bi) {
+        LoopSegment s;
+        s.startSecs = bounds[static_cast<size_t>(bi)];
+        // Convert -1 sentinel to 0.0 (StreamReader: 0 = to end of file).
+        const double e = bounds[static_cast<size_t>(bi + 1)];
+        s.endSecs   = (e < 0.0) ? 0.0 : e;
+        const int lc  = (bi < (int)cue.sliceLoops.size()) ? cue.sliceLoops[static_cast<size_t>(bi)] : 1;
+        s.loops     = (lc <= 0) ? 0 : lc;
+        segs.push_back(s);
+    }
+    return segs;
+}
+
 // Returns the number of frames that will actually be played for a given cue.
 // For non-audio cues returns 0.
 static int64_t voiceFrames(const Cue& cue) {
@@ -408,9 +481,9 @@ int64_t CueList::scheduleVoice(int cueIndex) {
     }
 
     if (!reader || reader->hasError()) {
+        auto segs = buildSegments(cue);
         reader = std::make_shared<StreamReader>(
-            cue.path, m_engine.sampleRate(), m_engine.channels(),
-            cue.startTime, cue.duration);
+            cue.path, m_engine.sampleRate(), m_engine.channels(), std::move(segs));
         if (reader->hasError()) return -1;
     }
 
@@ -725,9 +798,32 @@ double CueList::cueTotalSeconds(int index) const {
     if (index < 0 || index >= cueCount()) return 0.0;
     const auto& cue = m_cues[index];
     if (cue.type != CueType::Audio || !cue.audioFile.isLoaded()) return 0.0;
-    const int64_t frames = voiceFrames(cue);
-    const int sr = cue.audioFile.metadata().sampleRate;
-    return (sr > 0) ? static_cast<double>(frames) / sr : 0.0;
+    const auto& meta = cue.audioFile.metadata();
+    const int sr = meta.sampleRate;
+    if (sr <= 0) return 0.0;
+
+    if (cue.markers.empty()) {
+        const int lc  = cue.sliceLoops.empty() ? 1 : cue.sliceLoops[0];
+        if (lc == 0) return 0.0;  // infinite → unknown duration
+        const int64_t frames = voiceFrames(cue);
+        return static_cast<double>(frames) / sr * lc;
+    }
+
+    // Multi-slice: sum up each slice duration * its loop count.
+    const double fileDur = static_cast<double>(meta.frameCount) / sr;
+    const double endSec  = (cue.duration > 0.0) ? cue.startTime + cue.duration : fileDur;
+    std::vector<double> bounds;
+    bounds.push_back(cue.startTime);
+    for (const auto& m : cue.markers) bounds.push_back(m.time);
+    bounds.push_back(endSec);
+
+    double total = 0.0;
+    for (int i = 0; i < (int)bounds.size() - 1; ++i) {
+        const int lc = (i < (int)cue.sliceLoops.size()) ? cue.sliceLoops[static_cast<size_t>(i)] : 1;
+        if (lc == 0) return 0.0;  // infinite
+        total += (bounds[static_cast<size_t>(i+1)] - bounds[static_cast<size_t>(i)]) * lc;
+    }
+    return total;
 }
 
 } // namespace mcp
