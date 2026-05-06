@@ -28,6 +28,10 @@ static ShowFile::CueData parseCue(const json& j) {
     c.trim            = jget<double>     (j, "trim",            0.0);
     c.autoContinue    = jget<bool>       (j, "autoContinue",    false);
     c.autoFollow      = jget<bool>       (j, "autoFollow",      false);
+    c.fadeParameter    = jget<std::string>(j, "fadeParameter",    "level");
+    c.fadeTargetValue  = jget<double>    (j, "fadeTargetValue",  0.0);
+    c.fadeCurve        = jget<std::string>(j, "fadeCurve",       "linear");
+    c.fadeStopWhenDone = jget<bool>      (j, "fadeStopWhenDone", false);
     return c;
 }
 
@@ -43,9 +47,16 @@ static json cueToJson(const ShowFile::CueData& c) {
         if (c.duration  != 0.0) j["duration"]  = c.duration;
         if (c.level     != 0.0) j["level"]     = c.level;
         if (c.trim      != 0.0) j["trim"]      = c.trim;
-    } else {
+    } else if (c.type == "start" || c.type == "stop" || c.type == "arm") {
         j["target"]          = c.target;
         j["targetCueNumber"] = c.targetCueNumber;
+    } else if (c.type == "fade") {
+        j["targetCueNumber"] = c.targetCueNumber;
+        j["fadeParameter"]   = c.fadeParameter;
+        j["fadeTargetValue"] = c.fadeTargetValue;
+        if (c.duration  != 0.0) j["duration"] = c.duration;   // fade length
+        j["fadeCurve"]       = c.fadeCurve;
+        if (c.fadeStopWhenDone) j["fadeStopWhenDone"] = true;
     }
     if (c.autoContinue) j["autoContinue"] = true;
     if (c.autoFollow)   j["autoFollow"]   = true;

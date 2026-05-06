@@ -28,7 +28,13 @@ public:
     AudioFile(AudioFile&&) = default;
     AudioFile& operator=(AudioFile&&) = default;
 
+    // Load the full file into memory (samples() will be populated).
     bool load(const std::string& path);
+
+    // Load only header metadata — samples() stays empty.
+    // Cheaper than load() for large files; use when only duration/format is needed.
+    bool loadMetadata(const std::string& path);
+
     void unload();
 
     bool isLoaded() const { return m_loaded; }

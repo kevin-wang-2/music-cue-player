@@ -50,6 +50,11 @@ struct ShowFile {
         // Audio cues: gain (dB; 0 = unity)
         double      level{0.0};
         double      trim{0.0};
+        // Fade cues (duration shared with audio cue's playback region field)
+        std::string fadeParameter{"level"};
+        double      fadeTargetValue{0.0};
+        std::string fadeCurve{"linear"};      // "linear" | "equalpower"
+        bool        fadeStopWhenDone{false};
     };
 
     // ---- Cue list ----------------------------------------------------------

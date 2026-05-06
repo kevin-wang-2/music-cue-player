@@ -1,4 +1,5 @@
 #include "engine/AudioEngine.h"
+#include "engine/StreamReader.h"
 #include <portaudio.h>
 #include <algorithm>
 #include <array>
@@ -11,11 +12,13 @@ namespace mcp {
 // ---------------------------------------------------------------------------
 struct VoiceSlot {
     struct Pending {
-        const float* samples{nullptr};
-        int64_t      totalFrames{0};
-        int          channels{0};
-        int          tag{-1};
-        float        gain{1.0f};
+        const float*  samples{nullptr};       // in-memory mode
+        StreamReader* streamReader{nullptr};  // streaming mode
+        bool          streaming{false};
+        int64_t       totalFrames{0};
+        int           channels{0};
+        int           tag{-1};
+        float         gain{1.0f};
     } pending;
 
     std::atomic<bool>  pendingReady{false};
@@ -26,10 +29,12 @@ struct VoiceSlot {
     std::atomic<float> gain{1.0f};
 
     // Written by audio thread at activation; readable by the main thread.
-    const float*      samples{nullptr};
-    int64_t           totalFrames{0};
-    int               channels{0};
-    int64_t           startEngineFrame{0};  // engine-time coordinate
+    const float*  samples{nullptr};
+    StreamReader* streamReader{nullptr};
+    bool          streaming{false};
+    int64_t       totalFrames{0};
+    int           channels{0};
+    int64_t       startEngineFrame{0};  // engine-time coordinate
     std::atomic<int>  activeTag{-1};
     std::atomic<bool> active{false};
 };
@@ -46,12 +51,13 @@ struct AudioEngineImpl {
 
     std::array<VoiceSlot, AudioEngine::kMaxVoices> voices;
 
-    // bufferPlayhead — incremented each callback by this device's frame count.
-    // enginePlayhead — the master clock; written here because this is the sole
-    //                  (master) device. In a multi-device setup only the master
-    //                  device's callback would update this.
     std::atomic<int64_t> bufferPlayhead{0};
     std::atomic<int64_t> enginePlayhead{0};
+
+    // Soft-panic fade state — written by main thread, read by audio callback.
+    std::atomic<bool>    softPanicActive{false};
+    std::atomic<int64_t> softPanicStartFrame{0};
+    std::atomic<int64_t> softPanicEndFrame{0};
 };
 
 // ---------------------------------------------------------------------------
@@ -81,9 +87,10 @@ static int paCallback(const void* /*input*/, void* output,
         }
 
         // Apply pending voice — voice starts at the first sample of this buffer.
-        // The start is recorded in engine time so it stays valid across devices.
         if (v.pendingReady.load(std::memory_order_acquire)) {
             v.samples          = v.pending.samples;
+            v.streamReader     = v.pending.streamReader;
+            v.streaming        = v.pending.streaming;
             v.totalFrames      = v.pending.totalFrames;
             v.channels         = v.pending.channels;
             v.startEngineFrame = engStart;
@@ -100,26 +107,56 @@ static int paCallback(const void* /*input*/, void* output,
             continue;
         }
 
-        // Voice position: how many frames have elapsed since this voice started,
-        // expressed in engine time. For this device: bufStart == engStart, so
-        // localStart = bufStart - v.startEngineFrame.
-        // A future slave device would compute:
-        //   localStart = (bufStart + slaveOffset) - v.startEngineFrame
-        // where slaveOffset maps buffer time → engine time for that device.
         const int64_t localStart = engStart - v.startEngineFrame;
         if (localStart < 0) { v.active.store(false, std::memory_order_release); continue; }
 
         const int64_t remaining = v.totalFrames - localStart;
         const int64_t toRead    = std::min(static_cast<int64_t>(frameCount), remaining);
+        const float   gain      = v.gain.load(std::memory_order_relaxed);
 
-        const float* src  = v.samples + localStart * v.channels;
-        const float  gain = v.gain.load(std::memory_order_relaxed);
-        for (int64_t f = 0; f < toRead; ++f)
+        if (v.streaming) {
+            // Ring-buffer path: read() adds to out directly and tracks position internally.
+            if (v.streamReader && toRead > 0) {
+                const int64_t got = v.streamReader->read(out, toRead, impl->outChannels, gain);
+                if (got < toRead && v.streamReader->isDone())
+                    v.active.store(false, std::memory_order_release);
+            }
+            if (toRead < static_cast<int64_t>(frameCount))
+                v.active.store(false, std::memory_order_release);
+        } else {
+            // In-memory path (unchanged for backward compatibility).
+            const float* src = v.samples + localStart * v.channels;
+            for (int64_t f = 0; f < toRead; ++f)
+                for (int ch = 0; ch < impl->outChannels; ++ch)
+                    out[f * impl->outChannels + ch] += src[f * v.channels + ch] * gain;
+
+            if (toRead < static_cast<int64_t>(frameCount))
+                v.active.store(false, std::memory_order_release);
+        }
+    }
+
+    // Soft-panic fade: linearly ramp output to zero, then clear all voices.
+    if (impl->softPanicActive.load(std::memory_order_acquire)) {
+        const int64_t pStart = impl->softPanicStartFrame.load(std::memory_order_relaxed);
+        const int64_t pEnd   = impl->softPanicEndFrame.load(std::memory_order_relaxed);
+        const float   pLen   = static_cast<float>(pEnd - pStart);
+        bool allDone = false;
+        for (unsigned long f = 0; f < frameCount; ++f) {
+            const int64_t eng = engStart + static_cast<int64_t>(f);
+            float t = 0.0f;
+            if (pLen > 0.0f && eng < pEnd)
+                t = std::max(0.0f, 1.0f - static_cast<float>(eng - pStart) / pLen);
+            if (eng >= pEnd) allDone = true;
             for (int ch = 0; ch < impl->outChannels; ++ch)
-                out[f * impl->outChannels + ch] += src[f * v.channels + ch] * gain;
-
-        if (toRead < static_cast<int64_t>(frameCount))
-            v.active.store(false, std::memory_order_release);
+                out[f * static_cast<unsigned long>(impl->outChannels) + ch] *= t;
+        }
+        if (allDone) {
+            for (auto& v : impl->voices) {
+                v.active.store(false, std::memory_order_relaxed);
+                v.pendingReady.store(false, std::memory_order_relaxed);
+            }
+            impl->softPanicActive.store(false, std::memory_order_release);
+        }
     }
 
     // Advance device counter and push master clock forward (master-only update).
@@ -179,11 +216,34 @@ int AudioEngine::scheduleVoice(const float* samples, int64_t totalFrames,
         auto& v = m_impl->voices[i];
         if (v.active.load(std::memory_order_relaxed))       continue;
         if (v.pendingReady.load(std::memory_order_relaxed)) continue;
-        v.pending = {samples, totalFrames, voiceChannels, tag, gain};
+        v.pending = {samples, nullptr, false, totalFrames, voiceChannels, tag, gain};
         v.pendingReady.store(true, std::memory_order_release);
         return i;
     }
     return -1;
+}
+
+int AudioEngine::scheduleStreamingVoice(StreamReader* reader, int64_t totalFrames,
+                                         int voiceChannels, int tag, float gain) {
+    for (int i = 0; i < kMaxVoices; ++i) {
+        auto& v = m_impl->voices[i];
+        if (v.active.load(std::memory_order_relaxed))       continue;
+        if (v.pendingReady.load(std::memory_order_relaxed)) continue;
+        v.pending = {nullptr, reader, true, totalFrames, voiceChannels, tag, gain};
+        v.pendingReady.store(true, std::memory_order_release);
+        return i;
+    }
+    return -1;
+}
+
+void AudioEngine::softPanic(double durationSeconds) {
+    if (!m_impl->initialized) { clearAllVoices(); return; }
+    const int64_t now = enginePlayheadFrames();
+    const int64_t dur = static_cast<int64_t>(
+        std::max(0.001, durationSeconds) * m_impl->sampleRate);
+    m_impl->softPanicStartFrame.store(now, std::memory_order_relaxed);
+    m_impl->softPanicEndFrame.store(now + dur, std::memory_order_relaxed);
+    m_impl->softPanicActive.store(true, std::memory_order_release);
 }
 
 void AudioEngine::setVoiceGain(int slotId, float gain) {
@@ -216,6 +276,11 @@ void AudioEngine::clearAllVoices() {
 bool AudioEngine::isVoiceActive(int slotId) const {
     if (slotId < 0 || slotId >= kMaxVoices) return false;
     return m_impl->voices[slotId].active.load(std::memory_order_relaxed);
+}
+
+bool AudioEngine::isVoicePending(int slotId) const {
+    if (slotId < 0 || slotId >= kMaxVoices) return false;
+    return m_impl->voices[slotId].pendingReady.load(std::memory_order_relaxed);
 }
 
 bool AudioEngine::anyVoiceActiveWithTag(int tag) const {

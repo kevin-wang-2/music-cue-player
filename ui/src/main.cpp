@@ -46,6 +46,8 @@ static ImVec4 typeColor(const std::string& t) {
     if (t == "audio") return ImVec4(0.40f, 0.70f, 1.00f, 1.0f);
     if (t == "start") return ImVec4(0.40f, 0.90f, 0.50f, 1.0f);
     if (t == "stop")  return ImVec4(1.00f, 0.45f, 0.45f, 1.0f);
+    if (t == "fade")  return ImVec4(0.95f, 0.70f, 0.20f, 1.0f);
+    if (t == "arm")   return ImVec4(0.75f, 0.40f, 0.95f, 1.0f);
     return ImVec4(0.70f, 0.70f, 0.70f, 1.0f);
 }
 
@@ -55,11 +57,17 @@ static ImVec4 typeColor(const std::string& t) {
 
 struct AddDialog {
     bool  open          = false;
-    int   type          = 0;     // 0=audio 1=start 2=stop
+    int   type          = 0;     // 0=audio 1=start 2=stop 3=fade
     char  path[512]     = {};
     char  name[256]     = {};
     float preWait       = 0.0f;
-    char  targetCueNum[32] = {}; // user types a cue number here (start/stop)
+    char  targetCueNum[32] = {}; // start/stop target
+    // Fade-specific fields
+    char  fadeTargetNum[32] = {};
+    float fadeTargetValue   = 0.0f;
+    float fadeDuration      = 3.0f;  // = cd.duration for fade cues
+    int   fadeCurve         = 0;     // 0=Linear 1=EqualPower
+    bool  fadeStopWhenDone  = false;
     std::string errorMsg;
 };
 
@@ -87,6 +95,17 @@ struct App {
     bool     insp_ac          = false;
     bool     insp_af          = false;
     int      insp_lastSel     = -2;  // force refresh on first frame
+
+    // Fader label inline editing (double-click dB text to type value)
+    int  insp_faderEdit  = -1;    // 0=level, 1=trim; -1=none
+    bool insp_faderFocus = false;
+    char insp_faderBuf[16] = {};
+
+    // Fade cue inspector buffers
+    float insp_fadeTargetValue  = 0.0f;
+    int   insp_fadeCurve        = 0;     // 0=Linear 1=EqualPower
+    bool  insp_fadeStopWhenDone = false;
+    char  insp_fadeTargetNum[32] = {};
 
     AddDialog addDlg;
     bool wantOpenDlg   = false;
@@ -140,10 +159,11 @@ static bool rebuildCueList(App& app, std::string& err) {
     auto& cds  = app.sf.cueLists[0].cues;
     const auto base = std::filesystem::path(app.baseDir);
 
-    // Pass 1: for start/stop cues, resolve targetCueNumber → target index if needed.
+    // Pass 1: resolve targetCueNumber → target index for start/stop/fade/arm cues.
     // Empty cue numbers are intentionally preserved — they are valid but cannot be referenced.
     for (auto& cd : cds) {
-        if ((cd.type == "start" || cd.type == "stop") && !cd.targetCueNumber.empty()) {
+        if ((cd.type == "start" || cd.type == "stop" || cd.type == "fade" || cd.type == "arm") &&
+            !cd.targetCueNumber.empty()) {
             int idx = findCueByNumber(app.sf, cd.targetCueNumber);
             if (idx >= 0) cd.target = idx;
         }
@@ -161,6 +181,14 @@ static bool rebuildCueList(App& app, std::string& err) {
             app.cues.addStartCue(cd.target, cd.name, cd.preWait);
         } else if (cd.type == "stop") {
             app.cues.addStopCue(cd.target, cd.name, cd.preWait);
+        } else if (cd.type == "fade") {
+            const mcp::FadeData::Curve curve = (cd.fadeCurve == "equalpower")
+                ? mcp::FadeData::Curve::EqualPower : mcp::FadeData::Curve::Linear;
+            app.cues.addFadeCue(cd.target, cd.targetCueNumber, cd.fadeParameter,
+                                cd.fadeTargetValue, curve, cd.fadeStopWhenDone,
+                                cd.name, cd.preWait);
+        } else if (cd.type == "arm") {
+            app.cues.addArmCue(cd.target, cd.name, cd.preWait);
         }
         if (ok) {
             app.cues.setCueCueNumber  (i, cd.cueNumber);
@@ -201,6 +229,16 @@ static void syncSfFromCues(App& app) {
         cds[i].trim         = c->trim;
         cds[i].autoContinue = c->autoContinue;
         cds[i].autoFollow   = c->autoFollow;
+        if (c->type == mcp::CueType::Fade && c->fadeData) {
+            const auto& fd      = *c->fadeData;
+            cds[i].targetCueNumber  = fd.targetCueNumber;
+            cds[i].target           = fd.resolvedTargetIdx;
+            cds[i].fadeParameter    = fd.parameter;
+            cds[i].fadeTargetValue  = fd.targetValue;
+            cds[i].fadeStopWhenDone = fd.stopWhenDone;
+            cds[i].fadeCurve        = (fd.curve == mcp::FadeData::Curve::EqualPower)
+                                      ? "equalpower" : "linear";
+        }
     }
     app.dirty = true;
 }
@@ -241,11 +279,23 @@ static void renderInspector(App& app) {
         app.insp_trim      = static_cast<float>(c->trim);
         app.insp_ac        = c->autoContinue;
         app.insp_af        = c->autoFollow;
-        app.insp_lastSel   = sel;
+        app.insp_faderEdit = -1;  // cancel any ongoing fader label edit
+        if (c->type == mcp::CueType::Fade && c->fadeData) {
+            const auto& fd = *c->fadeData;
+            std::strncpy(app.insp_fadeTargetNum, fd.targetCueNumber.c_str(),
+                         sizeof(app.insp_fadeTargetNum) - 1);
+            app.insp_fadeTargetValue  = static_cast<float>(fd.targetValue);
+            app.insp_fadeCurve        = (fd.curve == mcp::FadeData::Curve::EqualPower) ? 1 : 0;
+            app.insp_fadeStopWhenDone = fd.stopWhenDone;
+        }
+        app.insp_lastSel = sel;
     }
 
     const char* typeStr = c->type == mcp::CueType::Audio ? "audio"
-                        : c->type == mcp::CueType::Start ? "start" : "stop";
+                        : c->type == mcp::CueType::Start ? "start"
+                        : c->type == mcp::CueType::Stop  ? "stop"
+                        : c->type == mcp::CueType::Arm   ? "arm"
+                        : "fade";
 
     // Row 1: Q number | Name | type badge
     ImGui::SetCursorPosX(8);
@@ -276,6 +326,102 @@ static void renderInspector(App& app) {
         syncSfFromCues(app);
     }
 
+    // Shared fader constants and helpers — used by Audio (level/trim) and Fade (target).
+    constexpr float kFaderW   = 30.0f;
+    constexpr float kFaderH   = 90.0f;
+    constexpr float kFaderMin = -60.0f;
+    constexpr float kFaderMax = 10.0f;
+
+    auto fmtdBLabel = [](float dB, char* buf, int sz) {
+        if (dB <= -59.9f) std::snprintf(buf, sz, "-inf");
+        else              std::snprintf(buf, sz, "%+.1f", static_cast<double>(dB));
+    };
+
+    // dB (clamped to UI floor) → linear gain.  Values at or below kFaderMin → 0.
+    auto levelToGain = [&](float dB) -> float {
+        return (dB <= kFaderMin) ? 0.0f : dBToLinear(static_cast<double>(dB));
+    };
+
+    // Commit a typed dB string to fader mode: 0=level, 1=trim, 2=fadeTarget.
+    // Values < kFaderMin round to -inf (stored as kFaderMin).
+    auto applyFaderText = [&](int mode) {
+        try {
+            float v;
+            if (std::strncmp(app.insp_faderBuf, "-inf", 4) == 0) v = kFaderMin;
+            else v = std::stof(app.insp_faderBuf);
+            if (v < kFaderMin) v = kFaderMin;
+            v = std::min(kFaderMax, v);
+            if (mode == 0) {
+                app.insp_level = v;
+                app.cues.setCueLevel(sel, v);
+                const int slot = app.cues.cueVoiceSlot(sel);
+                if (slot >= 0 && app.engine.isVoiceActive(slot))
+                    app.engine.setVoiceGain(slot, levelToGain(v + app.insp_trim));
+            } else if (mode == 1) {
+                app.insp_trim = v;
+                app.cues.setCueTrim(sel, v);
+                const int slot = app.cues.cueVoiceSlot(sel);
+                if (slot >= 0 && app.engine.isVoiceActive(slot))
+                    app.engine.setVoiceGain(slot, levelToGain(app.insp_level + v));
+            } else {
+                app.insp_fadeTargetValue = v;
+                app.cues.setCueFadeTargetValue(sel, v);
+            }
+            syncSfFromCues(app);
+        } catch (...) {}
+        app.insp_faderEdit = -1;
+    };
+
+    // Render a fader group (label above, VSlider, dB text below with double-click edit).
+    // editMode: the insp_faderEdit index for this fader (0=level, 1=trim, 2=fadeTarget).
+    auto renderFaderGroup = [&](const char* label, const char* sliderId, const char* textId,
+                                float& value, int editMode,
+                                const char* tooltip) {
+        ImGui::BeginGroup();
+        ImGui::TextDisabled("%s", label);
+        if (ImGui::VSliderFloat(sliderId, ImVec2(kFaderW, kFaderH),
+                                &value, kFaderMin, kFaderMax, "")) {
+            if (editMode == 0) { app.cues.setCueLevel(sel, value); }
+            else if (editMode == 1) { app.cues.setCueTrim(sel, value); }
+            else                    { app.cues.setCueFadeTargetValue(sel, value); }
+            if (editMode <= 1) {
+                const int slot = app.cues.cueVoiceSlot(sel);
+                if (slot >= 0 && app.engine.isVoiceActive(slot))
+                    app.engine.setVoiceGain(slot, levelToGain(app.insp_level + app.insp_trim));
+            }
+            syncSfFromCues(app);
+        }
+        if (ImGui::IsItemHovered()) ImGui::SetTooltip("%s\nDouble-click to reset to 0 dB", tooltip);
+        if (ImGui::IsItemHovered() && ImGui::IsMouseDoubleClicked(0)) {
+            value = 0.0f;
+            if (editMode == 0) { app.cues.setCueLevel(sel, 0.0); }
+            else if (editMode == 1) { app.cues.setCueTrim(sel, 0.0); }
+            else                    { app.cues.setCueFadeTargetValue(sel, 0.0); }
+            if (editMode <= 1) {
+                const int slot = app.cues.cueVoiceSlot(sel);
+                if (slot >= 0 && app.engine.isVoiceActive(slot))
+                    app.engine.setVoiceGain(slot, levelToGain(app.insp_level + app.insp_trim));
+            }
+            syncSfFromCues(app);
+        }
+        if (app.insp_faderEdit == editMode) {
+            ImGui::SetNextItemWidth(kFaderW + 10);
+            if (app.insp_faderFocus) { ImGui::SetKeyboardFocusHere(); app.insp_faderFocus = false; }
+            ImGui::InputText(textId, app.insp_faderBuf, sizeof(app.insp_faderBuf),
+                             ImGuiInputTextFlags_EnterReturnsTrue);
+            if (ImGui::IsItemDeactivated()) applyFaderText(editMode);
+        } else {
+            char dbBuf[16]; fmtdBLabel(value, dbBuf, sizeof(dbBuf));
+            ImGui::TextDisabled("%s dB", dbBuf);
+            if (ImGui::IsItemHovered() && ImGui::IsMouseDoubleClicked(0) && app.insp_faderEdit < 0) {
+                app.insp_faderEdit  = editMode;
+                app.insp_faderFocus = true;
+                fmtdBLabel(value, app.insp_faderBuf, sizeof(app.insp_faderBuf));
+            }
+        }
+        ImGui::EndGroup();
+    };
+
     if (c->type == mcp::CueType::Audio) {
         ImGui::SameLine(0, 20);
         ImGui::SetNextItemWidth(120);
@@ -300,86 +446,71 @@ static void renderInspector(App& app) {
         ImGui::Spacing();
         ImGui::Separator();
         ImGui::Spacing();
-
-        // Helper: format a dB value for display
-        auto fmtdB = [](float dB, char* buf, int sz) {
-            if (dB <= -59.9f) std::snprintf(buf, sz, "-inf");
-            else              std::snprintf(buf, sz, "%+.1f", static_cast<double>(dB));
-        };
-
-        constexpr float kFaderW = 30.0f;
-        constexpr float kFaderH = 90.0f;
-        constexpr float kFaderMin = -60.0f;
-        constexpr float kFaderMax = 10.0f;
-
-        // Level fader
         ImGui::SetCursorPosX(8);
-        ImGui::BeginGroup();
-        ImGui::TextDisabled("Level");
-        if (ImGui::VSliderFloat("##level", ImVec2(kFaderW, kFaderH),
-                                &app.insp_level, kFaderMin, kFaderMax, "")) {
-            app.cues.setCueLevel(sel, app.insp_level);
-            // Live gain update if the cue is currently playing
-            const int slot = app.cues.cueVoiceSlot(sel);
-            if (slot >= 0 && app.engine.isVoiceActive(slot))
-                app.engine.setVoiceGain(slot, dBToLinear(app.insp_level + app.insp_trim));
-            syncSfFromCues(app);
-        }
-        if (ImGui::IsItemHovered())
-            ImGui::SetTooltip("Output level fader\nDrag or double-click to reset");
-        if (ImGui::IsItemHovered() && ImGui::IsMouseDoubleClicked(0)) {
-            app.insp_level = 0.0f;
-            app.cues.setCueLevel(sel, 0.0);
-            const int slot = app.cues.cueVoiceSlot(sel);
-            if (slot >= 0 && app.engine.isVoiceActive(slot))
-                app.engine.setVoiceGain(slot, dBToLinear(0.0 + app.insp_trim));
-            syncSfFromCues(app);
-        }
-        char lvlBuf[16]; fmtdB(app.insp_level, lvlBuf, sizeof(lvlBuf));
-        ImGui::TextDisabled("%s dB", lvlBuf);
-        ImGui::EndGroup();
-
+        renderFaderGroup("Level", "##level", "##fe_lvl", app.insp_level, 0,
+                         "Output level fader");
         ImGui::SameLine(0, 16);
+        renderFaderGroup("Trim",  "##trim",  "##fe_trm", app.insp_trim,  1,
+                         "Fine trim on top of level");
 
-        // Trim fader
-        ImGui::BeginGroup();
-        ImGui::TextDisabled("Trim");
-        if (ImGui::VSliderFloat("##trim", ImVec2(kFaderW, kFaderH),
-                                &app.insp_trim, kFaderMin, kFaderMax, "")) {
-            app.cues.setCueTrim(sel, app.insp_trim);
-            const int slot = app.cues.cueVoiceSlot(sel);
-            if (slot >= 0 && app.engine.isVoiceActive(slot))
-                app.engine.setVoiceGain(slot, dBToLinear(app.insp_level + app.insp_trim));
-            syncSfFromCues(app);
-        }
-        if (ImGui::IsItemHovered())
-            ImGui::SetTooltip("Fine trim on top of level\nDrag or double-click to reset");
-        if (ImGui::IsItemHovered() && ImGui::IsMouseDoubleClicked(0)) {
-            app.insp_trim = 0.0f;
-            app.cues.setCueTrim(sel, 0.0);
-            const int slot = app.cues.cueVoiceSlot(sel);
-            if (slot >= 0 && app.engine.isVoiceActive(slot))
-                app.engine.setVoiceGain(slot, dBToLinear(app.insp_level + 0.0));
-            syncSfFromCues(app);
-        }
-        char trmBuf[16]; fmtdB(app.insp_trim, trmBuf, sizeof(trmBuf));
-        ImGui::TextDisabled("%s dB", trmBuf);
-        ImGui::EndGroup();
-
-        ImGui::SameLine(0, 24);
-
-        // Combined gain display
-        ImGui::BeginGroup();
+    } else if (c->type == mcp::CueType::Fade) {
+        // ---- Fade cue parameters ----
         ImGui::Spacing();
-        const float combined = app.insp_level + app.insp_trim;
-        char cmbBuf[24];
-        if (combined <= -59.9f) std::snprintf(cmbBuf, sizeof(cmbBuf), "-inf dB");
-        else std::snprintf(cmbBuf, sizeof(cmbBuf), "%+.1f dB", static_cast<double>(combined));
-        ImGui::TextDisabled("Combined");
-        ImGui::Text("%s", cmbBuf);
-        ImGui::EndGroup();
+        ImGui::Separator();
+        ImGui::Spacing();
+        ImGui::SetCursorPosX(8);
+
+        const auto& fd = c->fadeData;
+        if (fd) {
+            const int tIdx = fd->resolvedTargetIdx;
+            const mcp::Cue* tc = (tIdx >= 0 && tIdx < app.cues.cueCount())
+                                  ? app.cues.cueAt(tIdx) : nullptr;
+            if (tc)
+                ImGui::TextDisabled("Target: Q%s  \"%s\"  param: %s",
+                                    tc->cueNumber.c_str(), tc->name.c_str(),
+                                    fd->parameter.c_str());
+            else
+                ImGui::TextDisabled("Target: (unresolved Q%s)  param: %s",
+                                    fd->targetCueNumber.c_str(), fd->parameter.c_str());
+
+            ImGui::Spacing();
+
+            // Target value fader
+            renderFaderGroup("Target", "##fadetgt", "##fe_ftgt",
+                             app.insp_fadeTargetValue, 2, "Fade destination level");
+
+            ImGui::SameLine(0, 20);
+
+            // Duration (= fade length) + Curve stacked vertically
+            ImGui::BeginGroup();
+            ImGui::TextDisabled("Duration");
+            ImGui::SetNextItemWidth(100);
+            if (ImGui::DragFloat("##fadedur", &app.insp_duration,
+                                 0.1f, 0.01f, 300.0f, "%.2f s")) {
+                app.cues.setCueDuration(sel, app.insp_duration);
+                syncSfFromCues(app);
+            }
+            ImGui::Spacing();
+            ImGui::TextDisabled("Curve");
+            ImGui::SetNextItemWidth(100);
+            static const char* curves[] = {"Linear", "EqualPower"};
+            if (ImGui::Combo("##fadecurve", &app.insp_fadeCurve, curves, 2)) {
+                app.cues.setCueFadeCurve(sel,
+                    app.insp_fadeCurve == 1
+                        ? mcp::FadeData::Curve::EqualPower
+                        : mcp::FadeData::Curve::Linear);
+                syncSfFromCues(app);
+            }
+            ImGui::Spacing();
+            if (ImGui::Checkbox("Stop when done", &app.insp_fadeStopWhenDone)) {
+                app.cues.setCueFadeStopWhenDone(sel, app.insp_fadeStopWhenDone);
+                syncSfFromCues(app);
+            }
+            ImGui::EndGroup();
+        }
 
     } else {
+        // Start / Stop / Arm
         const mcp::Cue* tc = app.cues.cueAt(c->targetIndex);
         ImGui::SameLine(0, 20);
         if (tc)
@@ -434,15 +565,15 @@ static void renderAddDialog(App& app) {
     if (!ImGui::BeginPopupModal("Add Cue", nullptr, ImGuiWindowFlags_AlwaysAutoResize))
         return;
 
-    static const char* types[] = {"Audio", "Start", "Stop"};
+    static const char* types[] = {"Audio", "Start", "Stop", "Fade", "Arm"};
     ImGui::SetNextItemWidth(100);
-    ImGui::Combo("Type", &app.addDlg.type, types, 3);
+    ImGui::Combo("Type", &app.addDlg.type, types, 5);
 
     if (app.addDlg.type == 0) {
         ImGui::SetNextItemWidth(380);
         ImGui::InputText("File path", app.addDlg.path, sizeof(app.addDlg.path));
         ImGui::TextDisabled("  Tip: path relative to show file, or absolute");
-    } else {
+    } else if (app.addDlg.type == 1 || app.addDlg.type == 2 || app.addDlg.type == 4) {
         ImGui::SetNextItemWidth(120);
         ImGui::InputText("Target cue number", app.addDlg.targetCueNum,
                          sizeof(app.addDlg.targetCueNum));
@@ -459,6 +590,30 @@ static void renderAddDialog(App& app) {
                 ImGui::TextColored(ImVec4(1,0.4f,0.4f,1), "not found");
             }
         }
+        if (app.addDlg.type == 4)
+            ImGui::TextDisabled("  Arms the target cue so it fires with no I/O latency.");
+    } else {
+        // Fade cue fields
+        ImGui::SetNextItemWidth(120);
+        ImGui::InputText("Target cue number", app.addDlg.fadeTargetNum,
+                         sizeof(app.addDlg.fadeTargetNum));
+        if (app.addDlg.fadeTargetNum[0]) {
+            int idx = findCueByNumber(app.sf, app.addDlg.fadeTargetNum);
+            const mcp::Cue* tc = idx >= 0 ? app.cues.cueAt(idx) : nullptr;
+            ImGui::SameLine();
+            if (tc) ImGui::TextColored(ImVec4(0.4f,1,0.4f,1), "→ \"%s\"", tc->name.c_str());
+            else    ImGui::TextColored(ImVec4(1,0.4f,0.4f,1), "not found");
+        }
+        ImGui::TextDisabled("  Parameter: level");
+        ImGui::SetNextItemWidth(120);
+        ImGui::DragFloat("Target (dB)", &app.addDlg.fadeTargetValue, 0.1f, -60.0f, 10.0f, "%.1f");
+        ImGui::SameLine(0, 20);
+        ImGui::SetNextItemWidth(120);
+        ImGui::DragFloat("Duration (s)", &app.addDlg.fadeDuration, 0.1f, 0.1f, 300.0f, "%.1f");
+        ImGui::SetNextItemWidth(140);
+        static const char* curves[] = {"Linear", "EqualPower"};
+        ImGui::Combo("Curve##add", &app.addDlg.fadeCurve, curves, 2);
+        ImGui::Checkbox("Stop when done##add", &app.addDlg.fadeStopWhenDone);
     }
 
     ImGui::SetNextItemWidth(260);
@@ -495,7 +650,7 @@ static void renderAddDialog(App& app) {
             }
             const int newIdx = app.cues.cueCount() - 1;
             app.cues.setCueCueNumber(newIdx, cd.cueNumber);
-        } else {
+        } else if (app.addDlg.type == 1 || app.addDlg.type == 2 || app.addDlg.type == 4) {
             // Resolve target cue number → array index
             const std::string tnum(app.addDlg.targetCueNum);
             int tIdx = tnum.empty() ? -1 : findCueByNumber(app.sf, tnum);
@@ -503,7 +658,8 @@ static void renderAddDialog(App& app) {
                 app.addDlg.errorMsg = "Cue number \"" + tnum + "\" not found";
                 goto done;
             }
-            cd.type             = (app.addDlg.type == 1) ? "start" : "stop";
+            cd.type             = (app.addDlg.type == 1) ? "start"
+                                : (app.addDlg.type == 2) ? "stop" : "arm";
             cd.target           = tIdx;
             cd.targetCueNumber  = tnum;
             cd.name             = app.addDlg.name[0] ? app.addDlg.name
@@ -511,10 +667,40 @@ static void renderAddDialog(App& app) {
             cd.preWait          = app.addDlg.preWait;
             if (cd.type == "start")
                 app.cues.addStartCue(cd.target, cd.name, cd.preWait);
-            else
+            else if (cd.type == "stop")
                 app.cues.addStopCue (cd.target, cd.name, cd.preWait);
+            else
+                app.cues.addArmCue  (cd.target, cd.name, cd.preWait);
             const int newIdx = app.cues.cueCount() - 1;
             app.cues.setCueCueNumber(newIdx, cd.cueNumber);
+        } else {
+            // Fade cue
+            const std::string tnum(app.addDlg.fadeTargetNum);
+            int tIdx = tnum.empty() ? -1 : findCueByNumber(app.sf, tnum);
+            if (!tnum.empty() && tIdx < 0) {
+                app.addDlg.errorMsg = "Cue number \"" + tnum + "\" not found";
+                goto done;
+            }
+            cd.type             = "fade";
+            cd.target           = tIdx;
+            cd.targetCueNumber  = tnum;
+            cd.fadeParameter    = "level";
+            cd.fadeTargetValue  = app.addDlg.fadeTargetValue;
+            cd.duration         = app.addDlg.fadeDuration;
+            cd.fadeStopWhenDone = app.addDlg.fadeStopWhenDone;
+            cd.fadeCurve        = (app.addDlg.fadeCurve == 1) ? "equalpower" : "linear";
+            cd.preWait          = app.addDlg.preWait;
+            cd.name             = app.addDlg.name[0] ? app.addDlg.name
+                                  : ("fade(Q" + tnum + ")");
+
+            const mcp::FadeData::Curve curve = (app.addDlg.fadeCurve == 1)
+                ? mcp::FadeData::Curve::EqualPower : mcp::FadeData::Curve::Linear;
+            app.cues.addFadeCue(tIdx, tnum, "level",
+                                app.addDlg.fadeTargetValue, curve,
+                                app.addDlg.fadeStopWhenDone, cd.name, cd.preWait);
+            const int newIdx = app.cues.cueCount() - 1;
+            app.cues.setCueCueNumber(newIdx, cd.cueNumber);
+            app.cues.setCueDuration(newIdx, cd.duration);
         }
 
         if (app.sf.cueLists.empty()) app.sf.cueLists.push_back({"main", "Main", {}});
@@ -522,10 +708,15 @@ static void renderAddDialog(App& app) {
         app.dirty = true;
 
         // Reset dialog fields
-        std::memset(app.addDlg.path,         0, sizeof(app.addDlg.path));
-        std::memset(app.addDlg.name,         0, sizeof(app.addDlg.name));
-        std::memset(app.addDlg.targetCueNum, 0, sizeof(app.addDlg.targetCueNum));
-        app.addDlg.preWait = 0.0f;
+        std::memset(app.addDlg.path,          0, sizeof(app.addDlg.path));
+        std::memset(app.addDlg.name,          0, sizeof(app.addDlg.name));
+        std::memset(app.addDlg.targetCueNum,  0, sizeof(app.addDlg.targetCueNum));
+        std::memset(app.addDlg.fadeTargetNum, 0, sizeof(app.addDlg.fadeTargetNum));
+        app.addDlg.preWait          = 0.0f;
+        app.addDlg.fadeTargetValue  = 0.0f;
+        app.addDlg.fadeDuration     = 3.0f;
+        app.addDlg.fadeCurve        = 0;
+        app.addDlg.fadeStopWhenDone = false;
         ImGui::CloseCurrentPopup();
     }
     done:
@@ -609,7 +800,10 @@ static void renderCueTable(App& app) {
         // ---- Col 1: type badge ------------------------------------------------
         ImGui::TableSetColumnIndex(1);
         const std::string tstr = (c->type == mcp::CueType::Audio) ? "audio"
-                                : (c->type == mcp::CueType::Start) ? "start" : "stop";
+                                : (c->type == mcp::CueType::Start) ? "start"
+                                : (c->type == mcp::CueType::Stop)  ? "stop"
+                                : (c->type == mcp::CueType::Arm)   ? "arm"
+                                : "fade";
         ImGui::TextColored(typeColor(tstr), "%s", tstr.c_str());
 
         // ---- Col 2: name — selectable / inline editor / DnD ------------------
@@ -695,13 +889,15 @@ static void renderCueTable(App& app) {
             ImGui::Text("%s", c->name.c_str());
         }
 
-        // ---- Col 3: target — DnD drop zone for start/stop -------------------
+        // ---- Col 3: target — DnD drop zone for start/stop/fade -------------------
         ImGui::TableSetColumnIndex(3);
         if (c->type != mcp::CueType::Audio) {
-            const mcp::Cue* tc = (c->targetIndex >= 0 && c->targetIndex < n)
-                                  ? app.cues.cueAt(c->targetIndex) : nullptr;
+            const int tgtIdx = (c->type == mcp::CueType::Fade && c->fadeData)
+                               ? c->fadeData->resolvedTargetIdx : c->targetIndex;
+            const mcp::Cue* tc = (tgtIdx >= 0 && tgtIdx < n)
+                                  ? app.cues.cueAt(tgtIdx) : nullptr;
             const std::string tdisplay = tc
-                ? ("Q" + (tc->cueNumber.empty() ? std::to_string(c->targetIndex) : tc->cueNumber))
+                ? ("Q" + (tc->cueNumber.empty() ? std::to_string(tgtIdx) : tc->cueNumber))
                 : "  \xe2\x80\x94";  // — UTF-8 EM DASH
 
             const float cellW = ImGui::GetContentRegionAvail().x;
@@ -765,6 +961,8 @@ static void renderCueTable(App& app) {
             }
         } else if (pending) {
             ImGui::TextColored(ImVec4(1, 0.75f, 0.2f, 1), "pending");
+        } else if (app.cues.isArmed(i)) {
+            ImGui::TextColored(ImVec4(0.9f, 0.55f, 0.1f, 1), "armed");
         } else {
             ImGui::TextDisabled("idle");
         }
@@ -796,8 +994,9 @@ static void renderCueTable(App& app) {
         auto& cds = app.sf.cueLists[0].cues;
         if (targetSetRow < (int)cds.size()) {
             const mcp::Cue* srcCue = app.cues.cueAt(targetSetSrc);
+            const std::string srcNum = srcCue ? srcCue->cueNumber : "";
             cds[targetSetRow].target          = targetSetSrc;
-            cds[targetSetRow].targetCueNumber = srcCue ? srcCue->cueNumber : "";
+            cds[targetSetRow].targetCueNumber = srcNum;
             std::string err;
             rebuildCueList(app, err);
             app.insp_lastSel = -2;
@@ -937,6 +1136,8 @@ static void renderToolbar(App& app) {
         if (ImGui::MenuItem("Audio Cue"))  { app.addDlg.type = 0; app.addDlg.open = true; }
         if (ImGui::MenuItem("Start Cue"))  { app.addDlg.type = 1; app.addDlg.open = true; }
         if (ImGui::MenuItem("Stop Cue"))   { app.addDlg.type = 2; app.addDlg.open = true; }
+        if (ImGui::MenuItem("Fade Cue"))   { app.addDlg.type = 3; app.addDlg.open = true; }
+        if (ImGui::MenuItem("Arm Cue"))    { app.addDlg.type = 4; app.addDlg.open = true; }
         ImGui::EndPopup();
     }
 
@@ -995,7 +1196,7 @@ static void handleKeyboard(App& app) {
         app.cues.go(origin);
     }
     if (ImGui::IsKeyPressed(ImGuiKey_Escape, false))
-        app.cues.panic();
+        app.cues.softPanic(0.5);
     if (ImGui::IsKeyPressed(ImGuiKey_DownArrow, false))
         app.cues.selectNext();
     if (ImGui::IsKeyPressed(ImGuiKey_UpArrow, false))
@@ -1195,6 +1396,7 @@ int main(int argc, char** argv) {
         ImGui::NewFrame();
 
         handleKeyboard(app);
+        app.cues.update();  // reclaim finished stream readers
 
         // Full-screen dockspace window
         const ImGuiViewport* vp = ImGui::GetMainViewport();

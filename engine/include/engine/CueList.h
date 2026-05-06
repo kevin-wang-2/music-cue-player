@@ -2,7 +2,11 @@
 
 #include "AudioEngine.h"
 #include "Cue.h"
+#include "FadeData.h"
 #include "Scheduler.h"
+#include "StreamReader.h"
+#include <array>
+#include <memory>
 #include <mutex>
 #include <string>
 #include <vector>
@@ -34,7 +38,7 @@ namespace mcp {
 class CueList {
 public:
     CueList(AudioEngine& engine, Scheduler& scheduler);
-    ~CueList() = default;
+    ~CueList();
     CueList(const CueList&) = delete;
     CueList& operator=(const CueList&) = delete;
 
@@ -52,6 +56,19 @@ public:
     // Append a Stop cue that, when fired, stops all voices of cue[targetIndex].
     bool addStopCue(int targetIndex, const std::string& name = "",
                     double preWait = 0.0);
+
+    // Append a Fade cue that ramps cue[resolvedTargetIdx]'s `parameter` from its
+    // current value to `targetValue`.  Duration is set separately via setCueDuration.
+    bool addFadeCue(int resolvedTargetIdx, const std::string& targetCueNumber,
+                    const std::string& parameter,
+                    double targetValue,
+                    FadeData::Curve curve,
+                    bool stopWhenDone = false,
+                    const std::string& name = "", double preWait = 0.0);
+
+    // Append an Arm cue that, when fired, pre-buffers the audio of cue[targetIndex]
+    // so the next go()/start() on that cue fires with no I/O latency.
+    bool addArmCue(int targetIndex, const std::string& name = "", double preWait = 0.0);
 
     void clear();
     int  cueCount() const;
@@ -76,6 +93,25 @@ public:
     void setCueName       (int index, const std::string& name);
     void setCueCueNumber  (int index, const std::string& number);
 
+    // Fade cue setters (no-op if cue[index] is not a Fade cue).
+    void setCueFadeTargetValue(int index, double dB);
+    void setCueFadeCurve      (int index, FadeData::Curve curve);
+    void setCueFadeStopWhenDone(int index, bool v);
+
+    // --- ARM ----------------------------------------------------------------
+
+    // Pre-buffer audio for cue[index] so that the next go()/start() fires
+    // with no I/O latency.  Idempotent — calling arm() twice just replaces
+    // the previous buffer.  No-op for non-audio cues.
+    bool arm(int index);
+
+    // Release the pre-buffered data for cue[index] without playing it.
+    void disarm(int index);
+
+    // True when cue[index] has been armed and its buffer is full enough to
+    // guarantee glitch-free playback.
+    bool isArmed(int index) const;
+
     // --- Playback controls --------------------------------------------------
 
     // originFrame: the engine frame to use as the prewait origin.
@@ -86,6 +122,14 @@ public:
     bool start(int index, int64_t originFrame = -1);
     void stop(int index);    // stop all voices tagged with index, immediate
     void panic();            // cancel pending fires + stop all voices
+
+    // Fade all active voices to silence over durationSeconds, then stop them.
+    // Like panic(), also cancels all pending prewait events.
+    void softPanic(double durationSeconds = 0.5);
+
+    // Reclaim StreamReader resources from voices that have finished playing.
+    // Call once per frame from the main thread (e.g., in the render loop).
+    void update();
 
     // --- Queries (safe from any thread) -------------------------------------
 
@@ -126,6 +170,10 @@ private:
     mutable std::mutex m_slotMutex;
     std::vector<int>   m_lastSlot;
     std::vector<int>   m_pendingEventId;  // scheduler event ID, -1 = none
+
+    // One StreamReader per engine voice slot — keeps the reader alive until
+    // the voice finishes.  Cleared by update() once isVoiceActive() is false.
+    std::array<std::shared_ptr<StreamReader>, AudioEngine::kMaxVoices> m_slotStream;
 };
 
 } // namespace mcp

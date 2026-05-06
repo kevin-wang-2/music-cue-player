@@ -19,6 +19,8 @@ add_library(mcp_engine STATIC
     src/Scheduler.cpp
     src/CueList.cpp
     src/ShowFile.cpp
+    src/FadeData.cpp
+    src/StreamReader.cpp
 )
 
 target_include_directories(mcp_engine

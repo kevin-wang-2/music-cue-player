@@ -5,6 +5,8 @@
 #include <memory>
 #include <string>
 
+namespace mcp { class StreamReader; }  // forward-declare to avoid circular includes
+
 namespace mcp {
 
 struct AudioEngineImpl;
@@ -51,13 +53,18 @@ public:
 
     // --- Voice pool ---------------------------------------------------------
 
-    // Schedule a voice in the first free slot. Returns the slot ID [0, kMaxVoices)
-    // or -1 if the pool is full. The caller must keep `samples` alive until the
-    // voice finishes or is explicitly cleared.
+    // Schedule an in-memory voice. Returns slot ID or -1 if pool is full.
+    // The caller must keep `samples` alive until the voice finishes.
     // `tag`  — arbitrary identifier (e.g., cue index) used for bulk operations.
     // `gain` — linear amplitude gain applied every sample (1.0 = unity).
     int scheduleVoice(const float* samples, int64_t totalFrames,
                       int voiceChannels, int tag = -1, float gain = 1.0f);
+
+    // Schedule a streaming voice backed by a StreamReader.
+    // The raw pointer must remain valid (kept alive externally) until
+    // isVoiceActive(slot) returns false.
+    int scheduleStreamingVoice(StreamReader* reader, int64_t totalFrames,
+                               int voiceChannels, int tag = -1, float gain = 1.0f);
 
     // Update the gain of a running voice. Safe to call from the main thread
     // while the audio thread is running (atomic store, no locking).
@@ -67,9 +74,15 @@ public:
     void clearVoicesByTag(int tag);
     void clearAllVoices();
 
+    // Linearly fade all active voices to silence over durationSeconds, then
+    // clear them.  Subsequent voices scheduled while fading are not affected.
+    void softPanic(double durationSeconds = 0.5);
+
     // --- Queries (safe to call from any thread) ----------------------------
 
     bool isVoiceActive(int slotId) const;
+    // True while the voice is scheduled but the callback hasn't activated it yet.
+    bool isVoicePending(int slotId) const;
     bool anyVoiceActiveWithTag(int tag) const;
     int  activeVoiceCount() const;
 

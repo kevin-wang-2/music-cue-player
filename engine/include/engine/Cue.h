@@ -1,11 +1,14 @@
 #pragma once
 
 #include "AudioFile.h"
+#include "FadeData.h"
+#include "StreamReader.h"
+#include <memory>
 #include <string>
 
 namespace mcp {
 
-enum class CueType { Audio, Start, Stop };
+enum class CueType { Audio, Start, Stop, Fade, Arm };
 
 struct Cue {
     CueType     type{CueType::Audio};
@@ -30,6 +33,13 @@ struct Cue {
     double level{0.0};   // output fader
     double trim{0.0};    // fine trim on top of level
 
+    // Fade cues only — null for all other types
+    std::shared_ptr<FadeData> fadeData;
+
+    // ARM state: non-null when this audio cue has been pre-buffered for instant start.
+    // Protected by CueList::m_slotMutex when accessed from multiple threads.
+    std::shared_ptr<StreamReader> armedStream;
+
     // Post-trigger behaviour (all types)
     // autoContinue: immediately also trigger the next go() when this cue fires.
     //   Cascades: consecutive cues with autoContinue all fire from the same
@@ -41,7 +51,9 @@ struct Cue {
     bool autoFollow{false};
 
     bool isLoaded() const {
-        return type != CueType::Audio || audioFile.isLoaded();
+        if (type == CueType::Audio) return audioFile.isLoaded();
+        if (type == CueType::Fade)  return fadeData != nullptr;
+        return true;
     }
 };
 

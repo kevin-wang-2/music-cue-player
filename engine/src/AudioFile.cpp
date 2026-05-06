@@ -36,6 +36,21 @@ bool AudioFile::load(const std::string& path) {
     return true;
 }
 
+bool AudioFile::loadMetadata(const std::string& path) {
+    unload();
+    m_path = path;
+    SF_INFO info{};
+    SNDFILE* file = sf_open(path.c_str(), SFM_READ, &info);
+    if (!file) { m_error = sf_strerror(nullptr); return false; }
+    m_metadata.sampleRate = info.samplerate;
+    m_metadata.channels   = info.channels;
+    m_metadata.frameCount = info.frames;
+    sf_close(file);
+    m_loaded = true;
+    m_error.clear();
+    return true;
+}
+
 void AudioFile::unload() {
     m_samples.clear();
     m_samples.shrink_to_fit();
