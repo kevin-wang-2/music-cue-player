@@ -7,38 +7,54 @@
 
 namespace mcp {
 
+// One fadeable parameter target for a Fade cue.
+// Only enabled entries are applied when the fade fires.
+struct FadeTarget {
+    bool  enabled{false};
+    float targetDb{0.0f};
+};
+
 // Per-fade-cue parameters and runtime ramp state.
 // Stored as shared_ptr<FadeData> on the owning Cue (null for non-fade cues).
-// The ramp is computed in a dedicated thread spawned at fire() time so that
-// the audio and scheduler threads are never blocked by the arithmetic.
+//
+// A fade cue can simultaneously fade any combination of:
+//   masterLevel  — the target cue's main output level (level field)
+//   outLevels[o] — the target cue's per-output-channel routing level
+//
+// All enabled targets share the same duration/curve and are interpolated
+// in parallel from their captured start values to their respective targets.
 struct FadeData {
     enum class Curve {
-        Linear,      // interpolate amplitude linearly (abrupt perceptual drop at ends)
-        EqualPower   // interpolate dB linearly (perceptually uniform)
+        Linear,      // linear amplitude interpolation
+        EqualPower   // constant-power cosine crossfade
     };
 
-    // --- Stored parameters (set at construction, persisted to show file) ----
-    std::string targetCueNumber;          // user-visible target Q number
-    int         resolvedTargetIdx{-1};    // array index in the same CueList
-    std::string parameter{"level"};       // currently only "level" is supported
-    double      targetValue{0.0};         // destination dB value
-    // duration is stored on the owning Cue (shared with audio cue's playback region)
+    // --- Stored parameters (persisted to show file) -------------------------
+    std::string targetCueNumber;
+    int         resolvedTargetIdx{-1};
     Curve       curve{Curve::Linear};
-    bool        stopWhenDone{false};      // clear target voices after final ramp step
+    bool        stopWhenDone{false};
 
-    // --- Runtime (reset and recomputed each fire()) --------------------------
-    // ramp[i] = dB level at step i (0 … steps-1).
-    // Computed by computeRamp() in computeThread; rampReady flips to true when done.
-    std::vector<double> ramp;
-    std::atomic<bool>   rampReady{false};
-    std::thread         computeThread;
+    FadeTarget masterLevel;             // fades the target cue's level field
+    std::vector<FadeTarget> outLevels;  // [outCh] — per-output routing levels
+    std::vector<std::vector<FadeTarget>> xpTargets;  // [srcCh][outCh] — crosspoint cells
 
-    // Fills ramp[0..steps-1] from startValueDB to targetValue.
-    // Must be called from a dedicated thread; sets rampReady when complete.
-    void computeRamp(double startValueDB, int steps);
+    // --- Runtime (reset and recomputed each fire()) -------------------------
+    // Normalized progress ramp: ramp[i] = t ∈ [0..1] at step i.
+    // Curve shaping (cos/sin weights) is applied at step-execution time.
+    std::vector<float> ramp;
+    std::atomic<bool>  rampReady{false};
+    std::thread        computeThread;
+
+    // Start values captured at fire() time (before the thread runs).
+    float masterLevelStartDb{0.0f};
+    std::vector<float> outLevelStartDb;              // [outCh]
+    std::vector<std::vector<float>> xpStartDb;       // [srcCh][outCh]
+
+    // Fills ramp[0..steps-1] with linear progress values [0..1].
+    void computeRamp(int steps);
 
     ~FadeData();
-
     FadeData() = default;
     FadeData(const FadeData&) = delete;
     FadeData& operator=(const FadeData&) = delete;

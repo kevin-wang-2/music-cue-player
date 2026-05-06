@@ -1,0 +1,37 @@
+{
+  "cueLists": [
+    {
+      "cues": [
+        {
+          "autoFollow": true,
+          "name": "A",
+          "path": "/Users/kaibinwa/Desktop/click-in/music-cue-player/scripts/A.wav",
+          "preWait": 0.0,
+          "type": "audio"
+        },
+        {
+          "name": "A",
+          "path": "/Users/kaibinwa/Desktop/click-in/music-cue-player/scripts/A.wav",
+          "preWait": 0.0,
+          "type": "audio"
+        },
+        {
+          "name": "B",
+          "path": "/Users/kaibinwa/Desktop/click-in/music-cue-player/scripts/B.wav",
+          "preWait": 0.0,
+          "type": "audio"
+        }
+      ],
+      "id": "main",
+      "name": "Main"
+    }
+  ],
+  "engine": {
+    "channels": 2,
+    "sampleRate": 48000
+  },
+  "mcp_version": "1.0",
+  "show": {
+    "title": "Untitled Show"
+  }
+}

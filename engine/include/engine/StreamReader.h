@@ -16,15 +16,20 @@ namespace mcp {
 // (libsamplerate), and fills the ring in the background.  The audio callback
 // reads from the ring without ever touching disk or blocking.
 //
-// Sample-rate conversion (SRC) is applied transparently when the file's native
-// sample rate differs from targetSR.  Channel mapping (mono↔stereo) is handled
-// in read() — the ring always stores native-channel data at targetSR.
+// Channel routing
+// ---------------
+//   setRouting() stores a crosspoint matrix (xpGains) and per-output-channel
+//   level gains (outLevGains).  read() applies them during mixing:
+//     out[o] += gain * outLevGain[o] * sum_s(ring[s] * xpGains[s*outCh+o])
+//   NaN in xpGains[s*outCh+o] means no route from source s to output o.
+//   setRouting() must be called before the voice starts playing.
+//   setOutLevelGain() is safe to call from any thread during playback.
 //
 // Thread model
 // ------------
 //   I/O thread   — sole writer (ioThread): fills ring from disk
 //   Audio thread — sole reader (read):     consumes ring frames, mixes into output
-//   Any thread   — isArmed(), isDone(), available(), requestStop()
+//   Any thread   — isArmed(), isDone(), available(), requestStop(), setOutLevelGain()
 //
 // Lifetime
 // --------
@@ -50,7 +55,7 @@ public:
     // Returns 0 if the file length is unknown (use isDone() to detect end).
     int64_t totalOutputFrames() const { return m_totalOutputFrames; }
 
-    // True once ≥ kArmFrames frames are buffered and ready for glitch-free start.
+    // True once >= kArmFrames frames are buffered and ready for glitch-free start.
     bool isArmed() const;
 
     // True when the file is fully consumed and the ring buffer is empty.
@@ -65,6 +70,21 @@ public:
     // Frames buffered and available to read right now.
     int64_t available() const;
 
+    // Set the crosspoint routing matrix.  Call once before the voice starts.
+    // xpGains[s * outCh + o] = linear gain from source channel s to output o.
+    // NaN = no route.  outLevGains[o] = per-output-channel linear gain (1.0 = unity).
+    void setRouting(std::vector<float> xpGains, std::vector<float> outLevGains, int outCh);
+
+    // Safely update one output-channel level during playback (e.g. from a fade).
+    // Plain float store — benign race; the audio callback reads it independently.
+    void setOutLevelGain(int outCh, float linGain);
+
+    // Safely update one crosspoint cell during playback.  NaN = disable route.
+    void setXpointGain(int srcCh, int outCh, float linGain);
+
+    // Return output channel count set by setRouting(); 0 if routing not set.
+    int xpOutCh() const { return m_xpOutCh; }
+
     // Called ONLY from the audio callback (wait-free on the consumer side).
     // Mixes up to `frames` interleaved frames into out[0..frames*outCh-1] with
     // `gain`.  Returns frames actually consumed.
@@ -78,13 +98,13 @@ private:
 
     std::string   m_path;
     std::string   m_error;
-    AudioMetadata m_meta;        // file-native metadata (for display / duration calc)
+    AudioMetadata m_meta;
     int           m_targetSR{0};
     int           m_fileSR{0};
     int           m_fileCh{0};
     double        m_startTimeSecs{0.0};
     double        m_durationSecs{0.0};
-    int64_t       m_totalOutputFrames{0};  // at targetSR; 0 = unknown
+    int64_t       m_totalOutputFrames{0};
 
     // SPSC ring: kRingFrames * fileCh interleaved floats, at targetSR.
     std::vector<float>   m_ring;
@@ -92,6 +112,11 @@ private:
     std::atomic<int64_t> m_readPos{0};
     std::atomic<bool>    m_fileDone{false};
     std::atomic<bool>    m_stopThread{false};
+
+    // Routing state (set once before voice starts; outLevGains may be updated live).
+    std::vector<float> m_xpGains;     // [m_fileCh * m_xpOutCh], NaN = no route
+    std::vector<float> m_outLevGains; // [m_xpOutCh], 1.0f = unity
+    int                m_xpOutCh{0};
 
     std::thread m_thread;
 };

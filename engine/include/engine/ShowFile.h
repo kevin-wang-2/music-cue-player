@@ -3,6 +3,7 @@
 #include <filesystem>
 #include <string>
 #include <vector>
+#include <cstdint>
 
 namespace mcp {
 
@@ -32,29 +33,40 @@ struct ShowFile {
 
     // ---- Cue data ----------------------------------------------------------
     struct CueData {
-        std::string type;         // "audio" | "start" | "stop" | … (extensible)
-        std::string cueNumber;    // user-visible Q number ("1", "2", "1a", …) — independent of array index
+        std::string type;
+        std::string cueNumber;
         std::string name;
         // Audio cues
-        std::string path;         // relative to the show file's directory
-        // Start / Stop cues
-        int         target{-1};         // resolved array index (internal)
-        std::string targetCueNumber;    // user-visible reference stored in file
+        std::string path;
+        // Start / Stop / Arm / Fade cues
+        int         target{-1};
+        std::string targetCueNumber;
+        // Arm cues: pre-load the target from this offset (seconds)
+        double      armStartTime{0.0};
         // All types
         double      preWait{0.0};
         bool        autoContinue{false};
         bool        autoFollow{false};
-        // Audio cues: playback region (0 = default = start/end of file)
+        // Audio cues: playback region
         double      startTime{0.0};
         double      duration{0.0};
-        // Audio cues: gain (dB; 0 = unity)
+        // Audio cues: gain
         double      level{0.0};
         double      trim{0.0};
-        // Fade cues (duration shared with audio cue's playback region field)
-        std::string fadeParameter{"level"};
-        double      fadeTargetValue{0.0};
-        std::string fadeCurve{"linear"};      // "linear" | "equalpower"
+        // Audio cues: per-output-channel levels (dB); index = output channel
+        std::vector<float> outLevelDb;
+        // Audio cues: crosspoint matrix entries (only enabled cells are stored)
+        struct XpEntry { int s{0}; int o{0}; float db{0.0f}; };
+        std::vector<XpEntry> xpEntries;
+        // Fade cues
+        std::string fadeCurve{"linear"};
         bool        fadeStopWhenDone{false};
+        bool        fadeMasterEnabled{false};
+        float       fadeMasterTarget{0.0f};
+        struct FadeOutLevel { int ch{0}; bool enabled{false}; float target{0.0f}; };
+        std::vector<FadeOutLevel> fadeOutLevels;
+        struct FadeXpEntry { int s{0}; int o{0}; bool enabled{false}; float target{0.0f}; };
+        std::vector<FadeXpEntry> fadeXpEntries;
     };
 
     // ---- Cue list ----------------------------------------------------------
@@ -66,8 +78,9 @@ struct ShowFile {
 
     // ---- Engine hints (optional; consumers may ignore) ---------------------
     struct EngineHints {
-        int sampleRate{48000};
-        int channels{2};
+        int         sampleRate{48000};
+        int         channels{2};
+        std::string deviceName;
     };
 
     // ---- Show metadata -----------------------------------------------------

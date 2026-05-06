@@ -4,12 +4,19 @@
 #include <cstdint>
 #include <memory>
 #include <string>
+#include <vector>
 
 namespace mcp { class StreamReader; }  // forward-declare to avoid circular includes
 
 namespace mcp {
 
 struct AudioEngineImpl;
+
+struct DeviceInfo {
+    int         index{-1};
+    std::string name;
+    int         maxOutputChannels{0};
+};
 
 // Low-level audio output engine. Manages a PortAudio stream and a pool of
 // kMaxVoices voice slots. All active voices are summed into the output each
@@ -44,7 +51,14 @@ public:
     AudioEngine(const AudioEngine&) = delete;
     AudioEngine& operator=(const AudioEngine&) = delete;
 
-    bool initialize(int sampleRate = 48000, int channels = 2);
+    // List all PortAudio output devices. Safe to call before initialize().
+    // Returns empty vector if PortAudio cannot be initialized.
+    static std::vector<DeviceInfo> listOutputDevices();
+
+    // channels = 0 → auto-detect from the selected (or default) output device.
+    // deviceName = "" → use default PortAudio output device.
+    bool initialize(int sampleRate = 48000, int channels = 0,
+                    const std::string& deviceName = "");
     void shutdown();
     bool isInitialized() const;
 

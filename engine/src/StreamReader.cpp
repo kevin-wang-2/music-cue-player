@@ -3,7 +3,9 @@
 #include <samplerate.h>
 #include <algorithm>
 #include <chrono>
+#include <cmath>
 #include <cstring>
+#include <limits>
 #include <thread>
 
 namespace mcp {
@@ -55,6 +57,24 @@ void StreamReader::requestStop() {
     m_stopThread.store(true, std::memory_order_release);
 }
 
+void StreamReader::setRouting(std::vector<float> xpGains, std::vector<float> outLevGains, int outCh) {
+    m_xpGains     = std::move(xpGains);
+    m_outLevGains = std::move(outLevGains);
+    m_xpOutCh     = outCh;
+}
+
+void StreamReader::setOutLevelGain(int outCh, float linGain) {
+    if (outCh >= 0 && outCh < (int)m_outLevGains.size())
+        m_outLevGains[static_cast<size_t>(outCh)] = linGain;
+}
+
+void StreamReader::setXpointGain(int srcCh, int outCh, float linGain) {
+    if (m_xpOutCh <= 0 || srcCh < 0 || outCh < 0 || outCh >= m_xpOutCh) return;
+    const int idx = srcCh * m_xpOutCh + outCh;
+    if (idx >= 0 && idx < (int)m_xpGains.size())
+        m_xpGains[static_cast<size_t>(idx)] = linGain;
+}
+
 bool StreamReader::isArmed() const { return available() >= kArmFrames; }
 
 bool StreamReader::isDone() const {
@@ -75,15 +95,36 @@ int64_t StreamReader::read(float* out, int64_t frames, int outCh, float gain) {
     const int   ch = m_fileCh;
     int64_t     rp = m_readPos.load(std::memory_order_relaxed) % kRingFrames;
 
+    const bool useRouting = !m_xpGains.empty() && (m_xpOutCh == outCh);
+
     for (int64_t done = 0; done < toRead; ) {
         const int64_t chunk = std::min(toRead - done, kRingFrames - rp);
         const float*  src   = m_ring.data() + rp * ch;
         float*        dst   = out + done * outCh;
-        for (int64_t f = 0; f < chunk; ++f)
-            for (int c = 0; c < outCh; ++c) {
-                const int sc = (c < ch) ? c : (ch - 1);
-                dst[f * outCh + c] += src[f * ch + sc] * gain;
+
+        if (useRouting) {
+            for (int64_t f = 0; f < chunk; ++f) {
+                const float* s = src + f * ch;
+                float*       d = dst + f * outCh;
+                for (int o = 0; o < outCh; ++o) {
+                    float sum = 0.0f;
+                    for (int sc = 0; sc < ch; ++sc) {
+                        const float xp = m_xpGains[static_cast<size_t>(sc * outCh + o)];
+                        if (!std::isnan(xp)) sum += s[sc] * xp;
+                    }
+                    const float outLvl = (o < (int)m_outLevGains.size())
+                                         ? m_outLevGains[static_cast<size_t>(o)] : 1.0f;
+                    d[o] += sum * outLvl * gain;
+                }
             }
+        } else {
+            for (int64_t f = 0; f < chunk; ++f)
+                for (int c = 0; c < outCh; ++c) {
+                    const int sc = (c < ch) ? c : (ch - 1);
+                    dst[f * outCh + c] += src[f * ch + sc] * gain;
+                }
+        }
+
         done += chunk;
         rp = (rp + chunk) % kRingFrames;
     }

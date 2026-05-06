@@ -4,11 +4,23 @@
 #include "FadeData.h"
 #include "StreamReader.h"
 #include <memory>
+#include <optional>
 #include <string>
+#include <vector>
 
 namespace mcp {
 
 enum class CueType { Audio, Start, Stop, Fade, Arm };
+
+// Per-audio-cue channel routing.
+// outLevelDb[o]  — per-output-channel level in dB (0.0 = unity).
+// xpoint[s][o]   — crosspoint matrix: std::nullopt = no route (cell disabled).
+//                  Default when xpoint is empty: diagonal = 0.0 dB, rest = nullopt.
+// Both are empty until explicitly initialized (empty → default diagonal routing).
+struct Routing {
+    std::vector<float> outLevelDb;
+    std::vector<std::vector<std::optional<float>>> xpoint;  // [srcCh][outCh]
+};
 
 struct Cue {
     CueType     type{CueType::Audio};
@@ -19,8 +31,10 @@ struct Cue {
     std::string path;
     AudioFile   audioFile;
 
-    // Start/Stop cues: index of the target cue in the same CueList
-    int targetIndex{-1};
+    // Start/Stop/Arm cues: index of the target cue in the same CueList
+    int    targetIndex{-1};
+    // Arm cues only: pre-load the target audio from this offset (seconds). 0 = from start.
+    double armStartTime{0.0};
 
     // Timing (all types)
     double preWaitSeconds{0.0};
@@ -33,6 +47,9 @@ struct Cue {
     double level{0.0};   // output fader
     double trim{0.0};    // fine trim on top of level
 
+    // Channel routing (Audio cues only)
+    Routing routing;
+
     // Fade cues only — null for all other types
     std::shared_ptr<FadeData> fadeData;
 
@@ -41,13 +58,7 @@ struct Cue {
     std::shared_ptr<StreamReader> armedStream;
 
     // Post-trigger behaviour (all types)
-    // autoContinue: immediately also trigger the next go() when this cue fires.
-    //   Cascades: consecutive cues with autoContinue all fire from the same
-    //   origin frame (same batch).
     bool autoContinue{false};
-
-    // autoFollow: schedule go() for when this cue's audio finishes.
-    //   For Stop cues the follow fires in the next scheduler poll (≈2 ms).
     bool autoFollow{false};
 
     bool isLoaded() const {

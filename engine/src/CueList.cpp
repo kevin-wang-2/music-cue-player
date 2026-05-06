@@ -3,6 +3,8 @@
 #include "engine/StreamReader.h"
 #include <algorithm>
 #include <chrono>
+#include <cmath>
+#include <limits>
 #include <thread>
 
 namespace mcp {
@@ -67,8 +69,6 @@ bool CueList::addStopCue(int targetIndex, const std::string& name, double preWai
 }
 
 bool CueList::addFadeCue(int resolvedTargetIdx, const std::string& targetCueNumber,
-                          const std::string& parameter,
-                          double targetValue,
                           FadeData::Curve curve,
                           bool stopWhenDone,
                           const std::string& name, double preWait) {
@@ -82,10 +82,23 @@ bool CueList::addFadeCue(int resolvedTargetIdx, const std::string& targetCueNumb
     cue.fadeData = std::make_shared<FadeData>();
     cue.fadeData->targetCueNumber   = targetCueNumber;
     cue.fadeData->resolvedTargetIdx = resolvedTargetIdx;
-    cue.fadeData->parameter         = parameter;
-    cue.fadeData->targetValue       = targetValue;
     cue.fadeData->curve             = curve;
     cue.fadeData->stopWhenDone      = stopWhenDone;
+    m_cues.push_back(std::move(cue));
+    std::lock_guard<std::mutex> lk(m_slotMutex);
+    m_lastSlot.push_back(-1);
+    m_pendingEventId.push_back(-1);
+    return true;
+}
+
+bool CueList::addBrokenAudioCue(const std::string& path, const std::string& name,
+                                 double preWait) {
+    Cue cue;
+    cue.type           = CueType::Audio;
+    cue.path           = path;
+    cue.name           = name.empty() ? (path.empty() ? "Audio Cue" : path) : name;
+    cue.preWaitSeconds = preWait;
+    // Intentionally skip loadMetadata — this is a placeholder/broken cue.
     m_cues.push_back(std::move(cue));
     std::lock_guard<std::mutex> lk(m_slotMutex);
     m_lastSlot.push_back(-1);
@@ -133,15 +146,16 @@ static int64_t voiceFrames(const Cue& cue);  // defined in "Internal helpers" be
 // ---------------------------------------------------------------------------
 // ARM
 
-bool CueList::arm(int index) {
+bool CueList::arm(int index, double startOverride) {
     if (index < 0 || index >= cueCount()) return false;
     const auto& cue = m_cues[index];
     if (cue.type != CueType::Audio || !cue.audioFile.isLoaded()) return false;
 
-    const int sr = m_engine.isInitialized() ? m_engine.sampleRate() : 48000;
-    const int ch = m_engine.isInitialized() ? m_engine.channels()   : 2;
+    const int    sr    = m_engine.isInitialized() ? m_engine.sampleRate() : 48000;
+    const int    ch    = m_engine.isInitialized() ? m_engine.channels()   : 2;
+    const double start = (startOverride >= 0.0) ? startOverride : cue.startTime;
     auto reader = std::make_shared<StreamReader>(
-        cue.path, sr, ch, cue.startTime, cue.duration);
+        cue.path, sr, ch, start, cue.duration);
     if (reader->hasError()) return false;
 
     std::lock_guard<std::mutex> lk(m_slotMutex);
@@ -213,12 +227,94 @@ void CueList::setCueTrim        (int i, double dB)           { if (i>=0&&i<cueCo
 void CueList::setCueAutoContinue(int i, bool v)             { if (i>=0&&i<cueCount()) m_cues[i].autoContinue   = v; }
 void CueList::setCueAutoFollow  (int i, bool v)             { if (i>=0&&i<cueCount()) m_cues[i].autoFollow      = v; }
 void CueList::setCueName        (int i, const std::string& n){ if (i>=0&&i<cueCount()) m_cues[i].name          = n; }
+void CueList::setCueArmStartTime(int i, double s)            { if (i>=0&&i<cueCount()) m_cues[i].armStartTime   = s; }
 void CueList::setCueCueNumber   (int i, const std::string& n){ if (i>=0&&i<cueCount()) m_cues[i].cueNumber     = n; }
 
-void CueList::setCueFadeTargetValue(int i, double dB) {
-    if (i >= 0 && i < cueCount() && m_cues[i].fadeData)
-        m_cues[i].fadeData->targetValue = dB;
+// ---------------------------------------------------------------------------
+// Routing setters
+
+void CueList::setCueOutLevel(int i, int outCh, float dB) {
+    if (i < 0 || i >= cueCount() || outCh < 0) return;
+    auto& r = m_cues[i].routing;
+    if (outCh >= (int)r.outLevelDb.size())
+        r.outLevelDb.resize(static_cast<size_t>(outCh + 1), 0.0f);
+    r.outLevelDb[static_cast<size_t>(outCh)] = dB;
 }
+
+void CueList::setCueXpoint(int i, int srcCh, int outCh, std::optional<float> dB) {
+    if (i < 0 || i >= cueCount() || srcCh < 0 || outCh < 0) return;
+    auto& r = m_cues[i].routing;
+    if (srcCh >= (int)r.xpoint.size())
+        r.xpoint.resize(static_cast<size_t>(srcCh + 1));
+    auto& row = r.xpoint[static_cast<size_t>(srcCh)];
+    if (outCh >= (int)row.size())
+        row.resize(static_cast<size_t>(outCh + 1), std::nullopt);
+    row[static_cast<size_t>(outCh)] = dB;
+}
+
+void CueList::initCueRouting(int i, int srcCh, int outCh) {
+    if (i < 0 || i >= cueCount() || srcCh <= 0 || outCh <= 0) return;
+    auto& r = m_cues[i].routing;
+
+    // Ensure outLevelDb is sized; leave existing values unchanged.
+    if ((int)r.outLevelDb.size() < outCh)
+        r.outLevelDb.resize(static_cast<size_t>(outCh), 0.0f);
+
+    // If xpoint is empty or wrong size, fill with default diagonal.
+    if ((int)r.xpoint.size() != srcCh) {
+        r.xpoint.assign(static_cast<size_t>(srcCh),
+                        std::vector<std::optional<float>>(static_cast<size_t>(outCh), std::nullopt));
+        for (int s = 0; s < srcCh; ++s)
+            if (s < outCh)
+                r.xpoint[static_cast<size_t>(s)][static_cast<size_t>(s)] = 0.0f;
+    }
+}
+
+// ---------------------------------------------------------------------------
+// Fade setters
+
+void CueList::setCueFadeMasterTarget(int i, bool enabled, float targetDb) {
+    if (i >= 0 && i < cueCount() && m_cues[i].fadeData) {
+        m_cues[i].fadeData->masterLevel.enabled  = enabled;
+        m_cues[i].fadeData->masterLevel.targetDb = targetDb;
+    }
+}
+
+void CueList::setCueFadeOutTarget(int i, int outCh, bool enabled, float targetDb) {
+    if (i < 0 || i >= cueCount() || !m_cues[i].fadeData || outCh < 0) return;
+    auto& fd = *m_cues[i].fadeData;
+    if (outCh >= (int)fd.outLevels.size())
+        fd.outLevels.resize(static_cast<size_t>(outCh + 1));
+    fd.outLevels[static_cast<size_t>(outCh)].enabled  = enabled;
+    fd.outLevels[static_cast<size_t>(outCh)].targetDb = targetDb;
+}
+
+void CueList::setCueFadeOutTargetCount(int i, int count) {
+    if (i >= 0 && i < cueCount() && m_cues[i].fadeData)
+        m_cues[i].fadeData->outLevels.resize(static_cast<size_t>(count));
+}
+
+void CueList::setCueFadeXpTarget(int i, int srcCh, int outCh, bool enabled, float targetDb) {
+    if (i < 0 || i >= cueCount() || !m_cues[i].fadeData || srcCh < 0 || outCh < 0) return;
+    auto& fd = *m_cues[i].fadeData;
+    if (srcCh >= (int)fd.xpTargets.size())
+        fd.xpTargets.resize(static_cast<size_t>(srcCh + 1));
+    auto& row = fd.xpTargets[static_cast<size_t>(srcCh)];
+    if (outCh >= (int)row.size())
+        row.resize(static_cast<size_t>(outCh + 1));
+    row[static_cast<size_t>(outCh)].enabled  = enabled;
+    row[static_cast<size_t>(outCh)].targetDb = targetDb;
+}
+
+void CueList::setCueFadeXpSize(int i, int srcCh, int outCh) {
+    if (i < 0 || i >= cueCount() || !m_cues[i].fadeData || srcCh <= 0 || outCh <= 0) return;
+    auto& fd = *m_cues[i].fadeData;
+    fd.xpTargets.resize(static_cast<size_t>(srcCh));
+    for (auto& row : fd.xpTargets)
+        if ((int)row.size() < outCh)
+            row.resize(static_cast<size_t>(outCh));
+}
+
 void CueList::setCueFadeCurve(int i, FadeData::Curve curve) {
     if (i >= 0 && i < cueCount() && m_cues[i].fadeData)
         m_cues[i].fadeData->curve = curve;
@@ -229,15 +325,63 @@ void CueList::setCueFadeStopWhenDone(int i, bool v) {
 }
 
 // ---------------------------------------------------------------------------
+// Live routing update (called from fade callbacks in the scheduler thread)
+// These do NOT modify the Cue struct — fades are live-voice-only multipliers.
+
+void CueList::setCueOutLevelGain(int cueIdx, int outCh, float linGain) {
+    if (cueIdx < 0 || cueIdx >= cueCount() || outCh < 0) return;
+    int slot;
+    { std::lock_guard<std::mutex> lk(m_slotMutex); slot = m_lastSlot[static_cast<size_t>(cueIdx)]; }
+    if (slot >= 0 && m_slotStream[static_cast<size_t>(slot)])
+        m_slotStream[static_cast<size_t>(slot)]->setOutLevelGain(outCh, linGain);
+}
+
+void CueList::setCueXpointGain(int cueIdx, int srcCh, int outCh, float linGain) {
+    if (cueIdx < 0 || cueIdx >= cueCount() || srcCh < 0 || outCh < 0) return;
+    int slot;
+    { std::lock_guard<std::mutex> lk(m_slotMutex); slot = m_lastSlot[static_cast<size_t>(cueIdx)]; }
+    if (slot >= 0 && m_slotStream[static_cast<size_t>(slot)])
+        m_slotStream[static_cast<size_t>(slot)]->setXpointGain(srcCh, outCh, linGain);
+}
+
+// ---------------------------------------------------------------------------
 // Internal helpers
 
-// dB → linear gain for stored level values.
-// Treats kFaderFloor (−60 dB) and below as silence so the UI's "−inf" floor
-// produces a true zero rather than the 0.1% residual of −60 dB.
 static constexpr double kFaderFloor = -60.0;
 static float levelGain(double levelDB, double trimDB) {
     const double dB = levelDB + trimDB;
     return (dB <= kFaderFloor) ? 0.0f : lut::dBToLinear(dB);
+}
+
+void CueList::applyRoutingToReader(const Cue& cue, StreamReader& reader,
+                                    int srcCh, int outCh) {
+    std::vector<float> xpGains(static_cast<size_t>(srcCh * outCh),
+                                std::numeric_limits<float>::quiet_NaN());
+    std::vector<float> outLevGains(static_cast<size_t>(outCh), 1.0f);
+
+    // Per-output-channel levels
+    for (int o = 0; o < outCh; ++o)
+        if (o < (int)cue.routing.outLevelDb.size())
+            outLevGains[static_cast<size_t>(o)] = lut::dBToLinear(cue.routing.outLevelDb[static_cast<size_t>(o)]);
+
+    // Crosspoint matrix
+    for (int s = 0; s < srcCh; ++s) {
+        for (int o = 0; o < outCh; ++o) {
+            std::optional<float> xpDb;
+            if (!cue.routing.xpoint.empty() &&
+                s < (int)cue.routing.xpoint.size() &&
+                o < (int)cue.routing.xpoint[static_cast<size_t>(s)].size()) {
+                xpDb = cue.routing.xpoint[static_cast<size_t>(s)][static_cast<size_t>(o)];
+            } else {
+                // Default diagonal routing
+                xpDb = (s == o && s < outCh) ? std::optional<float>(0.0f) : std::nullopt;
+            }
+            if (xpDb.has_value())
+                xpGains[static_cast<size_t>(s * outCh + o)] = lut::dBToLinear(*xpDb);
+        }
+    }
+
+    reader.setRouting(std::move(xpGains), std::move(outLevGains), outCh);
 }
 
 // Returns the number of frames that will actually be played for a given cue.
@@ -274,12 +418,15 @@ int64_t CueList::scheduleVoice(int cueIndex) {
     // 0 means unknown length (stream); still valid — isDone() will stop the voice.
     if (totalFrames < 0) return -1;
 
-    const float gain = levelGain(cue.level, cue.trim);
-    // Pass engine.channels() as voiceChannels so the callback's channel check
-    // always passes — StreamReader::read() handles the actual channel mapping.
+    const float gain  = levelGain(cue.level, cue.trim);
+    const int   outCh = m_engine.channels();
+    const int   srcCh = static_cast<int>(cue.audioFile.metadata().channels);
+    if (srcCh > 0 && outCh > 0)
+        applyRoutingToReader(cue, *reader, srcCh, outCh);
+
     const int slot = m_engine.scheduleStreamingVoice(
         reader.get(), totalFrames > 0 ? totalFrames : INT64_MAX / 2,
-        m_engine.channels(), cueIndex, gain);
+        outCh, cueIndex, gain);
     if (slot < 0) return -1;
 
     std::lock_guard<std::mutex> lk(m_slotMutex);
@@ -320,7 +467,7 @@ bool CueList::fire(int idx) {
         case CueType::Arm: {
             const int ti = cue.targetIndex;
             if (ti >= 0 && ti < cueCount() && m_cues[ti].type == CueType::Audio) {
-                arm(ti);
+                arm(ti, cue.armStartTime > 0.0 ? cue.armStartTime : -1.0);
                 result = true;
                 // followFrames = 0 → autoFollow fires in the next scheduler poll
             }
@@ -333,23 +480,46 @@ bool CueList::fire(int idx) {
             const int tIdx = fd->resolvedTargetIdx;
             if (tIdx < 0 || tIdx >= cueCount()) break;
 
-            // Duration lives on the Cue itself (shared with audio playback region).
             const double length  = std::max(0.01, cue.duration > 0.0 ? cue.duration : 3.0);
-            const double startDB = m_cues[static_cast<std::size_t>(tIdx)].level;
             const int    sr      = m_engine.sampleRate();
             const int    steps   = std::max(2, static_cast<int>(length * 30.0));
             const double stepSec = length / static_cast<double>(steps - 1);
 
-            // Join any leftover thread from a previous fire.
+            // Capture start values at fire() time
+            const auto& tc = m_cues[static_cast<std::size_t>(tIdx)];
+            fd->masterLevelStartDb = static_cast<float>(tc.level);
+            fd->outLevelStartDb.resize(fd->outLevels.size());
+            for (int o = 0; o < (int)fd->outLevels.size(); ++o) {
+                float startDb = 0.0f;
+                if (o < (int)tc.routing.outLevelDb.size())
+                    startDb = tc.routing.outLevelDb[static_cast<size_t>(o)];
+                fd->outLevelStartDb[static_cast<size_t>(o)] = startDb;
+            }
+            // Capture xpoint start values
+            {
+                const int xs = (int)fd->xpTargets.size();
+                fd->xpStartDb.assign(static_cast<size_t>(xs), {});
+                for (int s = 0; s < xs; ++s) {
+                    const int xo = (int)fd->xpTargets[static_cast<size_t>(s)].size();
+                    fd->xpStartDb[static_cast<size_t>(s)].assign(static_cast<size_t>(xo), 0.0f);
+                    for (int o = 0; o < xo; ++o) {
+                        float startDb = 0.0f;
+                        if (s < (int)tc.routing.xpoint.size() &&
+                            o < (int)tc.routing.xpoint[static_cast<size_t>(s)].size()) {
+                            auto xv = tc.routing.xpoint[static_cast<size_t>(s)][static_cast<size_t>(o)];
+                            if (xv.has_value()) startDb = *xv;
+                            else startDb = -144.0f;
+                        }
+                        fd->xpStartDb[static_cast<size_t>(s)][static_cast<size_t>(o)] = startDb;
+                    }
+                }
+            }
+
+            // Compute progress ramp asynchronously (finishes near-instantly).
             if (fd->computeThread.joinable()) fd->computeThread.join();
             fd->rampReady.store(false, std::memory_order_relaxed);
+            fd->computeThread = std::thread([fd, steps]() { fd->computeRamp(steps); });
 
-            // Compute ramp in a separate thread.
-            fd->computeThread = std::thread([fd, startDB, steps]() {
-                fd->computeRamp(startDB, steps);
-            });
-
-            // Schedule one callback per ramp step.
             const int64_t baseFrame = m_engine.enginePlayheadFrames();
             for (int s = 0; s < steps; ++s) {
                 const bool isLast = (s == steps - 1);
@@ -357,14 +527,53 @@ bool CueList::fire(int idx) {
                     [this, fd, tIdx, s, isLast]() {
                         if (!fd->rampReady.load(std::memory_order_acquire)) return;
                         if (tIdx < 0 || tIdx >= cueCount()) return;
-                        if (s >= static_cast<int>(fd->ramp.size()))  return;
-                        const double rampDB = fd->ramp[static_cast<std::size_t>(s)];
-                        // Apply gain to the live voice only — never mutate tc.level so
-                        // that firing the cue again after the fade restores its original level.
-                        const auto& tc  = m_cues[static_cast<std::size_t>(tIdx)];
-                        const int   slot = cueVoiceSlot(tIdx);
-                        if (slot >= 0 && m_engine.isVoiceActive(slot))
-                            m_engine.setVoiceGain(slot, levelGain(rampDB, tc.trim));
+                        if (s >= (int)fd->ramp.size()) return;
+
+                        const float t    = fd->ramp[static_cast<size_t>(s)];
+                        const bool  isEP = (fd->curve == FadeData::Curve::EqualPower);
+
+                        // Interpolate amplitude start→target using the chosen curve.
+                        auto interpAmp = [&](float startDb, float endDb) -> float {
+                            const float sl = lut::dBToLinear(startDb);
+                            const float el = lut::dBToLinear(endDb);
+                            return isEP ? (sl * lut::cos_hp(t) + el * lut::sin_hp(t))
+                                        : (sl + t * (el - sl));
+                        };
+
+                        // Master level fade — apply to live voice gain only
+                        if (fd->masterLevel.enabled) {
+                            const float amp  = interpAmp(fd->masterLevelStartDb,
+                                                          fd->masterLevel.targetDb);
+                            const auto& tc2  = m_cues[static_cast<size_t>(tIdx)];
+                            const int   slot = cueVoiceSlot(tIdx);
+                            if (slot >= 0 && m_engine.isVoiceActive(slot))
+                                m_engine.setVoiceGain(slot, levelGain(lut::linearToDB(amp),
+                                                                        tc2.trim));
+                        }
+
+                        // Per-output-channel level fades
+                        for (int o = 0; o < (int)fd->outLevels.size(); ++o) {
+                            if (!fd->outLevels[static_cast<size_t>(o)].enabled) continue;
+                            if (o >= (int)fd->outLevelStartDb.size()) continue;
+                            const float amp = interpAmp(
+                                fd->outLevelStartDb[static_cast<size_t>(o)],
+                                fd->outLevels[static_cast<size_t>(o)].targetDb);
+                            setCueOutLevelGain(tIdx, o, amp);
+                        }
+
+                        // Crosspoint cell fades
+                        for (int s = 0; s < (int)fd->xpTargets.size(); ++s) {
+                            for (int o = 0; o < (int)fd->xpTargets[static_cast<size_t>(s)].size(); ++o) {
+                                if (!fd->xpTargets[static_cast<size_t>(s)][static_cast<size_t>(o)].enabled) continue;
+                                if (s >= (int)fd->xpStartDb.size()) continue;
+                                if (o >= (int)fd->xpStartDb[static_cast<size_t>(s)].size()) continue;
+                                const float amp = interpAmp(
+                                    fd->xpStartDb[static_cast<size_t>(s)][static_cast<size_t>(o)],
+                                    fd->xpTargets[static_cast<size_t>(s)][static_cast<size_t>(o)].targetDb);
+                                setCueXpointGain(tIdx, s, o, amp);
+                            }
+                        }
+
                         if (isLast && fd->stopWhenDone)
                             m_engine.clearVoicesByTag(tIdx);
                     },

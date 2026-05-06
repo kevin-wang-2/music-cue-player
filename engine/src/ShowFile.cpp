@@ -6,7 +6,6 @@ using json = nlohmann::json;
 
 namespace mcp {
 
-// Helper: safely extract a value from j[key] if present and the right type.
 template<typename T>
 static T jget(const json& j, const char* key, T def) {
     if (!j.contains(key)) return def;
@@ -21,6 +20,7 @@ static ShowFile::CueData parseCue(const json& j) {
     c.path            = jget<std::string>(j, "path",            "");
     c.target          = jget<int>        (j, "target",          -1);
     c.targetCueNumber = jget<std::string>(j, "targetCueNumber", "");
+    c.armStartTime    = jget<double>     (j, "armStartTime",    0.0);
     c.preWait         = jget<double>     (j, "preWait",         0.0);
     c.startTime       = jget<double>     (j, "startTime",       0.0);
     c.duration        = jget<double>     (j, "duration",        0.0);
@@ -28,10 +28,61 @@ static ShowFile::CueData parseCue(const json& j) {
     c.trim            = jget<double>     (j, "trim",            0.0);
     c.autoContinue    = jget<bool>       (j, "autoContinue",    false);
     c.autoFollow      = jget<bool>       (j, "autoFollow",      false);
-    c.fadeParameter    = jget<std::string>(j, "fadeParameter",    "level");
-    c.fadeTargetValue  = jget<double>    (j, "fadeTargetValue",  0.0);
-    c.fadeCurve        = jget<std::string>(j, "fadeCurve",       "linear");
-    c.fadeStopWhenDone = jget<bool>      (j, "fadeStopWhenDone", false);
+
+    // Audio routing: per-output levels
+    if (j.contains("outLevels") && j["outLevels"].is_array()) {
+        for (const auto& v : j["outLevels"])
+            c.outLevelDb.push_back(static_cast<float>(v.get<double>()));
+    }
+    // Audio routing: crosspoint entries
+    if (j.contains("xpoint") && j["xpoint"].is_array()) {
+        for (const auto& e : j["xpoint"]) {
+            ShowFile::CueData::XpEntry xe;
+            xe.s  = jget<int>   (e, "s",  0);
+            xe.o  = jget<int>   (e, "o",  0);
+            xe.db = jget<float> (e, "db", 0.0f);
+            c.xpEntries.push_back(xe);
+        }
+    }
+
+    // Fade cue parameters
+    c.fadeCurve        = jget<std::string>(j, "fadeCurve",        "linear");
+    c.fadeStopWhenDone = jget<bool>       (j, "fadeStopWhenDone", false);
+
+    // New multi-target format
+    c.fadeMasterEnabled = jget<bool> (j, "fadeMasterEnabled", false);
+    c.fadeMasterTarget  = jget<float>(j, "fadeMasterTarget",  0.0f);
+
+    // Backward compat: old single-parameter "level" fade
+    if (!c.fadeMasterEnabled) {
+        const std::string param = jget<std::string>(j, "fadeParameter", "");
+        if (param == "level") {
+            c.fadeMasterEnabled = true;
+            c.fadeMasterTarget  = static_cast<float>(jget<double>(j, "fadeTargetValue", 0.0));
+        }
+    }
+
+    if (j.contains("fadeOutLevels") && j["fadeOutLevels"].is_array()) {
+        for (const auto& e : j["fadeOutLevels"]) {
+            ShowFile::CueData::FadeOutLevel fl;
+            fl.ch      = jget<int>  (e, "ch",      0);
+            fl.enabled = jget<bool> (e, "enabled", false);
+            fl.target  = jget<float>(e, "target",  0.0f);
+            c.fadeOutLevels.push_back(fl);
+        }
+    }
+
+    if (j.contains("fadeXpEntries") && j["fadeXpEntries"].is_array()) {
+        for (const auto& e : j["fadeXpEntries"]) {
+            ShowFile::CueData::FadeXpEntry fx;
+            fx.s       = jget<int>  (e, "s",       0);
+            fx.o       = jget<int>  (e, "o",       0);
+            fx.enabled = jget<bool> (e, "enabled", false);
+            fx.target  = jget<float>(e, "target",  0.0f);
+            c.fadeXpEntries.push_back(fx);
+        }
+    }
+
     return c;
 }
 
@@ -41,23 +92,66 @@ static json cueToJson(const ShowFile::CueData& c) {
     j["cueNumber"] = c.cueNumber;
     j["name"]      = c.name;
     j["preWait"]   = c.preWait;
+
     if (c.type == "audio") {
         j["path"] = c.path;
         if (c.startTime != 0.0) j["startTime"] = c.startTime;
         if (c.duration  != 0.0) j["duration"]  = c.duration;
-        if (c.level     != 0.0) j["level"]     = c.level;
-        if (c.trim      != 0.0) j["trim"]      = c.trim;
+        if (c.level     != 0.0) j["level"]      = c.level;
+        if (c.trim      != 0.0) j["trim"]       = c.trim;
+        // Per-output levels (omit if all zero)
+        bool anyNonZero = false;
+        for (float v : c.outLevelDb) if (v != 0.0f) { anyNonZero = true; break; }
+        if (anyNonZero) {
+            json arr = json::array();
+            for (float v : c.outLevelDb) arr.push_back(v);
+            j["outLevels"] = arr;
+        }
+        // Crosspoint entries
+        if (!c.xpEntries.empty()) {
+            json arr = json::array();
+            for (const auto& e : c.xpEntries) {
+                json ej;
+                ej["s"] = e.s; ej["o"] = e.o; ej["db"] = e.db;
+                arr.push_back(ej);
+            }
+            j["xpoint"] = arr;
+        }
     } else if (c.type == "start" || c.type == "stop" || c.type == "arm") {
         j["target"]          = c.target;
         j["targetCueNumber"] = c.targetCueNumber;
+        if (c.type == "arm" && c.armStartTime != 0.0)
+            j["armStartTime"] = c.armStartTime;
     } else if (c.type == "fade") {
-        j["targetCueNumber"] = c.targetCueNumber;
-        j["fadeParameter"]   = c.fadeParameter;
-        j["fadeTargetValue"] = c.fadeTargetValue;
-        if (c.duration  != 0.0) j["duration"] = c.duration;   // fade length
-        j["fadeCurve"]       = c.fadeCurve;
+        j["targetCueNumber"]  = c.targetCueNumber;
+        j["fadeCurve"]        = c.fadeCurve;
+        if (c.duration != 0.0) j["duration"] = c.duration;
         if (c.fadeStopWhenDone) j["fadeStopWhenDone"] = true;
+        if (c.fadeMasterEnabled) {
+            j["fadeMasterEnabled"] = true;
+            j["fadeMasterTarget"]  = c.fadeMasterTarget;
+        }
+        if (!c.fadeOutLevels.empty()) {
+            json arr = json::array();
+            for (const auto& fl : c.fadeOutLevels) {
+                json ej;
+                ej["ch"] = fl.ch; ej["enabled"] = fl.enabled; ej["target"] = fl.target;
+                arr.push_back(ej);
+            }
+            j["fadeOutLevels"] = arr;
+        }
+        if (!c.fadeXpEntries.empty()) {
+            json arr = json::array();
+            for (const auto& fx : c.fadeXpEntries) {
+                json ej;
+                ej["s"] = fx.s; ej["o"] = fx.o;
+                ej["enabled"] = fx.enabled; ej["target"] = fx.target;
+                arr.push_back(ej);
+            }
+            j["fadeXpEntries"] = arr;
+        }
     }
+
     if (c.autoContinue) j["autoContinue"] = true;
     if (c.autoFollow)   j["autoFollow"]   = true;
     return j;
@@ -69,23 +163,21 @@ bool ShowFile::load(const std::filesystem::path& path, std::string& error) {
 
     json root;
     try {
-        root = json::parse(f, nullptr, /*exceptions=*/true, /*ignore_comments=*/true);
+        root = json::parse(f, nullptr, true, true);
     } catch (const json::parse_error& e) {
         error = std::string("JSON parse error: ") + e.what();
         return false;
     }
 
-    version      = jget<std::string>(root, "mcp_version", kCurrentVersion);
+    version = jget<std::string>(root, "mcp_version", kCurrentVersion);
 
-    if (root.contains("show") && root["show"].is_object()) {
-        const auto& s = root["show"];
-        show.title = jget<std::string>(s, "title", "Untitled Show");
-    }
+    if (root.contains("show") && root["show"].is_object())
+        show.title = jget<std::string>(root["show"], "title", "Untitled Show");
 
     if (root.contains("engine") && root["engine"].is_object()) {
-        const auto& e = root["engine"];
-        engine.sampleRate = jget<int>(e, "sampleRate", 48000);
-        engine.channels   = jget<int>(e, "channels",   2);
+        engine.sampleRate = jget<int>        (root["engine"], "sampleRate", 48000);
+        engine.channels   = jget<int>        (root["engine"], "channels",   2);
+        engine.deviceName = jget<std::string>(root["engine"], "deviceName", "");
     }
 
     cueLists.clear();
@@ -107,8 +199,10 @@ bool ShowFile::save(const std::filesystem::path& path, std::string& error) const
     json root;
     root["mcp_version"]       = version;
     root["show"]["title"]     = show.title;
-    root["engine"]["sampleRate"] = engine.sampleRate;
-    root["engine"]["channels"]   = engine.channels;
+    root["engine"]["sampleRate"]  = engine.sampleRate;
+    root["engine"]["channels"]    = engine.channels;
+    if (!engine.deviceName.empty())
+        root["engine"]["deviceName"] = engine.deviceName;
 
     json clArr = json::array();
     for (const auto& cld : cueLists) {

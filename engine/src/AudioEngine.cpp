@@ -173,15 +173,68 @@ static int paCallback(const void* /*input*/, void* output,
 AudioEngine::AudioEngine() : m_impl(std::make_unique<AudioEngineImpl>()) {}
 AudioEngine::~AudioEngine() { shutdown(); }
 
-bool AudioEngine::initialize(int sampleRate, int channels) {
+std::vector<DeviceInfo> AudioEngine::listOutputDevices() {
+    std::vector<DeviceInfo> result;
+    PaError err = Pa_Initialize();
+    if (err != paNoError) return result;
+
+    const int count = Pa_GetDeviceCount();
+    for (int i = 0; i < count; ++i) {
+        const PaDeviceInfo* info = Pa_GetDeviceInfo(i);
+        if (!info || info->maxOutputChannels <= 0) continue;
+        DeviceInfo d;
+        d.index             = i;
+        d.name              = info->name ? info->name : "";
+        d.maxOutputChannels = info->maxOutputChannels;
+        result.push_back(std::move(d));
+    }
+
+    Pa_Terminate();
+    return result;
+}
+
+bool AudioEngine::initialize(int sampleRate, int channels, const std::string& deviceName) {
     PaError err = Pa_Initialize();
     if (err != paNoError) { m_impl->lastError = Pa_GetErrorText(err); return false; }
+
+    // Resolve the device index
+    PaDeviceIndex devIdx = Pa_GetDefaultOutputDevice();
+    if (!deviceName.empty()) {
+        const int count = Pa_GetDeviceCount();
+        for (int i = 0; i < count; ++i) {
+            const PaDeviceInfo* info = Pa_GetDeviceInfo(i);
+            if (info && info->maxOutputChannels > 0 && info->name
+                && std::string(info->name) == deviceName) {
+                devIdx = i;
+                break;
+            }
+        }
+    }
+
+    // Auto-detect channel count from the selected device when channels == 0
+    if (channels <= 0) {
+        channels = 2;
+        if (devIdx != paNoDevice) {
+            const PaDeviceInfo* info = Pa_GetDeviceInfo(devIdx);
+            if (info && info->maxOutputChannels > 0)
+                channels = std::min(info->maxOutputChannels, 64);
+        }
+    }
 
     m_impl->sampleRate  = sampleRate;
     m_impl->outChannels = channels;
 
-    err = Pa_OpenDefaultStream(&m_impl->stream, 0, channels, paFloat32, sampleRate,
-                               paFramesPerBufferUnspecified, &paCallback, m_impl.get());
+    PaStreamParameters outParams{};
+    outParams.device                    = (devIdx != paNoDevice) ? devIdx : Pa_GetDefaultOutputDevice();
+    outParams.channelCount              = channels;
+    outParams.sampleFormat              = paFloat32;
+    outParams.suggestedLatency          = Pa_GetDeviceInfo(outParams.device)
+                                          ? Pa_GetDeviceInfo(outParams.device)->defaultLowOutputLatency
+                                          : 0.01;
+    outParams.hostApiSpecificStreamInfo = nullptr;
+
+    err = Pa_OpenStream(&m_impl->stream, nullptr, &outParams, sampleRate,
+                        paFramesPerBufferUnspecified, paNoFlag, &paCallback, m_impl.get());
     if (err != paNoError) {
         m_impl->lastError = Pa_GetErrorText(err); Pa_Terminate(); return false;
     }

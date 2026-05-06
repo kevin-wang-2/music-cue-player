@@ -8,6 +8,7 @@
 #include <array>
 #include <memory>
 #include <mutex>
+#include <optional>
 #include <string>
 #include <vector>
 
@@ -49,6 +50,12 @@ public:
     bool addCue(const std::string& path, const std::string& name = "",
                 double preWait = 0.0);
 
+    // Append a broken/placeholder Audio cue (path may be empty or invalid).
+    // Always succeeds — the cue will not play until a valid path is set.
+    // Used so ShowFile indices stay in sync with CueList indices.
+    bool addBrokenAudioCue(const std::string& path, const std::string& name = "",
+                           double preWait = 0.0);
+
     // Append a Start cue that, when fired, plays the audio of cue[targetIndex].
     bool addStartCue(int targetIndex, const std::string& name = "",
                      double preWait = 0.0);
@@ -57,17 +64,16 @@ public:
     bool addStopCue(int targetIndex, const std::string& name = "",
                     double preWait = 0.0);
 
-    // Append a Fade cue that ramps cue[resolvedTargetIdx]'s `parameter` from its
-    // current value to `targetValue`.  Duration is set separately via setCueDuration.
+    // Append a Fade cue.  Duration is set separately via setCueDuration.
+    // Use setCueFadeMasterTarget / setCueFadeOutTarget to configure fade targets.
     bool addFadeCue(int resolvedTargetIdx, const std::string& targetCueNumber,
-                    const std::string& parameter,
-                    double targetValue,
                     FadeData::Curve curve,
                     bool stopWhenDone = false,
                     const std::string& name = "", double preWait = 0.0);
 
     // Append an Arm cue that, when fired, pre-buffers the audio of cue[targetIndex]
     // so the next go()/start() on that cue fires with no I/O latency.
+    // armStartTime: pre-load from this offset (seconds); 0 = from start of file.
     bool addArmCue(int targetIndex, const std::string& name = "", double preWait = 0.0);
 
     void clear();
@@ -91,19 +97,34 @@ public:
     void setCueAutoContinue(int index, bool enable);
     void setCueAutoFollow  (int index, bool enable);
     void setCueName       (int index, const std::string& name);
+    void setCueArmStartTime(int index, double seconds);  // Arm cues only
     void setCueCueNumber  (int index, const std::string& number);
 
+    // Audio cue routing setters.
+    // outCh / srcCh: 0-based channel indices.
+    void setCueOutLevel(int index, int outCh, float dB);   // per-output level; 0=unity
+    void setCueXpoint  (int index, int srcCh, int outCh,
+                        std::optional<float> dB);          // nullopt = disable cell
+    // Initialize xpoint to default (diagonal) if it is empty.
+    // srcCh = file channels, outCh = engine output channels.
+    void initCueRouting(int index, int srcCh, int outCh);
+
     // Fade cue setters (no-op if cue[index] is not a Fade cue).
-    void setCueFadeTargetValue(int index, double dB);
-    void setCueFadeCurve      (int index, FadeData::Curve curve);
-    void setCueFadeStopWhenDone(int index, bool v);
+    void setCueFadeMasterTarget (int index, bool enabled, float targetDb);
+    void setCueFadeOutTarget    (int index, int outCh, bool enabled, float targetDb);
+    void setCueFadeOutTargetCount(int index, int count);   // resize outLevels vector
+    void setCueFadeXpTarget     (int index, int srcCh, int outCh, bool enabled, float targetDb);
+    void setCueFadeXpSize       (int index, int srcCh, int outCh);  // resize xpTargets matrix
+    void setCueFadeCurve        (int index, FadeData::Curve curve);
+    void setCueFadeStopWhenDone (int index, bool v);
 
     // --- ARM ----------------------------------------------------------------
 
     // Pre-buffer audio for cue[index] so that the next go()/start() fires
     // with no I/O latency.  Idempotent — calling arm() twice just replaces
     // the previous buffer.  No-op for non-audio cues.
-    bool arm(int index);
+    // startOverride >= 0: load from that offset; otherwise uses cue.startTime.
+    bool arm(int index, double startOverride = -1.0);
 
     // Release the pre-buffered data for cue[index] without playing it.
     void disarm(int index);
@@ -151,15 +172,21 @@ public:
     double cueTotalSeconds(int index) const;
 
 private:
-    // Execute the cue's action immediately (called after prewait, or directly).
-    // For Audio:  schedules the voice.
-    // For Start:  schedules the audio of the target cue.
-    // For Stop:   clears voices tagged with targetIndex.
     bool fire(int cueIndex);
-
-    // Shared by fire() (Audio path) — may be called from the scheduler thread.
-    // Returns total output frames at engine SR, or -1 on failure.
     int64_t scheduleVoice(int cueIndex);
+
+    // Build linear routing gains from cue.routing and set them on `reader`.
+    // srcCh = reader's native file channel count; outCh = engine.channels().
+    void applyRoutingToReader(const Cue& cue, StreamReader& reader,
+                               int srcCh, int outCh);
+
+    // Update a live voice's per-output-channel gain (called from fade callbacks).
+    // Does NOT modify cue.routing — fade is a live-voice-only multiplier.
+    void setCueOutLevelGain(int cueIdx, int outCh, float linGain);
+
+    // Update a live voice's single crosspoint cell gain (called from fade callbacks).
+    // Does NOT modify cue.routing.xpoint.
+    void setCueXpointGain(int cueIdx, int srcCh, int outCh, float linGain);
 
     AudioEngine& m_engine;
     Scheduler&   m_scheduler;
