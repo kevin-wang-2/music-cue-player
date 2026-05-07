@@ -6,6 +6,7 @@
 
 class AppModel;
 class FaderWidget;
+class MusicContextView;
 class TimelineGroupView;
 class WaveformView;
 
@@ -65,6 +66,7 @@ private:
     void buildCurveTab();
     void buildModeTab();
     void buildTimelineTab();
+    void buildMCTab();
 
     void loadBasic();
     void loadLevels();
@@ -73,6 +75,7 @@ private:
     void loadCurve();
     void loadMode();
     void loadSyncSection();
+    void loadMCPropPanel();
 
     void rebuildLevelsForCue();   // re-creates fader layout on cue change
 
@@ -89,12 +92,14 @@ private:
     QWidget*     m_curvePage{nullptr};
     QWidget*     m_modePage{nullptr};
     QWidget*     m_timelinePage{nullptr};
+    QWidget*     m_mcPage{nullptr};
 
     // Basic tab controls
     QLineEdit*    m_editNum{nullptr};
     QLineEdit*    m_editName{nullptr};
     QDoubleSpinBox* m_spinPreWait{nullptr};
     QDoubleSpinBox* m_spinDurationBasic{nullptr};  // shown for Fade/Group (Audio uses Time tab)
+    QComboBox*    m_comboGoQuantize{nullptr};
     QCheckBox*    m_chkAutoCont{nullptr};
     QCheckBox*    m_chkAutoFollow{nullptr};
     // Devamp-specific
@@ -146,6 +151,20 @@ private:
 
     // Timeline tab (Timeline group cues)
     TimelineGroupView* m_timelineView{nullptr};
+
+    // Music Context tab
+    QCheckBox*         m_chkAttachMC{nullptr};
+    QWidget*           m_mcContent{nullptr};
+    QCheckBox*         m_chkApplyBefore{nullptr};
+    MusicContextView*  m_mcView{nullptr};
+    QWidget*           m_mcPropGroup{nullptr};    // property panel (hidden when no selection)
+    QComboBox*         m_comboPtType{nullptr};
+    QDoubleSpinBox*    m_spinPtBpm{nullptr};
+    QSpinBox*          m_spinTSNum{nullptr};
+    QSpinBox*          m_spinTSDen{nullptr};
+    QCheckBox*         m_chkTSInherit{nullptr};
+    QLabel*            m_lblPtPos{nullptr};
+    int                m_selMCPt{-1};
 
     bool m_loading{false};   // guard re-entrant signals during load
 };

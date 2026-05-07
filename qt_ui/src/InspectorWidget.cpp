@@ -1,14 +1,19 @@
 #include "InspectorWidget.h"
 #include "AppModel.h"
 #include "FaderWidget.h"
+#include "MusicContextView.h"
 #include "ShowHelpers.h"
 #include "SyncGroupView.h"
 #include "TimelineGroupView.h"
 #include "WaveformView.h"
 
+#include "engine/CueList.h"
+#include "engine/MusicContext.h"
+
 #include "engine/Cue.h"
 #include "engine/FadeData.h"
 
+#include <algorithm>
 #include <optional>
 #include <QCheckBox>
 #include <QComboBox>
@@ -62,6 +67,7 @@ InspectorWidget::InspectorWidget(AppModel* model, QWidget* parent)
     lay->addWidget(m_tabs);
 
     buildBasicTab();
+    buildMCTab();
     buildLevelsTab();
     buildTrimTab();
     buildCurveTab();
@@ -83,6 +89,9 @@ void InspectorWidget::buildBasicTab() {
     m_spinPreWait->setRange(0.0, 9999.0);
     m_spinPreWait->setDecimals(3);
     m_spinPreWait->setSuffix(" s");
+    m_comboGoQuantize = new QComboBox;
+    m_comboGoQuantize->addItems({"None", "Next bar", "Next beat"});
+
     m_chkAutoCont   = new QCheckBox("Auto-continue");
     m_chkAutoFollow = new QCheckBox("Auto-follow");
 
@@ -96,6 +105,7 @@ void InspectorWidget::buildBasicTab() {
     form->addRow("Name:",     m_editName);
     form->addRow("Pre-wait:", m_spinPreWait);
     form->addRow("Duration:", m_spinDurationBasic);
+    form->addRow("Quantize:", m_comboGoQuantize);
 
     auto* flagRow = new QHBoxLayout;
     flagRow->addWidget(m_chkAutoCont);
@@ -128,6 +138,8 @@ void InspectorWidget::buildBasicTab() {
     connect(m_editNum,  &QLineEdit::editingFinished, this, &InspectorWidget::onBasicChanged);
     connect(m_editName, &QLineEdit::editingFinished, this, &InspectorWidget::onBasicChanged);
     connect(m_spinPreWait, &QDoubleSpinBox::editingFinished,
+            this, &InspectorWidget::onBasicChanged);
+    connect(m_comboGoQuantize, QOverload<int>::of(&QComboBox::currentIndexChanged),
             this, &InspectorWidget::onBasicChanged);
     connect(m_chkAutoCont,   &QCheckBox::toggled, this, &InspectorWidget::onBasicChanged);
     connect(m_chkAutoFollow, &QCheckBox::toggled, this, &InspectorWidget::onBasicChanged);
@@ -421,6 +433,161 @@ void InspectorWidget::buildModeTab() {
     });
 }
 
+void InspectorWidget::buildMCTab() {
+    m_mcPage = new QWidget;
+    auto* outerLay = new QVBoxLayout(m_mcPage);
+    outerLay->setContentsMargins(8, 6, 8, 6);
+    outerLay->setSpacing(4);
+
+    m_chkAttachMC = new QCheckBox("Attach Music Context");
+    outerLay->addWidget(m_chkAttachMC);
+
+    m_mcContent = new QWidget;
+    auto* contentLay = new QVBoxLayout(m_mcContent);
+    contentLay->setContentsMargins(0, 4, 0, 0);
+    contentLay->setSpacing(4);
+
+    m_chkApplyBefore = new QCheckBox("Apply before cue start (extrapolate first point)");
+    contentLay->addWidget(m_chkApplyBefore);
+
+    m_mcView = new MusicContextView(m_model, m_mcContent);
+    contentLay->addWidget(m_mcView);
+
+    // Property panel for selected point
+    m_mcPropGroup = new QWidget;
+    auto* propLay = new QFormLayout(m_mcPropGroup);
+    propLay->setContentsMargins(0, 4, 0, 0);
+    propLay->setSpacing(3);
+
+    m_comboPtType = new QComboBox; m_comboPtType->addItems({"Jump", "Ramp"});
+    m_spinPtBpm   = new QDoubleSpinBox;
+    m_spinPtBpm->setRange(10.0, 999.0); m_spinPtBpm->setDecimals(2); m_spinPtBpm->setSuffix(" BPM");
+
+    auto* tsRow = new QHBoxLayout;
+    m_spinTSNum = new QSpinBox; m_spinTSNum->setRange(1, 32);
+    m_spinTSDen = new QSpinBox; m_spinTSDen->setRange(1, 32);
+    m_chkTSInherit = new QCheckBox("inherit");
+    tsRow->addWidget(m_spinTSNum);
+    tsRow->addWidget(new QLabel("/"));
+    tsRow->addWidget(m_spinTSDen);
+    tsRow->addWidget(m_chkTSInherit);
+    tsRow->addStretch();
+
+    m_lblPtPos = new QLabel("—");
+
+    propLay->addRow("Type:",     m_comboPtType);
+    propLay->addRow("BPM:",      m_spinPtBpm);
+    propLay->addRow("Time Sig:", tsRow);
+    propLay->addRow("Position:", m_lblPtPos);
+    m_mcPropGroup->hide();
+    contentLay->addWidget(m_mcPropGroup);
+    contentLay->addStretch();
+
+    m_mcContent->hide();
+    outerLay->addWidget(m_mcContent);
+    outerLay->addStretch();
+
+    m_tabs->addTab(m_mcPage, "Music");
+
+    // ── signals ────────────────────────────────────────────────────────────
+    connect(m_chkAttachMC, &QCheckBox::toggled, this, [this](bool on) {
+        if (m_loading || m_cueIdx < 0) return;
+        m_model->pushUndo();
+        if (on) {
+            // Create default MC: 4/4, 120 BPM, bar 1 beat 1
+            auto mc = std::make_unique<mcp::MusicContext>();
+            mcp::MusicContext::Point p;
+            p.bar = 1; p.beat = 1; p.bpm = 120.0;
+            p.isRamp = false; p.hasTimeSig = true; p.timeSigNum = 4; p.timeSigDen = 4;
+            mc->points.push_back(p);
+            m_model->cues.setCueMusicContext(m_cueIdx, std::move(mc));
+        } else {
+            m_model->cues.setCueMusicContext(m_cueIdx, nullptr);
+        }
+        ShowHelpers::syncSfFromCues(*m_model);
+        emit cueEdited();
+        // Reload the tab without losing the current tab selection
+        const int cIdx = m_cueIdx;
+        m_cueIdx = -1;
+        setCueIndex(cIdx);
+    });
+
+    connect(m_chkApplyBefore, &QCheckBox::toggled, this, [this](bool on) {
+        if (m_loading || m_cueIdx < 0) return;
+        auto* mc = m_model->cues.musicContextOf(m_cueIdx);
+        if (!mc) return;
+        m_model->pushUndo();
+        mc->applyBeforeStart = on;
+        ShowHelpers::syncSfFromCues(*m_model);
+        emit cueEdited();
+    });
+
+    connect(m_mcView, &MusicContextView::pointSelected, this, [this](int pt) {
+        m_selMCPt = pt;
+        loadMCPropPanel();
+    });
+
+    connect(m_mcView, &MusicContextView::mcChanged, this, [this] {
+        if (m_cueIdx < 0) return;
+        ShowHelpers::syncSfFromCues(*m_model);
+        loadMCPropPanel();  // refresh position label after drag
+        emit cueEdited();
+    });
+
+    // Property panel changes
+    auto onPropChanged = [this] {
+        if (m_loading || m_cueIdx < 0 || m_selMCPt < 0) return;
+        auto* mc = m_model->cues.musicContextOf(m_cueIdx);
+        if (!mc || m_selMCPt >= (int)mc->points.size()) return;
+        m_model->pushUndo();
+        auto& pt = mc->points[m_selMCPt];
+        pt.isRamp    = (m_comboPtType->currentIndex() == 1) && (m_selMCPt > 0);
+        pt.bpm       = m_spinPtBpm->value();
+        const bool inherit = m_chkTSInherit->isChecked() && (m_selMCPt > 0);
+        pt.hasTimeSig = !inherit;
+        if (pt.hasTimeSig) { pt.timeSigNum = m_spinTSNum->value(); pt.timeSigDen = m_spinTSDen->value(); }
+        mc->markDirty();
+        m_mcView->update();
+        ShowHelpers::syncSfFromCues(*m_model);
+        emit cueEdited();
+    };
+    connect(m_comboPtType, QOverload<int>::of(&QComboBox::currentIndexChanged), this, onPropChanged);
+    connect(m_spinPtBpm,   &QDoubleSpinBox::editingFinished, this, onPropChanged);
+    connect(m_spinTSNum,   &QSpinBox::editingFinished,       this, onPropChanged);
+    connect(m_spinTSDen,   &QSpinBox::editingFinished,       this, onPropChanged);
+    connect(m_chkTSInherit, &QCheckBox::toggled, this, [this, onPropChanged](bool) {
+        const bool inh = m_chkTSInherit->isChecked();
+        m_spinTSNum->setEnabled(!inh);
+        m_spinTSDen->setEnabled(!inh);
+        onPropChanged();
+    });
+}
+
+void InspectorWidget::loadMCPropPanel() {
+    if (m_cueIdx < 0) { m_mcPropGroup->hide(); return; }
+    const auto* c = m_model->cues.cueAt(m_cueIdx);
+    if (!c || !c->musicContext || m_selMCPt < 0 ||
+        m_selMCPt >= (int)c->musicContext->points.size()) {
+        m_mcPropGroup->hide();
+        return;
+    }
+    m_loading = true;
+    const auto& pt = c->musicContext->points[m_selMCPt];
+    m_comboPtType->setCurrentIndex(pt.isRamp ? 1 : 0);
+    m_comboPtType->setEnabled(m_selMCPt > 0);
+    m_spinPtBpm->setValue(pt.bpm);
+    const bool inherit = !pt.hasTimeSig && (m_selMCPt > 0);
+    m_chkTSInherit->setChecked(inherit);
+    m_chkTSInherit->setEnabled(m_selMCPt > 0);
+    m_spinTSNum->setValue(pt.hasTimeSig ? pt.timeSigNum : 4);
+    m_spinTSDen->setValue(pt.hasTimeSig ? pt.timeSigDen : 4);
+    m_spinTSNum->setEnabled(!inherit);
+    m_spinTSDen->setEnabled(!inherit);
+    m_lblPtPos->setText(QString("%1 | %2").arg(pt.bar).arg(pt.beat));
+    m_mcPropGroup->show();
+    m_loading = false;
+}
+
 void InspectorWidget::buildTimelineTab() {
     m_timelinePage = new QWidget;
     auto* lay = new QVBoxLayout(m_timelinePage);
@@ -479,6 +646,9 @@ void InspectorWidget::setCueIndex(int idx) {
     const bool isTimeline  = isGroup && c->groupData &&
                              c->groupData->mode == mcp::GroupData::Mode::Timeline;
 
+    const bool hasMC = isAudio || (isGroup && (isSyncGroup || isTimeline));
+
+    m_tabs->setTabVisible(m_tabs->indexOf(m_mcPage),       hasMC);
     m_tabs->setTabVisible(m_tabs->indexOf(m_levelsPage),   isAudio || isFade);
     m_tabs->setTabVisible(m_tabs->indexOf(m_trimPage),     isAudio);
     m_tabs->setTabVisible(m_tabs->indexOf(m_timePage),     isAudio || isSyncGroup);
@@ -490,6 +660,19 @@ void InspectorWidget::setCueIndex(int idx) {
     m_devampGroup->setVisible(isDevamp);
     m_armGroup->setVisible(isArm);
 
+    // Music Context tab
+    if (hasMC) {
+        const bool mcAttached = c && c->musicContext != nullptr;
+        m_chkAttachMC->setChecked(mcAttached);
+        m_mcContent->setVisible(mcAttached);
+        m_selMCPt = -1;
+        if (mcAttached) {
+            m_chkApplyBefore->setChecked(c->musicContext->applyBeforeStart);
+            m_mcView->setCueIndex(idx);
+            m_mcPropGroup->hide();
+        }
+    }
+
     loadBasic();
     if (isAudio || isFade) rebuildLevelsForCue();
     if (isAudio) { loadTrim(); loadTime(); }
@@ -498,6 +681,15 @@ void InspectorWidget::setCueIndex(int idx) {
     if (isGroup) {
         loadMode();
         if (isTimeline) m_timelineView->setGroupCueIndex(idx);
+    }
+
+    // Pass MC to timeline views for bar/beat ruler
+    {
+        const mcp::MusicContext* mc = (c && c->musicContext) ? c->musicContext.get() : nullptr;
+        const double startTime = (c && c->type == mcp::CueType::Audio) ? c->startTime : 0.0;
+        if (m_waveform)      m_waveform->setMusicContext(mc, startTime);
+        if (m_timelineView)  m_timelineView->setMusicContext(mc);
+        if (m_syncGroupView) m_syncGroupView->setMusicContext(mc);
     }
 
     m_markerPanel->hide();
@@ -533,12 +725,14 @@ void InspectorWidget::loadBasic() {
     m_editNum->setEnabled(en);
     m_editName->setEnabled(en);
     m_spinPreWait->setEnabled(en);
+    m_comboGoQuantize->setEnabled(en);
     m_chkAutoCont->setEnabled(en);
     m_chkAutoFollow->setEnabled(en);
 
     if (!c) {
         m_editNum->clear(); m_editName->clear();
         m_spinPreWait->setValue(0.0);
+        m_comboGoQuantize->setCurrentIndex(0);
         m_chkAutoCont->setChecked(false);
         m_chkAutoFollow->setChecked(false);
         return;
@@ -546,6 +740,7 @@ void InspectorWidget::loadBasic() {
     m_editNum->setText(QString::fromStdString(c->cueNumber));
     m_editName->setText(QString::fromStdString(c->name));
     m_spinPreWait->setValue(c->preWaitSeconds);
+    m_comboGoQuantize->setCurrentIndex(std::clamp(c->goQuantize, 0, 2));
     // Fade cues treat stored duration=0 as "use 3 s default" — show the real value.
     const double effectiveDur = (c->type == mcp::CueType::Fade && c->duration == 0.0)
                                 ? 3.0 : c->duration;
@@ -968,6 +1163,7 @@ void InspectorWidget::onBasicChanged() {
                                      m_editNum->text().toStdString());
     m_model->cues.setCueName(m_cueIdx, m_editName->text().toStdString());
     m_model->cues.setCuePreWait(m_cueIdx, m_spinPreWait->value());
+    m_model->cues.setCueGoQuantize(m_cueIdx, m_comboGoQuantize->currentIndex());
     m_model->cues.setCueAutoContinue(m_cueIdx, m_chkAutoCont->isChecked());
     m_model->cues.setCueAutoFollow(m_cueIdx, m_chkAutoFollow->isChecked());
     if (c->type == mcp::CueType::Devamp) {

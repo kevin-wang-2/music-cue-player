@@ -34,6 +34,8 @@ set(QT_UI_SOURCES
     src/TimelineGroupView.cpp
     src/SyncGroupView.h
     src/SyncGroupView.cpp
+    src/MusicContextView.h
+    src/MusicContextView.cpp
     src/DeviceDialog.h
     src/DeviceDialog.cpp
     src/MainWindow.h

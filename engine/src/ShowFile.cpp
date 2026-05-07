@@ -22,6 +22,7 @@ static ShowFile::CueData parseCue(const json& j) {
     c.targetCueNumber = jget<std::string>(j, "targetCueNumber", "");
     c.armStartTime    = jget<double>     (j, "armStartTime",    0.0);
     c.preWait         = jget<double>     (j, "preWait",         0.0);
+    c.goQuantize      = jget<int>        (j, "goQuantize",      0);
     c.startTime       = jget<double>     (j, "startTime",       0.0);
     c.duration        = jget<double>     (j, "duration",        0.0);
     c.level           = jget<double>     (j, "level",           0.0);
@@ -72,6 +73,27 @@ static ShowFile::CueData parseCue(const json& j) {
     if (j.contains("children") && j["children"].is_array()) {
         for (const auto& ch : j["children"])
             c.children.push_back(parseCue(ch));
+    }
+
+    // Music Context
+    if (j.contains("musicContext") && j["musicContext"].is_object()) {
+        const auto& mc = j["musicContext"];
+        c.musicContext.enabled            = jget<bool>  (mc, "enabled",            false);
+        c.musicContext.startOffsetSeconds = jget<double>(mc, "startOffsetSeconds", 0.0);
+        c.musicContext.applyBeforeStart   = jget<bool>  (mc, "applyBeforeStart",   true);
+        if (mc.contains("points") && mc["points"].is_array()) {
+            for (const auto& p : mc["points"]) {
+                ShowFile::CueData::MCPoint pt;
+                pt.bar        = jget<int>   (p, "bar",        1);
+                pt.beat       = jget<int>   (p, "beat",       1);
+                pt.bpm        = jget<double>(p, "bpm",        120.0);
+                pt.isRamp     = jget<bool>  (p, "isRamp",     false);
+                pt.hasTimeSig = jget<bool>  (p, "hasTimeSig", true);
+                pt.timeSigNum = jget<int>   (p, "timeSigNum", 4);
+                pt.timeSigDen = jget<int>   (p, "timeSigDen", 4);
+                c.musicContext.points.push_back(pt);
+            }
+        }
     }
 
     // Devamp cue parameters
@@ -125,6 +147,7 @@ static json cueToJson(const ShowFile::CueData& c) {
     j["cueNumber"] = c.cueNumber;
     j["name"]      = c.name;
     j["preWait"]   = c.preWait;
+    if (c.goQuantize != 0) j["goQuantize"] = c.goQuantize;
 
     if ((c.type == "audio" || (c.type == "group" && c.groupMode == "sync"))
         && !c.markers.empty()) {
@@ -217,6 +240,25 @@ static json cueToJson(const ShowFile::CueData& c) {
             for (const auto& ch : c.children) arr.push_back(cueToJson(ch));
             j["children"] = arr;
         }
+    }
+
+    // Music Context
+    if (c.musicContext.enabled) {
+        json mc;
+        mc["enabled"]            = true;
+        mc["startOffsetSeconds"] = c.musicContext.startOffsetSeconds;
+        if (!c.musicContext.applyBeforeStart) mc["applyBeforeStart"] = false;
+        json pts = json::array();
+        for (const auto& p : c.musicContext.points) {
+            json pj;
+            pj["bar"] = p.bar; pj["beat"] = p.beat; pj["bpm"] = p.bpm;
+            if (p.isRamp)       pj["isRamp"]     = true;
+            if (!p.hasTimeSig)  pj["hasTimeSig"]  = false;
+            else { pj["timeSigNum"] = p.timeSigNum; pj["timeSigDen"] = p.timeSigDen; }
+            pts.push_back(pj);
+        }
+        mc["points"] = pts;
+        j["musicContext"] = mc;
     }
 
     // Child cues inside a Timeline group carry their offset; skip default 0.

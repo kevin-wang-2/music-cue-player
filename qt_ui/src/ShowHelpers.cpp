@@ -102,6 +102,28 @@ bool rebuildCueList(AppModel& m, std::string& /*err*/) {
         return cd.target;
     };
 
+    // Convert CueData::MCData to a heap-allocated MusicContext (or nullptr).
+    auto buildMC = [](const mcp::ShowFile::CueData::MCData& mc)
+        -> std::unique_ptr<mcp::MusicContext>
+    {
+        if (!mc.enabled || mc.points.empty()) return nullptr;
+        auto ctx = std::make_unique<mcp::MusicContext>();
+        ctx->startOffsetSeconds = mc.startOffsetSeconds;
+        ctx->applyBeforeStart   = mc.applyBeforeStart;
+        for (const auto& p : mc.points) {
+            mcp::MusicContext::Point pt;
+            pt.bar        = p.bar;
+            pt.beat       = p.beat;
+            pt.bpm        = p.bpm;
+            pt.isRamp     = p.isRamp;
+            pt.hasTimeSig = p.hasTimeSig;
+            pt.timeSigNum = p.timeSigNum;
+            pt.timeSigDen = p.timeSigDen;
+            ctx->points.push_back(pt);
+        }
+        return ctx;
+    };
+
     // Recursively add cues into the engine flat list.
     // parentFlatIdx: flat index of the enclosing Group cue, or -1 for top-level.
     std::function<void(const std::vector<mcp::ShowFile::CueData>&, int)> process;
@@ -143,6 +165,8 @@ bool rebuildCueList(AppModel& m, std::string& /*err*/) {
                     m.cues.setCueSliceLoops(myIdx, cd.sliceLoops);
                 }
 
+                m.cues.setCueMusicContext(myIdx, buildMC(cd.musicContext));
+
                 // Recursively add children immediately after the group header.
                 process(cd.children, myIdx);
             } else {
@@ -176,6 +200,7 @@ bool rebuildCueList(AppModel& m, std::string& /*err*/) {
                 m.cues.setCueTrim        (myIdx, cd.trim);
                 m.cues.setCueAutoContinue(myIdx, cd.autoContinue);
                 m.cues.setCueAutoFollow  (myIdx, cd.autoFollow);
+                m.cues.setCueGoQuantize  (myIdx, cd.goQuantize);
                 if (parentFlatIdx >= 0) m.cues.setCueParentIndex(myIdx, parentFlatIdx);
                 m.cues.setCueTimelineOffset(myIdx, cd.timelineOffset);
 
@@ -203,6 +228,7 @@ bool rebuildCueList(AppModel& m, std::string& /*err*/) {
                     for (const auto& fx : cd.fadeXpEntries)
                         m.cues.setCueFadeXpTarget(myIdx, fx.s, fx.o, fx.enabled, fx.target);
                 }
+                m.cues.setCueMusicContext(myIdx, buildMC(cd.musicContext));
             }
         }
     };
@@ -222,9 +248,26 @@ void syncSfFromCues(AppModel& m) {
         cd.cueNumber      = c.cueNumber;
         cd.name           = c.name;
         cd.preWait        = c.preWaitSeconds;
+        cd.goQuantize     = c.goQuantize;
         cd.autoContinue   = c.autoContinue;
         cd.autoFollow     = c.autoFollow;
         cd.timelineOffset = c.timelineOffset;
+        if (c.musicContext) {
+            cd.musicContext.enabled            = true;
+            cd.musicContext.startOffsetSeconds = c.musicContext->startOffsetSeconds;
+            cd.musicContext.applyBeforeStart   = c.musicContext->applyBeforeStart;
+            for (const auto& p : c.musicContext->points) {
+                mcp::ShowFile::CueData::MCPoint pt;
+                pt.bar        = p.bar;
+                pt.beat       = p.beat;
+                pt.bpm        = p.bpm;
+                pt.isRamp     = p.isRamp;
+                pt.hasTimeSig = p.hasTimeSig;
+                pt.timeSigNum = p.timeSigNum;
+                pt.timeSigDen = p.timeSigDen;
+                cd.musicContext.points.push_back(pt);
+            }
+        }
     };
 
     // Build a helper to look up a cue's number by flat index.

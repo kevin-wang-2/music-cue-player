@@ -41,6 +41,11 @@ SyncGroupView::SyncGroupView(AppModel* model, QWidget* parent)
     setStyleSheet("background:#111;");
 }
 
+void SyncGroupView::setMusicContext(const mcp::MusicContext* mc) {
+    m_mc = mc;
+    update();
+}
+
 void SyncGroupView::setGroupCueIndex(int groupFlatIdx) {
     const bool groupChanged = (groupFlatIdx != m_groupIdx);
     m_groupIdx     = groupFlatIdx;
@@ -173,25 +178,47 @@ void SyncGroupView::paintEvent(QPaintEvent*) {
     p.setPen(QColor(0x55, 0x55, 0x55));
     p.drawLine(0, kRulerH, W, kRulerH);
 
-    // Pick the smallest tick step giving >= 55 px between ticks.
-    const double vis = viewDuration();
-    double tickStep = 300.0;
-    for (double s : {0.05, 0.1, 0.25, 0.5, 1.0, 2.0, 5.0, 10.0, 30.0, 60.0, 120.0, 300.0})
-        if (W * s / vis > 55.0) { tickStep = s; break; }
-
-    // Label only every Nth tick so labels stay >= 65 px apart.
-    const int labelMult = std::max(1, (int)std::ceil(65.0 / (m_pixPerSec * tickStep)));
-
     p.setPen(QColor(0x77, 0x77, 0x77));
-    const double firstTick = std::ceil(m_viewStart / tickStep) * tickStep;
-    for (double t = firstTick; secToPix(t) < W; t += tickStep) {
-        const int  tx      = secToPix(t);
-        const int  tidx    = static_cast<int>(std::round(t / tickStep));
-        const bool isLabel = (tidx % labelMult == 0);
-        p.drawLine(tx, kRulerH - (isLabel ? 6 : 3), tx, kRulerH);
-        if (isLabel)
-            p.drawText(tx + 2, 1, 64, kRulerH - 2, Qt::AlignLeft | Qt::AlignVCenter,
-                       fmtRulerTick(t));
+    if (m_mc) {
+        // Bar/beat ruler from Music Context
+        const auto startPos = m_mc->secondsToMusical(m_viewStart);
+        int bar = startPos.bar - 1;
+        int lastLabelX = -100;
+        for (int safety = 0; safety < 4000; safety++, bar++) {
+            const int bx = secToPix(m_mc->musicalToSeconds(bar, 1));
+            if (bx > W) break;
+            if (bx >= -2) {
+                p.drawLine(bx, kRulerH - 6, bx, kRulerH);
+                if (bx - lastLabelX >= 36) {
+                    p.drawText(bx + 2, 1, 54, kRulerH - 2,
+                               Qt::AlignLeft | Qt::AlignVCenter, QString::number(bar));
+                    lastLabelX = bx;
+                }
+            }
+            const auto ts = m_mc->timeSigAt(bar, 1);
+            for (int beat = 2; beat <= ts.num; beat++) {
+                const int tx = secToPix(m_mc->musicalToSeconds(bar, beat));
+                if (tx < 0 || tx > W) continue;
+                p.drawLine(tx, kRulerH - 3, tx, kRulerH);
+            }
+        }
+    } else {
+        // Seconds ruler
+        const double vis = viewDuration();
+        double tickStep = 300.0;
+        for (double s : {0.05, 0.1, 0.25, 0.5, 1.0, 2.0, 5.0, 10.0, 30.0, 60.0, 120.0, 300.0})
+            if (W * s / vis > 55.0) { tickStep = s; break; }
+        const int labelMult = std::max(1, (int)std::ceil(65.0 / (m_pixPerSec * tickStep)));
+        const double firstTick = std::ceil(m_viewStart / tickStep) * tickStep;
+        for (double t = firstTick; secToPix(t) < W; t += tickStep) {
+            const int  tx      = secToPix(t);
+            const int  tidx    = static_cast<int>(std::round(t / tickStep));
+            const bool isLabel = (tidx % labelMult == 0);
+            p.drawLine(tx, kRulerH - (isLabel ? 6 : 3), tx, kRulerH);
+            if (isLabel)
+                p.drawText(tx + 2, 1, 64, kRulerH - 2, Qt::AlignLeft | Qt::AlignVCenter,
+                           fmtRulerTick(t));
+        }
     }
 
     // ── Slice tint (alternating bands between markers) ─────────────────────
@@ -386,9 +413,9 @@ void SyncGroupView::mousePressEvent(QMouseEvent* ev) {
             }
         }
 
-        // Ruler click (no marker hit) → set arm cursor
+        // Ruler click (no marker hit) → set arm cursor (snapped to grid)
         if (py < kRulerH) {
-            m_armSec = std::max(0.0, pixToSec(px));
+            m_armSec = snapToGrid(std::max(0.0, pixToSec(px)));
             update();
             emit rulerClicked(m_armSec);
             ev->accept(); return;
@@ -448,6 +475,7 @@ void SyncGroupView::mouseMoveEvent(QMouseEvent* ev) {
     if ((ev->buttons() & Qt::LeftButton) && m_dragMarker >= 0) {
         const double delta = static_cast<double>(px - m_dragMarkerPxOrig) / m_pixPerSec;
         double nt = std::max(0.001, m_dragMarkerOrig + delta);
+        if (m_mc && m_quantSubdiv > 0) nt = snapToGrid(nt);
         const mcp::Cue* group = m_model->cues.cueAt(m_groupIdx);
         if (group) {
             const double lo = (m_dragMarker > 0)
@@ -467,9 +495,12 @@ void SyncGroupView::mouseMoveEvent(QMouseEvent* ev) {
         const double delta = static_cast<double>(px - m_dragStartX) / m_pixPerSec;
 
         if (m_dragMode == DragMode::Move) {
-            m_blocks[m_dragBlock].offset = std::max(0.0, m_dragStartOffset + delta);
+            double newOffset = std::max(0.0, m_dragStartOffset + delta);
+            if (m_mc && m_quantSubdiv > 0) newOffset = snapToGrid(newOffset);
+            m_blocks[m_dragBlock].offset = newOffset;
         } else if (m_dragMode == DragMode::TrimLeft) {
-            const double newOffset   = std::max(0.0, m_dragStartOffset + delta);
+            double newOffset   = std::max(0.0, m_dragStartOffset + delta);
+            if (m_mc && m_quantSubdiv > 0) newOffset = snapToGrid(newOffset);
             const double actualDelta = newOffset - m_dragStartOffset;
             double newStartTime      = m_dragStartStartTime + actualDelta;
             double newDuration       = m_dragStartDuration   - actualDelta;
@@ -482,6 +513,10 @@ void SyncGroupView::mouseMoveEvent(QMouseEvent* ev) {
             m_blocks[m_dragBlock].duration  = newDuration;
         } else if (m_dragMode == DragMode::TrimRight) {
             double newDuration = std::max(0.05, m_dragStartDuration + delta);
+            if (m_mc && m_quantSubdiv > 0) {
+                const double snappedEnd = snapToGrid(m_blocks[m_dragBlock].offset + newDuration);
+                newDuration = std::max(0.05, snappedEnd - m_blocks[m_dragBlock].offset);
+            }
             const double fileDur = m_blocks[m_dragBlock].fileDur;
             if (fileDur > 0.0)
                 newDuration = std::min(newDuration, fileDur - m_blocks[m_dragBlock].startTime);
@@ -626,17 +661,42 @@ void SyncGroupView::contextMenuEvent(QContextMenuEvent* ev) {
         menu.addSeparator();
     }
 
+    const double snapSec = snapToGrid(sec);
+    QString posLabel;
+    if (m_mc) {
+        const auto pos = m_mc->secondsToMusical(std::max(0.0, snapSec));
+        posLabel = QString("%1 | %2").arg(pos.bar).arg(pos.beat);
+    } else {
+        posLabel = QString::fromStdString(ShowHelpers::fmtTime(snapSec));
+    }
     menu.addAction(
-        QString("Add marker at %1").arg(QString::fromStdString(ShowHelpers::fmtTime(sec))),
-        [this, sec]() {
+        QString("Add marker at %1").arg(posLabel),
+        [this, snapSec]() {
             m_model->pushUndo();
-            m_model->cues.addCueMarker(m_groupIdx, sec);
+            m_model->cues.addCueMarker(m_groupIdx, snapSec);
             ShowHelpers::syncSfFromCues(*m_model);
             emit cueModified();
             update();
         });
 
     menu.addSeparator();
+
+    if (m_mc) {
+        QMenu* snapMenu = menu.addMenu("Snap to grid");
+        struct { const char* label; int subdiv; } opts[] = {
+            {"None", 0}, {"1/1 (bar)", 1}, {"1/2", 2}, {"1/4", 4},
+            {"1/8", 8}, {"1/16", 16}, {"1/32", 32}
+        };
+        for (auto& o : opts) {
+            auto* a = snapMenu->addAction(o.label);
+            a->setCheckable(true);
+            a->setChecked(m_quantSubdiv == o.subdiv);
+            connect(a, &QAction::triggered, this,
+                    [this, s = o.subdiv] { m_quantSubdiv = s; });
+        }
+        menu.addSeparator();
+    }
+
     menu.addAction("Fit view", [this]() {
         m_viewStart = 0.0;
         const double dur = viewDuration();
@@ -652,6 +712,24 @@ void SyncGroupView::resizeEvent(QResizeEvent*) {
     const double dur = viewDuration();
     if (dur > 0.0 && width() > 0)
         m_pixPerSec = width() / dur;
+}
+
+double SyncGroupView::snapToGrid(double sec) const {
+    if (!m_mc || m_quantSubdiv == 0) return sec;
+    if (sec < 0.0) return sec;
+    const auto   pos = m_mc->secondsToMusical(sec);
+    const double qn  = m_mc->musicalToQN(pos.bar, pos.beat, pos.fraction);
+    double snappedQN;
+    if (m_quantSubdiv == 1) {
+        const double qn0 = m_mc->musicalToQN(pos.bar, 1);
+        const double qn1 = m_mc->musicalToQN(pos.bar + 1, 1);
+        snappedQN = (qn - qn0 < qn1 - qn) ? qn0 : qn1;
+    } else {
+        const double grid = 4.0 / m_quantSubdiv;
+        snappedQN = std::round(qn / grid) * grid;
+    }
+    const auto snapped = m_mc->qnToMusical(snappedQN);
+    return m_mc->musicalToSeconds(snapped.bar, snapped.beat, snapped.fraction);
 }
 
 // ── Loop count inline editor ──────────────────────────────────────────────────

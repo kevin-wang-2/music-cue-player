@@ -68,6 +68,7 @@ private:
     QPushButton* m_goBtn{nullptr};
     QLabel*      m_lblCueName{nullptr};
     QLabel*      m_lblCueDetail{nullptr};   // number · type · duration
+    QLabel*      m_lblGlobalMC{nullptr};    // global MC position (hidden when inactive)
 
     // Toast
     QLabel*  m_toastLabel{nullptr};

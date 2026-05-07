@@ -45,6 +45,7 @@ struct ShowFile {
         double      armStartTime{0.0};
         // All types
         double      preWait{0.0};
+        int         goQuantize{0};   // 0=none, 1=next bar, 2=next beat
         bool        autoContinue{false};
         bool        autoFollow{false};
         // Audio cues: playback region
@@ -85,6 +86,24 @@ struct ShowFile {
         // Nested children — populated for group cues only.
         // Serialised as a recursive JSON array under the key "children".
         std::vector<CueData> children;
+
+        // Music Context (serialised as "musicContext" when enabled is true)
+        struct MCPoint {
+            int    bar{1};
+            int    beat{1};
+            double bpm{120.0};
+            bool   isRamp{false};
+            bool   hasTimeSig{true};
+            int    timeSigNum{4};
+            int    timeSigDen{4};
+        };
+        struct MCData {
+            bool               enabled{false};
+            std::vector<MCPoint> points;
+            double             startOffsetSeconds{0.0};
+            bool               applyBeforeStart{true};
+        };
+        MCData musicContext;
     };
 
     // ---- Cue list ----------------------------------------------------------

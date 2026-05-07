@@ -5,6 +5,8 @@
 #include "InspectorWidget.h"
 #include "ShowHelpers.h"
 
+#include "engine/CueList.h"
+#include "engine/MusicContext.h"
 #include "engine/ShowFile.h"
 
 #include <QAction>
@@ -189,6 +191,15 @@ void MainWindow::buildGoBar() {
     ilay->addStretch();
 
     hlay->addWidget(infoPanel, 1);
+
+    // Global Music Context indicator (right side of GoBar)
+    m_lblGlobalMC = new QLabel(bar);
+    m_lblGlobalMC->setStyleSheet(
+        "color:#88ccff; font-size:12px; font-family:monospace;"
+        "background:#1a2030; border-radius:4px; padding:3px 7px;");
+    m_lblGlobalMC->setAlignment(Qt::AlignRight | Qt::AlignVCenter);
+    m_lblGlobalMC->hide();
+    hlay->addWidget(m_lblGlobalMC);
 }
 
 // ── IconBar ────────────────────────────────────────────────────────────────
@@ -419,6 +430,33 @@ void MainWindow::onTick() {
             // Past end of list — deselect all.
             m_cueTable->syncEngineSelection(-1);
         }
+    }
+
+    // Global MC indicator: find outermost playing cue with MC
+    int globalMCIdx = -1;
+    for (int i = 0; i < cueCount; i++) {
+        const auto* c = m_model->cues.cueAt(i);
+        if (!c || !c->musicContext) continue;
+        if (!m_model->cues.isCuePlaying(i)) continue;
+        // Outermost = parent has no MC (or top-level)
+        if (c->parentIndex < 0) { globalMCIdx = i; break; }
+        const auto* par = m_model->cues.cueAt(c->parentIndex);
+        if (!par || !par->musicContext) { globalMCIdx = i; break; }
+    }
+    if (globalMCIdx >= 0) {
+        const auto* c  = m_model->cues.cueAt(globalMCIdx);
+        const auto* mc = c->musicContext.get();
+        const double cueRelSec = m_model->cues.cueElapsedSeconds(globalMCIdx);
+        const auto   pos = mc->secondsToMusical(cueRelSec);
+        const double bpm = mc->bpmAt(pos.bar, pos.beat, pos.fraction);
+        const auto   ts  = mc->timeSigAt(pos.bar, pos.beat);
+        m_lblGlobalMC->setText(
+            QString("♪ %1  %2/%3  %4|%5")
+                .arg(bpm, 0, 'f', 1).arg(ts.num).arg(ts.den)
+                .arg(pos.bar).arg(pos.beat));
+        m_lblGlobalMC->show();
+    } else {
+        m_lblGlobalMC->hide();
     }
 }
 

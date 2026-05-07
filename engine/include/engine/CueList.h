@@ -106,6 +106,7 @@ public:
 
     // Per-cue parameter setters (safe to call before or after addCue).
     void setCuePreWait    (int index, double seconds);
+    void setCueGoQuantize (int index, int mode);  // 0=none 1=bar 2=beat
     void setCueStartTime  (int index, double seconds);   // audio cues only
     void setCueDuration   (int index, double seconds);   // audio cues only; 0=to end
     void setCueLevel      (int index, double dB);        // audio cues only; 0=unity
@@ -148,6 +149,18 @@ public:
     void setCueFadeXpSize       (int index, int srcCh, int outCh);  // resize xpTargets matrix
     void setCueFadeCurve        (int index, FadeData::Curve curve);
     void setCueFadeStopWhenDone (int index, bool v);
+
+    // Music Context — attach / detach / mutate.
+    // Pass nullptr to remove any existing MC.
+    void setCueMusicContext(int index, std::unique_ptr<MusicContext> mc);
+
+    // Direct access to a mutable MC (returns nullptr if the cue has no MC).
+    // The caller is responsible for calling markMCDirty() after bulk mutations.
+    MusicContext* musicContextOf(int index);
+
+    // Mark the MC as dirty so it recompiles on next query.
+    // Call after any direct mutation via musicContextOf().
+    void markMCDirty(int index);
 
     // Time-marker / slice-loop setters (audio cues only).
     // Markers must be kept sorted by time; sliceLoops size = markers.size()+1.
@@ -208,6 +221,12 @@ public:
     int64_t cuePlayheadFrames(int index) const;
     double  cuePlayheadSeconds(int index) const;
 
+    // Elapsed cue-local time for any cue type:
+    //   Audio  — same as cuePlayheadSeconds (engine elapsed since voice start)
+    //   Group  — engine elapsed since fire() + arm-base offset
+    // Returns 0 if the cue has not been fired or has no MC-relevant state.
+    double  cueElapsedSeconds(int index) const;
+
     // File-position playhead for cue[index] in seconds from start of file.
     // Uses the voice's ring-buffer readPos and segment markers recorded by the
     // IO thread, so it stays accurate even after devamp cuts a loop short.
@@ -227,6 +246,11 @@ private:
     bool fire(int cueIndex);
     int64_t scheduleVoice(int cueIndex);
 
+    // Extra delay (seconds) to align the cue's fire time to the next musical
+    // boundary in the currently-playing global MC.  Returns 0 if no MC is active
+    // or cue.goQuantize == 0.
+    double quantizeDelay(int cueIdx, int64_t originFrame) const;
+
     // Returns the flat index that should become selectedIndex after cue[idx] is fired:
     //   Group (any mode): idx + childCount + 1  (jump over all descendants)
     //   Last child of a Group: logicalNext(parentIndex)  (exit the group recursively)
@@ -241,6 +265,11 @@ private:
     void fireSyncGroup      (int gi, double armPos, int64_t originFrame);
     void devampSyncGroup    (int gi, int devampMode, bool preVamp);
     void stopSyncGroupChildren(int gi);
+
+    // Pre-arm all audio descendants of a Timeline/Sync group so their StreamReaders
+    // have buffered data before the first audio callback.
+    // baseOffset: seconds into the group timeline we are starting from.
+    void armGroupDescendants(int groupIdx, double baseOffset);
 
     // Build linear routing gains from cue.routing and set them on `reader`.
     // srcCh = reader's native file channel count; outCh = engine.channels().
@@ -278,6 +307,12 @@ private:
     mutable std::mutex m_slotMutex;
     std::vector<int>   m_lastSlot;
     std::vector<int>   m_pendingEventId;  // scheduler event ID, -1 = none
+
+    // Engine frame recorded when a Group cue is fired, plus the arm-base offset
+    // that was active at fire time.  Used by cueElapsedSeconds() for group MCs.
+    // Written on the main thread (fire() is always called from main).
+    std::vector<int64_t> m_cueFireFrame;   // -1 = not yet fired
+    std::vector<double>  m_cueFireArmBase; // seconds of timeline arm position at fire
 
     // One StreamReader per engine voice slot — keeps the reader alive until
     // the voice finishes.  Cleared by update() once isVoiceActive() is false.

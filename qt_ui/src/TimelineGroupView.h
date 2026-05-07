@@ -1,5 +1,6 @@
 #pragma once
 
+#include "engine/MusicContext.h"
 #include <QWidget>
 #include <string>
 #include <unordered_map>
@@ -14,6 +15,7 @@ public:
 
     void setGroupCueIndex(int groupFlatIdx);
     void clearArmCursor();
+    void setMusicContext(const mcp::MusicContext* mc);
 
     QSize sizeHint() const override;
 
@@ -29,6 +31,7 @@ protected:
     void mouseMoveEvent(QMouseEvent*) override;
     void mouseReleaseEvent(QMouseEvent*) override;
     void wheelEvent(QWheelEvent*) override;
+    void contextMenuEvent(QContextMenuEvent*) override;
     void resizeEvent(QResizeEvent*) override;
 
 private:
@@ -60,6 +63,7 @@ private:
     void   updateSnapTargets();
     int    laneY(int blockIdx) const;
     void   updateHoverCursor(int px, int py);
+    double snapToGrid(double sec) const;
 
     AppModel* m_model{nullptr};
     int       m_groupIdx{-1};
@@ -86,6 +90,11 @@ private:
 
     std::vector<double> m_snapTimes;
     double m_armSec{-1.0};
+
+    const mcp::MusicContext* m_mc{nullptr};
+
+    // Snap quantization: 0=none, 1=bar, 2=half, 4=quarter, 8=8th, 16=16th, 32=32nd
+    int m_quantSubdiv{0};
 
     std::unordered_map<std::string, PeakCache> m_peakCache;
 };

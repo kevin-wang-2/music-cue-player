@@ -2,6 +2,7 @@
 
 #include "engine/AudioDecoder.h"
 #include "engine/Cue.h"
+#include "engine/MusicContext.h"
 
 #include <QWidget>
 #include <string>
@@ -14,7 +15,7 @@ class QLineEdit;
 // Custom waveform editor canvas.
 // Renders a scrollable/zoomable view of the audio file, with:
 //   - Waveform peak data (one line per pixel column)
-//   - Ruler with time ticks
+//   - Ruler with time ticks (or bar/beat if Music Context is set)
 //   - Start/end handle triangles (draggable)
 //   - Slice markers (draggable amber triangles)
 //   - Per-slice loop-count labels (click to edit)
@@ -30,6 +31,9 @@ public:
     void setCueIndex(int idx);
     // Call on each timer tick while playing.
     void updatePlayhead();
+    // Set a Music Context to use for bar/beat ruler (null = seconds ruler).
+    // cueStartTimeSec: audio file offset where the cue starts (cue.startTime).
+    void setMusicContext(const mcp::MusicContext* mc, double cueStartTimeSec = 0.0);
 
 signals:
     void armPositionChanged(double sec);
@@ -62,6 +66,7 @@ private:
     void    commitDrag();
     void    startLoopEdit(int sliceIdx, int blX, int brX, const QString& current);
     void    commitLoopEdit();
+    double  snapToGrid(double sec) const;
 
     AppModel*  m_model{nullptr};
     QLineEdit* m_loopEdit{nullptr};   // inline overlay, nullptr when hidden
@@ -106,4 +111,11 @@ private:
     // Per-cue zoom memory: cueIdx → (viewStart, viewDur).
     // Populated when switching away from a cue that has been viewed.
     std::unordered_map<int, std::pair<double,double>> m_zoomState;
+
+    // Music Context for bar/beat ruler (not owned)
+    const mcp::MusicContext* m_mc{nullptr};
+    double                   m_mcCueStart{0.0};  // cue.startTime offset in file seconds
+
+    // Snap quantization: 0=none, 1=bar, 2=half, 4=quarter, 8=8th, 16=16th, 32=32nd
+    int m_quantSubdiv{0};
 };

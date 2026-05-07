@@ -33,6 +33,7 @@ add_library(mcp_engine STATIC
     src/ShowFile.cpp
     src/FadeData.cpp
     src/StreamReader.cpp
+    src/MusicContext.cpp
 )
 
 target_include_directories(mcp_engine

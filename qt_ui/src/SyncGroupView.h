@@ -1,5 +1,6 @@
 #pragma once
 
+#include "engine/MusicContext.h"
 #include <QWidget>
 #include <string>
 #include <unordered_map>
@@ -21,6 +22,7 @@ public:
     void setGroupCueIndex(int groupFlatIdx);
     void clearSelMarker();
     void clearArmCursor();
+    void setMusicContext(const mcp::MusicContext* mc);
 
     QSize sizeHint() const override;
 
@@ -67,6 +69,7 @@ private:
     void   updateHoverCursor(int px, int py);
     void   startLoopEdit(int sliceIdx, int blX, int brX, const QString& current);
     void   commitLoopEdit();
+    double snapToGrid(double sec) const;
 
     static constexpr int kRulerH  = 20;
     static constexpr int kBlockH  = 44;
@@ -103,6 +106,11 @@ private:
     int    m_selMarker{-1};
 
     double m_armSec{-1.0};     // ruler arm cursor position (-1 = none)
+
+    const mcp::MusicContext* m_mc{nullptr};
+
+    // Snap quantization: 0=none, 1=bar, 2=half, 4=quarter, 8=8th, 16=16th, 32=32nd
+    int m_quantSubdiv{0};
 
     // Right-button pan
     double m_panOriginX{0.0};

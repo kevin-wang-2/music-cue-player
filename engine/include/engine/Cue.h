@@ -2,6 +2,7 @@
 
 #include "AudioFile.h"
 #include "FadeData.h"
+#include "MusicContext.h"
 #include "StreamReader.h"
 #include <memory>
 #include <optional>
@@ -55,6 +56,8 @@ struct Cue {
 
     // Timing (all types)
     double preWaitSeconds{0.0};
+    // 0=none, 1=next bar, 2=next beat  (uses global MC if one is playing)
+    int    goQuantize{0};
 
     // Playback region (Audio cues only)
     double startTime{0.0};
@@ -105,6 +108,10 @@ struct Cue {
     // Arm start position for Timeline group cues (seconds).
     // When > 0, fireGroup starts the timeline from this offset instead of 0.
     double timelineArmSec{0.0};
+
+    // Music Context — null when not attached.
+    // Valid for Audio, Group (Timeline/Sync) cues only.
+    std::unique_ptr<MusicContext> musicContext;
 
     bool isLoaded() const {
         if (type == CueType::Audio)  return audioFile.isLoaded();

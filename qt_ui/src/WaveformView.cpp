@@ -22,6 +22,12 @@ WaveformView::WaveformView(AppModel* model, QWidget* parent)
     setMinimumHeight(120);
 }
 
+void WaveformView::setMusicContext(const mcp::MusicContext* mc, double cueStartTimeSec) {
+    m_mc         = mc;
+    m_mcCueStart = cueStartTimeSec;
+    update();
+}
+
 void WaveformView::setCueIndex(int idx) {
     if (m_cueIdx == idx) return;
 
@@ -178,8 +184,35 @@ void WaveformView::paintEvent(QPaintEvent*) {
 
     // Ruler
     p.fillRect(0, 0, W, kRulerH, QColor(20, 24, 36));
-    {
-        // Choose a tick interval that gives ~80px between ticks
+    p.setPen(QColor(160, 160, 160, 160));
+    if (m_mc) {
+        // Bar/beat ruler from Music Context
+        // mc->musicalToSeconds(bar, beat) returns cue-local seconds.
+        // File seconds = cue-local + m_mcCueStart.
+        const auto startPos = m_mc->secondsToMusical(m_viewStart - m_mcCueStart);
+        int bar = startPos.bar - 1;
+        int lastLabelX = -100;
+        for (int safety = 0; safety < 4000; safety++, bar++) {
+            const double fileSec = m_mcCueStart + m_mc->musicalToSeconds(bar, 1);
+            const int bx = (int)secToX(fileSec);
+            if (bx > W) break;
+            if (bx >= -2) {
+                p.drawLine(bx, kRulerH - 7, bx, kRulerH);
+                if (bx - lastLabelX >= 36) {
+                    p.drawText(bx + 2, 2, 54, kRulerH - 2,
+                               Qt::AlignLeft | Qt::AlignTop, QString::number(bar));
+                    lastLabelX = bx;
+                }
+            }
+            const auto ts = m_mc->timeSigAt(bar, 1);
+            for (int beat = 2; beat <= ts.num; beat++) {
+                const int tx = (int)secToX(m_mcCueStart + m_mc->musicalToSeconds(bar, beat));
+                if (tx < 0 || tx > W) continue;
+                p.drawLine(tx, kRulerH - 4, tx, kRulerH);
+            }
+        }
+    } else {
+        // Seconds ruler
         const double secPerPx = m_viewDur / W;
         const double rawStep  = secPerPx * 80.0;
         const double pow10    = std::pow(10.0, std::floor(std::log10(rawStep)));
@@ -190,9 +223,8 @@ void WaveformView::paintEvent(QPaintEvent*) {
         else if (frac < 7.0) step = 5.0   * pow10;
         else                 step = 10.0  * pow10;
 
-        const double viewEnd  = m_viewStart + m_viewDur;
-        const double first    = std::floor(m_viewStart / step) * step;
-        p.setPen(QColor(160, 160, 160, 160));
+        const double viewEnd = m_viewStart + m_viewDur;
+        const double first   = std::floor(m_viewStart / step) * step;
         for (double t = first; t <= viewEnd + step * 0.01; t += step) {
             if (t < 0.0) continue;
             const int tx = (int)secToX(t);
@@ -372,8 +404,8 @@ void WaveformView::mousePressEvent(QMouseEvent* ev) {
                 m_selMarker = -1;
                 emit markerSelectionChanged(-1);
             }
-            m_armSec = sec;
-            m_model->cues.arm(m_cueIdx, sec);
+            m_armSec = snapToGrid(sec);
+            m_model->cues.arm(m_cueIdx, m_armSec);
             emit armPositionChanged(sec);
             update();
         }
@@ -505,21 +537,68 @@ void WaveformView::wheelEvent(QWheelEvent* ev) {
     }
 }
 
+double WaveformView::snapToGrid(double sec) const {
+    if (!m_mc || m_quantSubdiv == 0) return sec;
+    const double cueSec = sec - m_mcCueStart;
+    if (cueSec < 0.0) return sec;
+    const auto   pos    = m_mc->secondsToMusical(cueSec);
+    const double qn     = m_mc->musicalToQN(pos.bar, pos.beat, pos.fraction);
+    double snappedQN;
+    if (m_quantSubdiv == 1) {
+        const double qn0 = m_mc->musicalToQN(pos.bar, 1);
+        const double qn1 = m_mc->musicalToQN(pos.bar + 1, 1);
+        snappedQN = (qn - qn0 < qn1 - qn) ? qn0 : qn1;
+    } else {
+        const double grid = 4.0 / m_quantSubdiv;
+        snappedQN = std::round(qn / grid) * grid;
+    }
+    const auto snappedMusical = m_mc->qnToMusical(snappedQN);
+    return m_mcCueStart + m_mc->musicalToSeconds(snappedMusical.bar, snappedMusical.beat,
+                                                  snappedMusical.fraction);
+}
+
 void WaveformView::contextMenuEvent(QContextMenuEvent* ev) {
     if (m_rightDragging) { ev->accept(); return; }
-    const double sec = xToSec(ev->x());
+    const double rawSec  = xToSec(ev->x());
+    const double snapSec = snapToGrid(rawSec);
     QMenu menu(this);
+
+    // "Add marker" label: show bar|beat when MC is active, else seconds
+    QString posLabel;
+    if (m_mc) {
+        const double cueSec = snapSec - m_mcCueStart;
+        const auto   pos    = m_mc->secondsToMusical(std::max(0.0, cueSec));
+        posLabel = QString("%1 | %2").arg(pos.bar).arg(pos.beat);
+    } else {
+        posLabel = QString::fromStdString(ShowHelpers::fmtTime(snapSec));
+    }
     menu.addAction(
-        QString("Add marker at %1")
-            .arg(QString::fromStdString(ShowHelpers::fmtTime(sec))),
-        [this, sec]() {
+        QString("Add marker at %1").arg(posLabel),
+        [this, snapSec]() {
             m_model->pushUndo();
-            m_model->cues.addCueMarker(m_cueIdx, sec);
+            m_model->cues.addCueMarker(m_cueIdx, snapSec);
             ShowHelpers::syncSfFromCues(*m_model);
-            emit markerAdded(sec);
+            emit markerAdded(snapSec);
             update();
         });
     menu.addSeparator();
+
+    if (m_mc) {
+        QMenu* snapMenu = menu.addMenu("Snap to grid");
+        struct { const char* label; int subdiv; } opts[] = {
+            {"None", 0}, {"1/1 (bar)", 1}, {"1/2", 2}, {"1/4", 4},
+            {"1/8", 8}, {"1/16", 16}, {"1/32", 32}
+        };
+        for (auto& o : opts) {
+            auto* a = snapMenu->addAction(o.label);
+            a->setCheckable(true);
+            a->setChecked(m_quantSubdiv == o.subdiv);
+            connect(a, &QAction::triggered, this,
+                    [this, s = o.subdiv] { m_quantSubdiv = s; });
+        }
+        menu.addSeparator();
+    }
+
     menu.addAction("Fit view", [this]() {
         const double fd = m_peaks.valid ? m_peaks.fileDur : 1.0;
         m_viewStart = 0.0;

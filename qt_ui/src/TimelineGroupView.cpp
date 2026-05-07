@@ -5,6 +5,8 @@
 #include "engine/AudioDecoder.h"
 #include "engine/Cue.h"
 
+#include <QContextMenuEvent>
+#include <QMenu>
 #include <QMouseEvent>
 #include <QPainter>
 #include <QPaintEvent>
@@ -36,6 +38,11 @@ TimelineGroupView::TimelineGroupView(AppModel* model, QWidget* parent)
     setMinimumHeight(kRulerH + kTopPad + kBlockH + 8);
     setMouseTracking(true);
     setStyleSheet("background:#111;");
+}
+
+void TimelineGroupView::setMusicContext(const mcp::MusicContext* mc) {
+    m_mc = mc;
+    update();
 }
 
 // ---------------------------------------------------------------------------
@@ -179,23 +186,46 @@ void TimelineGroupView::paintEvent(QPaintEvent*) {
     p.setPen(QColor(0x55, 0x55, 0x55));
     p.drawLine(0, kRulerH, W, kRulerH);
 
-    const double vis = viewDuration();
-    double tickStep = 300.0;
-    for (double s : {0.05, 0.1, 0.25, 0.5, 1.0, 2.0, 5.0, 10.0, 30.0, 60.0, 120.0, 300.0})
-        if (W * s / vis > 55.0) { tickStep = s; break; }
-
-    const int labelMult = std::max(1, (int)std::ceil(65.0 / (m_pixPerSec * tickStep)));
-
     p.setPen(QColor(0x77, 0x77, 0x77));
-    const double firstTick = std::ceil(m_viewStart / tickStep) * tickStep;
-    for (double t = firstTick; secToPix(t) < W; t += tickStep) {
-        const int  tx      = secToPix(t);
-        const int  tidx    = static_cast<int>(std::round(t / tickStep));
-        const bool isLabel = (tidx % labelMult == 0);
-        p.drawLine(tx, kRulerH - (isLabel ? 6 : 3), tx, kRulerH);
-        if (isLabel)
-            p.drawText(tx + 2, 1, 64, kRulerH - 2, Qt::AlignLeft | Qt::AlignVCenter,
-                       fmtRulerTick(t));
+    if (m_mc) {
+        // Bar/beat ruler from Music Context
+        const auto startPos = m_mc->secondsToMusical(m_viewStart);
+        int bar = startPos.bar - 1;
+        int lastLabelX = -100;
+        for (int safety = 0; safety < 4000; safety++, bar++) {
+            const int bx = secToPix(m_mc->musicalToSeconds(bar, 1));
+            if (bx > W) break;
+            if (bx >= -2) {
+                p.drawLine(bx, kRulerH - 6, bx, kRulerH);
+                if (bx - lastLabelX >= 36) {
+                    p.drawText(bx + 2, 1, 54, kRulerH - 2,
+                               Qt::AlignLeft | Qt::AlignVCenter, QString::number(bar));
+                    lastLabelX = bx;
+                }
+            }
+            const auto ts = m_mc->timeSigAt(bar, 1);
+            for (int beat = 2; beat <= ts.num; beat++) {
+                const int tx = secToPix(m_mc->musicalToSeconds(bar, beat));
+                if (tx < 0 || tx > W) continue;
+                p.drawLine(tx, kRulerH - 3, tx, kRulerH);
+            }
+        }
+    } else {
+        const double vis = viewDuration();
+        double tickStep = 300.0;
+        for (double s : {0.05, 0.1, 0.25, 0.5, 1.0, 2.0, 5.0, 10.0, 30.0, 60.0, 120.0, 300.0})
+            if (W * s / vis > 55.0) { tickStep = s; break; }
+        const int labelMult = std::max(1, (int)std::ceil(65.0 / (m_pixPerSec * tickStep)));
+        const double firstTick = std::ceil(m_viewStart / tickStep) * tickStep;
+        for (double t = firstTick; secToPix(t) < W; t += tickStep) {
+            const int  tx      = secToPix(t);
+            const int  tidx    = static_cast<int>(std::round(t / tickStep));
+            const bool isLabel = (tidx % labelMult == 0);
+            p.drawLine(tx, kRulerH - (isLabel ? 6 : 3), tx, kRulerH);
+            if (isLabel)
+                p.drawText(tx + 2, 1, 64, kRulerH - 2, Qt::AlignLeft | Qt::AlignVCenter,
+                           fmtRulerTick(t));
+        }
     }
 
     // ── Lanes ────────────────────────────────────────────────────────────────
@@ -325,9 +355,9 @@ void TimelineGroupView::mousePressEvent(QMouseEvent* ev) {
         return;
     }
 
-    // Ruler click → arm cursor
+    // Ruler click → arm cursor (snapped to grid if quantize is set)
     if (py < kRulerH) {
-        m_armSec = std::max(0.0, pixToSec(px));
+        m_armSec = snapToGrid(std::max(0.0, pixToSec(px)));
         update();
         emit rulerClicked(m_armSec);
     } else {
@@ -350,20 +380,26 @@ void TimelineGroupView::mouseMoveEvent(QMouseEvent* ev) {
 
     if (m_dragMode == DragMode::Move) {
         double newOffset = std::max(0.0, m_dragStartOffset + deltaSec);
-        const double snapThreshSec = kSnapThreshPx / m_pixPerSec;
-        for (double t : m_snapTimes) {
-            if (std::fabs(newOffset - t) < snapThreshSec) { newOffset = t; break; }
-            const double blockEnd = newOffset + m_blocks[m_dragBlock].duration;
-            const double endSnap  = t - m_blocks[m_dragBlock].duration;
-            if (std::fabs(blockEnd - t) < snapThreshSec && endSnap >= 0.0) {
-                newOffset = endSnap; break;
+        if (m_mc && m_quantSubdiv > 0) {
+            newOffset = snapToGrid(newOffset);
+        } else {
+            const double snapThreshSec = kSnapThreshPx / m_pixPerSec;
+            for (double t : m_snapTimes) {
+                if (std::fabs(newOffset - t) < snapThreshSec) { newOffset = t; break; }
+                const double blockEnd = newOffset + m_blocks[m_dragBlock].duration;
+                const double endSnap  = t - m_blocks[m_dragBlock].duration;
+                if (std::fabs(blockEnd - t) < snapThreshSec && endSnap >= 0.0) {
+                    newOffset = endSnap; break;
+                }
             }
         }
         m_blocks[m_dragBlock].offset = newOffset;
 
     } else if (m_dragMode == DragMode::TrimLeft) {
         // Both offset and startTime shift together; duration adjusts to keep right edge fixed.
-        const double newOffset    = std::max(0.0, m_dragStartOffset + deltaSec);
+        double newOffset    = std::max(0.0, m_dragStartOffset + deltaSec);
+        if (m_mc && m_quantSubdiv > 0)
+            newOffset = snapToGrid(newOffset);
         const double actualDelta  = newOffset - m_dragStartOffset;
         double newStartTime       = m_dragStartStartTime + actualDelta;
         double newDuration        = m_dragStartDuration   - actualDelta;
@@ -385,6 +421,10 @@ void TimelineGroupView::mouseMoveEvent(QMouseEvent* ev) {
 
     } else if (m_dragMode == DragMode::TrimRight) {
         double newDuration = std::max(0.05, m_dragStartDuration + deltaSec);
+        if (m_mc && m_quantSubdiv > 0) {
+            const double snappedEnd = snapToGrid(m_blocks[m_dragBlock].offset + newDuration);
+            newDuration = std::max(0.05, snappedEnd - m_blocks[m_dragBlock].offset);
+        }
         const double fileDur = m_blocks[m_dragBlock].fileDur;
         if (fileDur > 0.0)
             newDuration = std::min(newDuration, fileDur - m_blocks[m_dragBlock].startTime);
@@ -441,4 +481,41 @@ void TimelineGroupView::resizeEvent(QResizeEvent*) {
     const double dur = viewDuration();
     if (dur > 0.0 && width() > 0)
         m_pixPerSec = width() / dur;
+}
+
+double TimelineGroupView::snapToGrid(double sec) const {
+    if (!m_mc || m_quantSubdiv == 0) return sec;
+    if (sec < 0.0) return sec;
+    const auto   pos = m_mc->secondsToMusical(sec);
+    const double qn  = m_mc->musicalToQN(pos.bar, pos.beat, pos.fraction);
+    double snappedQN;
+    if (m_quantSubdiv == 1) {
+        const double qn0 = m_mc->musicalToQN(pos.bar, 1);
+        const double qn1 = m_mc->musicalToQN(pos.bar + 1, 1);
+        snappedQN = (qn - qn0 < qn1 - qn) ? qn0 : qn1;
+    } else {
+        const double grid = 4.0 / m_quantSubdiv;
+        snappedQN = std::round(qn / grid) * grid;
+    }
+    const auto snapped = m_mc->qnToMusical(snappedQN);
+    return m_mc->musicalToSeconds(snapped.bar, snapped.beat, snapped.fraction);
+}
+
+void TimelineGroupView::contextMenuEvent(QContextMenuEvent* ev) {
+    if (!m_mc) { ev->accept(); return; }
+    QMenu menu(this);
+    QMenu* snapMenu = menu.addMenu("Snap to grid");
+    struct { const char* label; int subdiv; } opts[] = {
+        {"None", 0}, {"1/1 (bar)", 1}, {"1/2", 2}, {"1/4", 4},
+        {"1/8", 8}, {"1/16", 16}, {"1/32", 32}
+    };
+    for (auto& o : opts) {
+        auto* a = snapMenu->addAction(o.label);
+        a->setCheckable(true);
+        a->setChecked(m_quantSubdiv == o.subdiv);
+        connect(a, &QAction::triggered, this,
+                [this, s = o.subdiv] { m_quantSubdiv = s; });
+    }
+    menu.exec(ev->globalPos());
+    ev->accept();
 }
