@@ -45,6 +45,7 @@ struct FadeData {
     std::vector<float> ramp;
     std::atomic<bool>  rampReady{false};
     std::thread        computeThread;
+    std::atomic<int>   activeSteps{0};  // > 0 while steps are still running
 
     // Start values captured at fire() time (before the thread runs).
     float masterLevelStartDb{0.0f};

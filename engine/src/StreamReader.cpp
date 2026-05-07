@@ -105,6 +105,21 @@ void StreamReader::setXpointGain(int srcCh, int outCh, float linGain) {
         m_xpGains[static_cast<size_t>(idx)] = linGain;
 }
 
+float StreamReader::getXpointGain(int srcCh, int outCh) const {
+    if (m_xpOutCh <= 0 || srcCh < 0 || outCh < 0 || outCh >= m_xpOutCh)
+        return std::numeric_limits<float>::quiet_NaN();
+    const int idx = srcCh * m_xpOutCh + outCh;
+    if (idx >= 0 && idx < (int)m_xpGains.size())
+        return m_xpGains[static_cast<size_t>(idx)];
+    return std::numeric_limits<float>::quiet_NaN();
+}
+
+float StreamReader::getOutLevelGain(int outCh) const {
+    if (outCh >= 0 && outCh < (int)m_outLevGains.size())
+        return m_outLevGains[static_cast<size_t>(outCh)];
+    return 1.0f;
+}
+
 // ---------------------------------------------------------------------------
 // Queries
 

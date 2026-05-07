@@ -95,6 +95,10 @@ public:
     // Safely update one crosspoint cell during playback.  NaN = disable route.
     void setXpointGain(int srcCh, int outCh, float linGain);
 
+    // Read current live gains (NaN if not set / out of range).
+    float getXpointGain(int srcCh, int outCh) const;
+    float getOutLevelGain(int outCh) const;
+
     // Return output channel count set by setRouting(); 0 if routing not set.
     int xpOutCh() const { return m_xpOutCh; }
 

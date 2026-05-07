@@ -79,6 +79,7 @@ bool CueList::addFadeCue(int resolvedTargetIdx, const std::string& targetCueNumb
     cue.name           = name.empty()
                              ? ("fade(Q" + targetCueNumber + ")")
                              : name;
+    cue.targetIndex = resolvedTargetIdx;  // mirrors fadeData so targetLabel works
     cue.fadeData = std::make_shared<FadeData>();
     cue.fadeData->targetCueNumber   = targetCueNumber;
     cue.fadeData->resolvedTargetIdx = resolvedTargetIdx;
@@ -281,6 +282,12 @@ void CueList::setCueAutoFollow  (int i, bool v)             { if (i>=0&&i<cueCou
 void CueList::setCueName        (int i, const std::string& n){ if (i>=0&&i<cueCount()) m_cues[i].name          = n; }
 void CueList::setCueArmStartTime(int i, double s)            { if (i>=0&&i<cueCount()) m_cues[i].armStartTime   = s; }
 void CueList::setCueCueNumber   (int i, const std::string& n){ if (i>=0&&i<cueCount()) m_cues[i].cueNumber     = n; }
+
+void CueList::setCueTarget(int i, int targetIdx) {
+    if (i < 0 || i >= cueCount()) return;
+    m_cues[i].targetIndex = targetIdx;
+    if (m_cues[i].fadeData) m_cues[i].fadeData->resolvedTargetIdx = targetIdx;
+}
 
 void CueList::setCueDevampMode   (int i, int mode) { if (i>=0&&i<cueCount()&&m_cues[i].type==CueType::Devamp) m_cues[i].devampMode    = mode; }
 void CueList::setCueDevampPreVamp(int i, bool v)   { if (i>=0&&i<cueCount()&&m_cues[i].type==CueType::Devamp) m_cues[i].devampPreVamp = v; }
@@ -649,30 +656,53 @@ bool CueList::fire(int idx) {
             const int    steps   = std::max(2, static_cast<int>(length * 30.0));
             const double stepSec = length / static_cast<double>(steps - 1);
 
-            // Capture start values at fire() time
+            // Capture start values at fire() time.
+            // Prefer LIVE voice gains (from StreamReader) over stored routing so
+            // that a second fade continues smoothly from wherever the first left off.
             const auto& tc = m_cues[static_cast<std::size_t>(tIdx)];
-            fd->masterLevelStartDb = static_cast<float>(tc.level);
-            fd->outLevelStartDb.resize(fd->outLevels.size());
-            for (int o = 0; o < (int)fd->outLevels.size(); ++o) {
-                float startDb = 0.0f;
-                if (o < (int)tc.routing.outLevelDb.size())
-                    startDb = tc.routing.outLevelDb[static_cast<size_t>(o)];
-                fd->outLevelStartDb[static_cast<size_t>(o)] = startDb;
-            }
-            // Capture xpoint start values
             {
+                int tSlot;
+                { std::lock_guard<std::mutex> lk(m_slotMutex); tSlot = m_lastSlot[static_cast<size_t>(tIdx)]; }
+                const StreamReader* tsr = (tSlot >= 0 && m_engine.isVoiceActive(tSlot)
+                                           && m_slotStream[static_cast<size_t>(tSlot)])
+                    ? m_slotStream[static_cast<size_t>(tSlot)].get() : nullptr;
+
+                fd->masterLevelStartDb = static_cast<float>(tc.level);
+
+                fd->outLevelStartDb.resize(fd->outLevels.size());
+                for (int o = 0; o < (int)fd->outLevels.size(); ++o) {
+                    float startDb = 0.0f;
+                    if (tsr) {
+                        const float lin = tsr->getOutLevelGain(o);
+                        startDb = (lin > 0.0f)
+                            ? static_cast<float>(lut::linearToDB(static_cast<double>(lin)))
+                            : -144.0f;
+                    } else if (o < (int)tc.routing.outLevelDb.size()) {
+                        startDb = tc.routing.outLevelDb[static_cast<size_t>(o)];
+                    }
+                    fd->outLevelStartDb[static_cast<size_t>(o)] = startDb;
+                }
+
                 const int xs = (int)fd->xpTargets.size();
                 fd->xpStartDb.assign(static_cast<size_t>(xs), {});
                 for (int s = 0; s < xs; ++s) {
                     const int xo = (int)fd->xpTargets[static_cast<size_t>(s)].size();
                     fd->xpStartDb[static_cast<size_t>(s)].assign(static_cast<size_t>(xo), 0.0f);
                     for (int o = 0; o < xo; ++o) {
-                        float startDb = 0.0f;
-                        if (s < (int)tc.routing.xpoint.size() &&
-                            o < (int)tc.routing.xpoint[static_cast<size_t>(s)].size()) {
+                        float startDb = -144.0f;
+                        if (tsr) {
+                            const float lin = tsr->getXpointGain(s, o);
+                            if (std::isnan(lin)) {
+                                startDb = -144.0f;  // no route = silence
+                            } else {
+                                startDb = (lin > 0.0f)
+                                    ? static_cast<float>(lut::linearToDB(static_cast<double>(lin)))
+                                    : -144.0f;
+                            }
+                        } else if (s < (int)tc.routing.xpoint.size() &&
+                                   o < (int)tc.routing.xpoint[static_cast<size_t>(s)].size()) {
                             auto xv = tc.routing.xpoint[static_cast<size_t>(s)][static_cast<size_t>(o)];
                             if (xv.has_value()) startDb = *xv;
-                            else startDb = -144.0f;
                         }
                         fd->xpStartDb[static_cast<size_t>(s)][static_cast<size_t>(o)] = startDb;
                     }
@@ -682,6 +712,7 @@ bool CueList::fire(int idx) {
             // Compute progress ramp asynchronously (finishes near-instantly).
             if (fd->computeThread.joinable()) fd->computeThread.join();
             fd->rampReady.store(false, std::memory_order_relaxed);
+            fd->activeSteps.store(steps, std::memory_order_relaxed);
             fd->computeThread = std::thread([fd, steps]() { fd->computeRamp(steps); });
 
             const int64_t baseFrame = m_engine.enginePlayheadFrames();
@@ -740,6 +771,7 @@ bool CueList::fire(int idx) {
 
                         if (isLast && fd->stopWhenDone)
                             m_engine.clearVoicesByTag(tIdx);
+                        fd->activeSteps.fetch_sub(1, std::memory_order_relaxed);
                     },
                     "fade[" + std::to_string(idx) + "][" + std::to_string(s) + "]");
             }
@@ -864,6 +896,13 @@ bool CueList::isCuePending(int index) const {
     int evtId;
     { std::lock_guard<std::mutex> lk(m_slotMutex); evtId = m_pendingEventId[index]; }
     return m_scheduler.isPending(evtId);
+}
+
+bool CueList::isFadeActive(int index) const {
+    if (index < 0 || index >= cueCount()) return false;
+    const auto& fd = m_cues[index].fadeData;
+    if (!fd) return false;
+    return fd->activeSteps.load(std::memory_order_relaxed) > 0;
 }
 
 int CueList::activeCueCount() const {

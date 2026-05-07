@@ -80,7 +80,7 @@ struct Cue {
 
     bool isLoaded() const {
         if (type == CueType::Audio)  return audioFile.isLoaded();
-        if (type == CueType::Fade)   return fadeData != nullptr;
+        if (type == CueType::Fade)   return fadeData != nullptr && targetIndex >= 0;
         if (type == CueType::Devamp) return targetIndex >= 0;
         return true;
     }

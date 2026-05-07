@@ -108,6 +108,9 @@ public:
     void setCueName       (int index, const std::string& name);
     void setCueArmStartTime(int index, double seconds);  // Arm cues only
     void setCueCueNumber  (int index, const std::string& number);
+    // Set the target cue index for Start/Stop/Fade/Arm/Devamp cues.
+    // Also updates the stored targetCueNumber to match.
+    void setCueTarget     (int index, int targetIndex);
 
     // Devamp cue setters (no-op if cue[index] is not a Devamp cue).
     void setCueDevampMode   (int index, int mode);      // 0/1/2 — see addDevampCue
@@ -179,6 +182,7 @@ public:
     bool isAnyCuePlaying() const;
     bool isCuePlaying(int index) const;
     bool isCuePending(int index) const;   // prewait scheduled but not yet fired
+    bool isFadeActive(int index) const;   // fade steps still running
     int  activeCueCount() const;
 
     // Most-recently activated voice slot for cue[index], or -1 if none.
