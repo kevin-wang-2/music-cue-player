@@ -1,6 +1,7 @@
 #include "InspectorWidget.h"
 #include "AppModel.h"
 #include "FaderWidget.h"
+#include "MCImport.h"
 #include "MusicContextView.h"
 #include "ShowHelpers.h"
 #include "SyncGroupView.h"
@@ -18,13 +19,17 @@
 #include <QCheckBox>
 #include <QComboBox>
 #include <QDoubleSpinBox>
+#include <QFileDialog>
 #include <QFormLayout>
 #include <QGridLayout>
 #include <QGroupBox>
 #include <QHBoxLayout>
 #include <QHeaderView>
+#include <QInputDialog>
 #include <QLabel>
 #include <QLineEdit>
+#include <QMenu>
+#include <QMessageBox>
 #include <QPushButton>
 #include <QScrollArea>
 #include <QSpinBox>
@@ -453,6 +458,110 @@ void InspectorWidget::buildMCTab() {
     m_mcView = new MusicContextView(m_model, m_mcContent);
     contentLay->addWidget(m_mcView);
 
+    // Button row: Import and Inherit
+    {
+        auto* btnRow = new QHBoxLayout;
+
+        auto* btnImport = new QPushButton("Import...", m_mcContent);
+        btnRow->addWidget(btnImport);
+
+        auto* btnInherit = new QPushButton("Inherit from child...", m_mcContent);
+        btnRow->addWidget(btnInherit);
+        btnRow->addStretch();
+
+        contentLay->addLayout(btnRow);
+
+        // Import button: open MIDI or SMT file
+        connect(btnImport, &QPushButton::clicked, this, [this]() {
+            if (m_cueIdx < 0) return;
+            const QString path = QFileDialog::getOpenFileName(
+                this, "Import Music Context",
+                {},
+                "MIDI files (*.mid *.midi);;Steinberg SMT (*.smt);;All files (*)");
+            if (path.isEmpty()) return;
+
+            auto* mc = m_model->cues.musicContextOf(m_cueIdx);
+            if (!mc) {
+                // Ensure MC is attached first
+                auto newMc = std::make_unique<mcp::MusicContext>();
+                mcp::MusicContext::Point p;
+                p.bar=1; p.beat=1; p.bpm=120.0;
+                p.isRamp=false; p.hasTimeSig=true; p.timeSigNum=4; p.timeSigDen=4;
+                newMc->points.push_back(p);
+                m_model->cues.setCueMusicContext(m_cueIdx, std::move(newMc));
+                mc = m_model->cues.musicContextOf(m_cueIdx);
+            }
+
+            m_model->pushUndo();
+            std::string err;
+            const std::string ps = path.toStdString();
+            if (path.endsWith(".smt", Qt::CaseInsensitive))
+                err = MCImport::fromSmt(ps, *mc);
+            else
+                err = MCImport::fromMidi(ps, *mc);
+
+            if (!err.empty()) {
+                QMessageBox::warning(this, "Import Error",
+                                     QString::fromStdString(err));
+                return;
+            }
+
+            m_model->cues.markMCDirty(m_cueIdx);
+            m_mcView->setCueIndex(m_cueIdx);
+            m_mcView->update();
+            ShowHelpers::syncSfFromCues(*m_model);
+            emit cueEdited();
+        });
+
+        // Inherit From Child button: copy MC from a direct child with MC
+        connect(btnInherit, &QPushButton::clicked, this, [this]() {
+            if (m_cueIdx < 0) return;
+            const mcp::Cue* c = m_model->cues.cueAt(m_cueIdx);
+            if (!c || c->type != mcp::CueType::Group) return;
+
+            // Collect direct children that have a MusicContext
+            std::vector<int> childrenWithMC;
+            for (int ci = m_cueIdx + 1;
+                 ci <= m_cueIdx + c->childCount && ci < m_model->cues.cueCount(); ++ci) {
+                const mcp::Cue* child = m_model->cues.cueAt(ci);
+                if (child && child->parentIndex == m_cueIdx && child->musicContext)
+                    childrenWithMC.push_back(ci);
+                // Skip over nested group descendants
+                if (child && child->type == mcp::CueType::Group)
+                    ci += child->childCount;
+            }
+
+            if (childrenWithMC.empty()) {
+                QMessageBox::information(this, "Inherit MC",
+                    "No direct children with a Music Context found.");
+                return;
+            }
+
+            // Build menu of choices
+            QMenu menu(this);
+            for (int ci : childrenWithMC) {
+                const mcp::Cue* child = m_model->cues.cueAt(ci);
+                const QString label = QString("Q%1 %2")
+                    .arg(QString::fromStdString(child->cueNumber))
+                    .arg(QString::fromStdString(child->name));
+                menu.addAction(label, this, [this, ci]() {
+                    const mcp::Cue* src = m_model->cues.cueAt(ci);
+                    if (!src || !src->musicContext) return;
+                    m_model->pushUndo();
+                    // Deep-copy the MC
+                    auto newMc = std::make_unique<mcp::MusicContext>(*src->musicContext);
+                    m_model->cues.setCueMusicContext(m_cueIdx, std::move(newMc));
+                    m_model->cues.markMCDirty(m_cueIdx);
+                    m_mcView->setCueIndex(m_cueIdx);
+                    m_mcView->update();
+                    ShowHelpers::syncSfFromCues(*m_model);
+                    emit cueEdited();
+                });
+            }
+            menu.exec(QCursor::pos());
+        });
+    }
+
     // Property panel for selected point
     m_mcPropGroup = new QWidget;
     auto* propLay = new QFormLayout(m_mcPropGroup);
@@ -641,12 +750,13 @@ void InspectorWidget::setCueIndex(int idx) {
     const bool isDevamp   = c && c->type == mcp::CueType::Devamp;
     const bool isArm      = c && c->type == mcp::CueType::Arm;
     const bool isGroup    = c && c->type == mcp::CueType::Group;
+    const bool isMCCue    = c && c->type == mcp::CueType::MusicContext;
     const bool isSyncGroup = isGroup && c->groupData &&
                              c->groupData->mode == mcp::GroupData::Mode::Sync;
     const bool isTimeline  = isGroup && c->groupData &&
                              c->groupData->mode == mcp::GroupData::Mode::Timeline;
 
-    const bool hasMC = isAudio || (isGroup && (isSyncGroup || isTimeline));
+    const bool hasMC = isAudio || isMCCue || (isGroup && (isSyncGroup || isTimeline));
 
     m_tabs->setTabVisible(m_tabs->indexOf(m_mcPage),       hasMC);
     m_tabs->setTabVisible(m_tabs->indexOf(m_levelsPage),   isAudio || isFade);
@@ -663,7 +773,14 @@ void InspectorWidget::setCueIndex(int idx) {
     // Music Context tab
     if (hasMC) {
         const bool mcAttached = c && c->musicContext != nullptr;
-        m_chkAttachMC->setChecked(mcAttached);
+        // For MC cues the attach checkbox is always checked and shown
+        if (isMCCue) {
+            m_chkAttachMC->setChecked(true);
+            m_chkAttachMC->setEnabled(false);
+        } else {
+            m_chkAttachMC->setEnabled(true);
+            m_chkAttachMC->setChecked(mcAttached);
+        }
         m_mcContent->setVisible(mcAttached);
         m_selMCPt = -1;
         if (mcAttached) {

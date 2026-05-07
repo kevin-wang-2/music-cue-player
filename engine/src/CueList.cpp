@@ -171,6 +171,20 @@ bool CueList::addGroupCue(GroupData::Mode mode, bool random,
     return true;
 }
 
+bool CueList::addMCCue(const std::string& name, double preWait) {
+    Cue cue;
+    cue.type           = CueType::MusicContext;
+    cue.preWaitSeconds = preWait;
+    cue.name           = name.empty() ? "MC" : name;
+    m_cues.push_back(std::move(cue));
+    std::lock_guard<std::mutex> lk(m_slotMutex);
+    m_lastSlot.push_back(-1);
+    m_pendingEventId.push_back(-1);
+    m_cueFireFrame.push_back(-1);
+    m_cueFireArmBase.push_back(0.0);
+    return true;
+}
+
 void CueList::clear() {
     panic();
     // Signal all active I/O threads to stop early.
@@ -1100,6 +1114,11 @@ bool CueList::fire(int idx) {
             }
             break;
         }
+
+        case CueType::MusicContext:
+            m_cueFireFrame[static_cast<size_t>(idx)] = m_engine.enginePlayheadFrames();
+            result = true;
+            break;
     }
 
     if (result && cue.autoFollow) {
@@ -1251,6 +1270,10 @@ void CueList::stop(int index) {
     // Clear timeline arm position on group stop so next GO starts from 0.
     if (m_cues[index].type == CueType::Group)
         m_cues[index].timelineArmSec = 0.0;
+    // Clear fire frame for MC cues.
+    if (index >= 0 && index < cueCount() &&
+        m_cues[index].type == CueType::MusicContext)
+        m_cueFireFrame[static_cast<size_t>(index)] = -1;
 }
 
 void CueList::panic() {
@@ -1266,6 +1289,10 @@ void CueList::panic() {
         }
         if (cue.type == CueType::Group) cue.timelineArmSec = 0.0;
     }
+    // Reset fire frames for all MC cues.
+    for (int i = 0; i < cueCount(); ++i)
+        if (m_cues[i].type == CueType::MusicContext)
+            m_cueFireFrame[static_cast<size_t>(i)] = -1;
 }
 
 // ---------------------------------------------------------------------------
@@ -1275,6 +1302,9 @@ bool CueList::isAnyCuePlaying() const { return m_engine.activeVoiceCount() > 0; 
 
 bool CueList::isCuePlaying(int index) const {
     if (index < 0 || index >= cueCount()) return false;
+    // MC cues: playing = fire frame is set (no voices)
+    if (m_cues[index].type == CueType::MusicContext)
+        return m_cueFireFrame[static_cast<size_t>(index)] >= 0;
     if (m_engine.anyVoiceActiveWithTag(index)) return true;
     const auto* cue = cueAt(index);
     if (cue && cue->type == CueType::Group && cue->childCount > 0) {
@@ -1328,7 +1358,7 @@ double CueList::cuePlayheadSeconds(int index) const {
 double CueList::cueElapsedSeconds(int index) const {
     if (index < 0 || index >= cueCount()) return 0.0;
     const auto& cue = m_cues[index];
-    if (cue.type == CueType::Group) {
+    if (cue.type == CueType::Group || cue.type == CueType::MusicContext) {
         const int64_t fireFrame = m_cueFireFrame[static_cast<size_t>(index)];
         if (fireFrame < 0) return 0.0;
         const int sr = m_engine.sampleRate();

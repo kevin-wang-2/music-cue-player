@@ -225,13 +225,14 @@ void CueTableView::setRowStatus(int row) {
 
 QString CueTableView::typeLabel(mcp::CueType t) const {
     switch (t) {
-        case mcp::CueType::Audio:  return "Audio";
-        case mcp::CueType::Start:  return "Start";
-        case mcp::CueType::Stop:   return "Stop";
-        case mcp::CueType::Fade:   return "Fade";
-        case mcp::CueType::Arm:    return "Arm";
-        case mcp::CueType::Devamp: return "Devamp";
-        case mcp::CueType::Group:  return "Group";
+        case mcp::CueType::Audio:        return "Audio";
+        case mcp::CueType::Start:        return "Start";
+        case mcp::CueType::Stop:         return "Stop";
+        case mcp::CueType::Fade:         return "Fade";
+        case mcp::CueType::Arm:          return "Arm";
+        case mcp::CueType::Devamp:       return "Devamp";
+        case mcp::CueType::Group:        return "Group";
+        case mcp::CueType::MusicContext: return "MC";
     }
     return "?";
 }

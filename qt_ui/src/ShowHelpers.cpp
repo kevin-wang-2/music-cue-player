@@ -191,6 +191,8 @@ bool rebuildCueList(AppModel& m, std::string& /*err*/) {
                     m.cues.addArmCue(target, cd.name, cd.preWait);
                 } else if (cd.type == "devamp") {
                     m.cues.addDevampCue(target, cd.name, cd.preWait, cd.devampMode);
+                } else if (cd.type == "mc") {
+                    m.cues.addMCCue(cd.name, cd.preWait);
                 }
 
                 m.cues.setCueCueNumber   (myIdx, cd.cueNumber);
@@ -381,6 +383,11 @@ void syncSfFromCues(AppModel& m) {
                     if (c->childCount > 0)
                         extract(i + 1, c->childCount, cd.children);
                     i += c->childCount + 1;  // skip group header + all descendants
+                    break;
+
+                case mcp::CueType::MusicContext:
+                    cd.type = "mc";
+                    ++i;
                     break;
             }
 

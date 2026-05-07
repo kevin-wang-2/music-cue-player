@@ -92,6 +92,10 @@ public:
     bool addGroupCue(GroupData::Mode mode, bool random = false,
                      const std::string& name = "", double preWait = 0.0);
 
+    // Append a standalone MusicContext cue (no audio).
+    // isCuePlaying() returns m_cueFireFrame[idx] >= 0 for MC cues.
+    bool addMCCue(const std::string& name = "", double preWait = 0.0);
+
     void clear();
     int  cueCount() const;
 

@@ -11,7 +11,7 @@
 
 namespace mcp {
 
-enum class CueType { Audio, Start, Stop, Fade, Arm, Devamp, Group };
+enum class CueType { Audio, Start, Stop, Fade, Arm, Devamp, Group, MusicContext };
 
 // Per-audio-cue channel routing.
 // outLevelDb[o]  — per-output-channel level in dB (0.0 = unity).
@@ -114,9 +114,10 @@ struct Cue {
     std::unique_ptr<MusicContext> musicContext;
 
     bool isLoaded() const {
-        if (type == CueType::Audio)  return audioFile.isLoaded();
-        if (type == CueType::Fade)   return fadeData != nullptr && targetIndex >= 0;
-        if (type == CueType::Devamp) return targetIndex >= 0;
+        if (type == CueType::Audio)        return audioFile.isLoaded();
+        if (type == CueType::Fade)         return fadeData != nullptr && targetIndex >= 0;
+        if (type == CueType::Devamp)       return targetIndex >= 0;
+        if (type == CueType::MusicContext) return musicContext != nullptr;
         return true;   // Group, Start, Stop, Arm always "loaded"
     }
 };

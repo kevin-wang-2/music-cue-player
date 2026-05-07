@@ -40,6 +40,8 @@ set(QT_UI_SOURCES
     src/DeviceDialog.cpp
     src/MainWindow.h
     src/MainWindow.cpp
+    src/MCImport.h
+    src/MCImport.cpp
 )
 
 if(APPLE)

@@ -432,11 +432,19 @@ void MainWindow::onTick() {
         }
     }
 
-    // Global MC indicator: find outermost playing cue with MC
+    // Global MC indicator: find playing cue with MC
+    // Priority 1: dedicated MusicContext cue
     int globalMCIdx = -1;
-    for (int i = 0; i < cueCount; i++) {
+    for (int i = 0; i < cueCount && globalMCIdx < 0; ++i) {
+        const auto* c = m_model->cues.cueAt(i);
+        if (!c || c->type != mcp::CueType::MusicContext || !c->musicContext) continue;
+        if (m_model->cues.isCuePlaying(i)) globalMCIdx = i;
+    }
+    // Priority 2: audio/group cue with MC (outermost)
+    for (int i = 0; i < cueCount && globalMCIdx < 0; ++i) {
         const auto* c = m_model->cues.cueAt(i);
         if (!c || !c->musicContext) continue;
+        if (c->type == mcp::CueType::MusicContext) continue;  // already handled above
         if (!m_model->cues.isCuePlaying(i)) continue;
         // Outermost = parent has no MC (or top-level)
         if (c->parentIndex < 0) { globalMCIdx = i; break; }
@@ -664,12 +672,13 @@ void MainWindow::updateCueInfo() {
         detail = cueNum;
         if (!detail.isEmpty()) detail += "  ·  ";
         switch (c->type) {
-            case mcp::CueType::Audio:  detail += "Audio";  break;
-            case mcp::CueType::Start:  detail += "Start";  break;
-            case mcp::CueType::Stop:   detail += "Stop";   break;
-            case mcp::CueType::Fade:   detail += "Fade";   break;
-            case mcp::CueType::Arm:    detail += "Arm";    break;
-            case mcp::CueType::Devamp: detail += "Devamp"; break;
+            case mcp::CueType::Audio:        detail += "Audio";  break;
+            case mcp::CueType::Start:        detail += "Start";  break;
+            case mcp::CueType::Stop:         detail += "Stop";   break;
+            case mcp::CueType::Fade:         detail += "Fade";   break;
+            case mcp::CueType::Arm:          detail += "Arm";    break;
+            case mcp::CueType::Devamp:       detail += "Devamp"; break;
+            case mcp::CueType::MusicContext: detail += "MC";     break;
             case mcp::CueType::Group:  break;  // handled above
         }
     }

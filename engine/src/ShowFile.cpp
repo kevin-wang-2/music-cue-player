@@ -241,6 +241,7 @@ static json cueToJson(const ShowFile::CueData& c) {
             j["children"] = arr;
         }
     }
+    // "mc" type: no additional type-specific fields beyond the common fields
 
     // Music Context
     if (c.musicContext.enabled) {
