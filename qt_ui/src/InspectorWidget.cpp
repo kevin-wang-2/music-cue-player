@@ -524,7 +524,7 @@ void InspectorWidget::buildMCTab() {
             for (int ci = m_cueIdx + 1;
                  ci <= m_cueIdx + c->childCount && ci < m_model->cues.cueCount(); ++ci) {
                 const mcp::Cue* child = m_model->cues.cueAt(ci);
-                if (child && child->parentIndex == m_cueIdx && child->musicContext)
+                if (child && child->parentIndex == m_cueIdx && m_model->cues.hasMusicContext(ci))
                     childrenWithMC.push_back(ci);
                 // Skip over nested group descendants
                 if (child && child->type == mcp::CueType::Group)
@@ -545,13 +545,10 @@ void InspectorWidget::buildMCTab() {
                     .arg(QString::fromStdString(child->cueNumber))
                     .arg(QString::fromStdString(child->name));
                 menu.addAction(label, this, [this, ci]() {
-                    const mcp::Cue* src = m_model->cues.cueAt(ci);
-                    if (!src || !src->musicContext) return;
+                    if (!m_model->cues.hasMusicContext(ci)) return;
                     m_model->pushUndo();
-                    // Deep-copy the MC
-                    auto newMc = std::make_unique<mcp::MusicContext>(*src->musicContext);
-                    m_model->cues.setCueMusicContext(m_cueIdx, std::move(newMc));
-                    m_model->cues.markMCDirty(m_cueIdx);
+                    // Share by index — no copy; if child is deleted, link auto-clears on rebuild.
+                    m_model->cues.setCueMCSource(m_cueIdx, ci);
                     m_mcView->setCueIndex(m_cueIdx);
                     m_mcView->update();
                     ShowHelpers::syncSfFromCues(*m_model);
@@ -675,13 +672,13 @@ void InspectorWidget::buildMCTab() {
 void InspectorWidget::loadMCPropPanel() {
     if (m_cueIdx < 0) { m_mcPropGroup->hide(); return; }
     const auto* c = m_model->cues.cueAt(m_cueIdx);
-    if (!c || !c->musicContext || m_selMCPt < 0 ||
-        m_selMCPt >= (int)c->musicContext->points.size()) {
+    const auto* mc = m_model->cues.musicContextOf(m_cueIdx);
+    if (!mc || m_selMCPt < 0 || m_selMCPt >= (int)mc->points.size()) {
         m_mcPropGroup->hide();
         return;
     }
     m_loading = true;
-    const auto& pt = c->musicContext->points[m_selMCPt];
+    const auto& pt = mc->points[m_selMCPt];
     m_comboPtType->setCurrentIndex(pt.isRamp ? 1 : 0);
     m_comboPtType->setEnabled(m_selMCPt > 0);
     m_spinPtBpm->setValue(pt.bpm);
@@ -772,8 +769,19 @@ void InspectorWidget::setCueIndex(int idx) {
 
     // Music Context tab
     if (hasMC) {
-        const bool mcAttached = c && c->musicContext != nullptr;
-        // For MC cues the attach checkbox is always checked and shown
+        bool mcAttached = c && m_model->cues.hasMusicContext(idx);
+        // MC cues always have an attached MC — auto-create if missing.
+        if (isMCCue && !mcAttached) {
+            auto mc = std::make_unique<mcp::MusicContext>();
+            mcp::MusicContext::Point p;
+            p.bar = 1; p.beat = 1; p.bpm = 120.0;
+            p.hasTimeSig = true; p.timeSigNum = 4; p.timeSigDen = 4;
+            mc->points.push_back(p);
+            m_model->cues.setCueMusicContext(idx, std::move(mc));
+            ShowHelpers::syncSfFromCues(*m_model);
+            mcAttached = true;
+        }
+        // For MC cues the attach checkbox is always checked and disabled
         if (isMCCue) {
             m_chkAttachMC->setChecked(true);
             m_chkAttachMC->setEnabled(false);
@@ -784,7 +792,7 @@ void InspectorWidget::setCueIndex(int idx) {
         m_mcContent->setVisible(mcAttached);
         m_selMCPt = -1;
         if (mcAttached) {
-            m_chkApplyBefore->setChecked(c->musicContext->applyBeforeStart);
+            m_chkApplyBefore->setChecked(m_model->cues.musicContextOf(idx)->applyBeforeStart);
             m_mcView->setCueIndex(idx);
             m_mcPropGroup->hide();
         }
@@ -802,7 +810,7 @@ void InspectorWidget::setCueIndex(int idx) {
 
     // Pass MC to timeline views for bar/beat ruler
     {
-        const mcp::MusicContext* mc = (c && c->musicContext) ? c->musicContext.get() : nullptr;
+        const mcp::MusicContext* mc = c ? m_model->cues.musicContextOf(idx) : nullptr;
         const double startTime = (c && c->type == mcp::CueType::Audio) ? c->startTime : 0.0;
         if (m_waveform)      m_waveform->setMusicContext(mc, startTime);
         if (m_timelineView)  m_timelineView->setMusicContext(mc);

@@ -87,6 +87,10 @@ struct ShowFile {
         // Serialised as a recursive JSON array under the key "children".
         std::vector<CueData> children;
 
+        // MC inheritance link: when non-empty, this cue's MC is sourced from
+        // the cue with the given cue number.  Mutually exclusive with musicContext.
+        std::string mcSourceNumber;
+
         // Music Context (serialised as "musicContext" when enabled is true)
         struct MCPoint {
             int    bar{1};

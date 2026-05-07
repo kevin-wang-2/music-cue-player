@@ -75,6 +75,9 @@ static ShowFile::CueData parseCue(const json& j) {
             c.children.push_back(parseCue(ch));
     }
 
+    // MC inheritance link
+    c.mcSourceNumber = jget<std::string>(j, "mcSourceNumber", "");
+
     // Music Context
     if (j.contains("musicContext") && j["musicContext"].is_object()) {
         const auto& mc = j["musicContext"];
@@ -242,6 +245,9 @@ static json cueToJson(const ShowFile::CueData& c) {
         }
     }
     // "mc" type: no additional type-specific fields beyond the common fields
+
+    // MC inheritance link
+    if (!c.mcSourceNumber.empty()) j["mcSourceNumber"] = c.mcSourceNumber;
 
     // Music Context
     if (c.musicContext.enabled) {

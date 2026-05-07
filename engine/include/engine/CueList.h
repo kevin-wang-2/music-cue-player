@@ -155,14 +155,25 @@ public:
     void setCueFadeStopWhenDone (int index, bool v);
 
     // Music Context — attach / detach / mutate.
-    // Pass nullptr to remove any existing MC.
+    // Pass nullptr to remove any existing MC.  Also clears any mcSourceIdx link.
     void setCueMusicContext(int index, std::unique_ptr<MusicContext> mc);
 
-    // Direct access to a mutable MC (returns nullptr if the cue has no MC).
-    // The caller is responsible for calling markMCDirty() after bulk mutations.
-    MusicContext* musicContextOf(int index);
+    // Set an index-based MC inheritance link.  When sourceIdx >= 0, musicContextOf()
+    // returns the MC of cue[sourceIdx] instead of the cue's own musicContext.
+    // Pass -1 to clear the link without touching the cue's own musicContext.
+    // If sourceIdx is invalid or creates a cycle, the call is a no-op.
+    void setCueMCSource(int index, int sourceIdx);
 
-    // Mark the MC as dirty so it recompiles on next query.
+    // True when the effective MC (own or inherited) is non-null.
+    bool hasMusicContext(int index) const;
+
+    // Direct access to the effective MC (follows mcSourceIdx chain).
+    // Returns nullptr if the cue has no MC and no valid inheritance link.
+    // The caller is responsible for calling markMCDirty() after bulk mutations.
+          MusicContext* musicContextOf(int index);
+    const MusicContext* musicContextOf(int index) const;
+
+    // Mark the effective MC as dirty so it recompiles on next query.
     // Call after any direct mutation via musicContextOf().
     void markMCDirty(int index);
 

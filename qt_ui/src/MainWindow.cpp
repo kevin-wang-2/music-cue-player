@@ -273,13 +273,14 @@ void MainWindow::buildIconBar() {
 
     // Add-cue type buttons
     struct { const char* icon; const char* tip; const char* type; } cueBtns[] = {
-        { "▤",  "Add Group cue",   "group"  },
-        { "♫",  "Add Audio cue",   "audio"  },
-        { "▷",  "Add Start cue",   "start"  },
-        { "□",  "Add Stop cue",    "stop"   },
-        { "〰", "Add Fade cue",    "fade"   },
-        { "⊙",  "Add Arm cue",     "arm"    },
-        { "⤴",  "Add Devamp cue",  "devamp" },
+        { "▤",  "Add Group cue",          "group"  },
+        { "♫",  "Add Audio cue",          "audio"  },
+        { "▷",  "Add Start cue",          "start"  },
+        { "□",  "Add Stop cue",           "stop"   },
+        { "〰", "Add Fade cue",           "fade"   },
+        { "⊙",  "Add Arm cue",            "arm"    },
+        { "⤴",  "Add Devamp cue",         "devamp" },
+        { "♩",  "Add Music Context cue",  "mc"     },
     };
     for (const auto& b : cueBtns) {
         auto* btn = makeIconBtn(b.icon, b.tip);
@@ -437,23 +438,21 @@ void MainWindow::onTick() {
     int globalMCIdx = -1;
     for (int i = 0; i < cueCount && globalMCIdx < 0; ++i) {
         const auto* c = m_model->cues.cueAt(i);
-        if (!c || c->type != mcp::CueType::MusicContext || !c->musicContext) continue;
+        if (!c || c->type != mcp::CueType::MusicContext || !m_model->cues.hasMusicContext(i)) continue;
         if (m_model->cues.isCuePlaying(i)) globalMCIdx = i;
     }
     // Priority 2: audio/group cue with MC (outermost)
     for (int i = 0; i < cueCount && globalMCIdx < 0; ++i) {
         const auto* c = m_model->cues.cueAt(i);
-        if (!c || !c->musicContext) continue;
+        if (!c || !m_model->cues.hasMusicContext(i)) continue;
         if (c->type == mcp::CueType::MusicContext) continue;  // already handled above
         if (!m_model->cues.isCuePlaying(i)) continue;
         // Outermost = parent has no MC (or top-level)
         if (c->parentIndex < 0) { globalMCIdx = i; break; }
-        const auto* par = m_model->cues.cueAt(c->parentIndex);
-        if (!par || !par->musicContext) { globalMCIdx = i; break; }
+        if (!m_model->cues.hasMusicContext(c->parentIndex)) { globalMCIdx = i; break; }
     }
     if (globalMCIdx >= 0) {
-        const auto* c  = m_model->cues.cueAt(globalMCIdx);
-        const auto* mc = c->musicContext.get();
+        const auto* mc = m_model->cues.musicContextOf(globalMCIdx);
         const double cueRelSec = m_model->cues.cueElapsedSeconds(globalMCIdx);
         const auto   pos = mc->secondsToMusical(cueRelSec);
         const double bpm = mc->bpmAt(pos.bar, pos.beat, pos.fraction);

@@ -505,16 +505,44 @@ static void normaliseSliceLoops(Cue& cue) {
 void CueList::setCueMusicContext(int i, std::unique_ptr<MusicContext> mc) {
     if (i < 0 || i >= cueCount()) return;
     m_cues[i].musicContext = std::move(mc);
+    m_cues[i].mcSourceIdx  = -1;  // own MC takes precedence; clear any inherited link
+}
+
+void CueList::setCueMCSource(int index, int sourceIdx) {
+    if (index < 0 || index >= cueCount()) return;
+    if (sourceIdx < -1 || sourceIdx >= cueCount()) return;
+    if (sourceIdx == index) return;  // trivial self-loop
+    // Guard against indirect cycles: walk the source chain.
+    int cur = sourceIdx;
+    while (cur >= 0 && cur < cueCount()) {
+        if (cur == index) return;  // would create cycle
+        cur = m_cues[static_cast<size_t>(cur)].mcSourceIdx;
+    }
+    m_cues[static_cast<size_t>(index)].mcSourceIdx = sourceIdx;
+}
+
+bool CueList::hasMusicContext(int index) const {
+    return musicContextOf(index) != nullptr;
 }
 
 MusicContext* CueList::musicContextOf(int i) {
     if (i < 0 || i >= cueCount()) return nullptr;
-    return m_cues[i].musicContext.get();
+    const int src = m_cues[static_cast<size_t>(i)].mcSourceIdx;
+    if (src >= 0) return musicContextOf(src);
+    return m_cues[static_cast<size_t>(i)].musicContext.get();
+}
+
+const MusicContext* CueList::musicContextOf(int i) const {
+    if (i < 0 || i >= cueCount()) return nullptr;
+    const int src = m_cues[static_cast<size_t>(i)].mcSourceIdx;
+    if (src >= 0) return musicContextOf(src);
+    return m_cues[static_cast<size_t>(i)].musicContext.get();
 }
 
 void CueList::markMCDirty(int i) {
     if (i < 0 || i >= cueCount()) return;
-    if (m_cues[i].musicContext) m_cues[i].musicContext->markDirty();
+    MusicContext* mc = musicContextOf(i);
+    if (mc) mc->markDirty();
 }
 
 void CueList::setCueMarkers(int i, const std::vector<Cue::TimeMarker>& m) {
@@ -1146,15 +1174,15 @@ double CueList::quantizeDelay(int cueIdx, int64_t originFrame) const {
     int mcCueIdx = -1;
     for (int i = 0; i < cueCount(); i++) {
         const auto& c = m_cues[i];
-        if (!c.musicContext || !isCuePlaying(i)) continue;
-        if (c.parentIndex < 0 || !m_cues[c.parentIndex].musicContext) {
+        if (!hasMusicContext(i) || !isCuePlaying(i)) continue;
+        if (c.parentIndex < 0 || !hasMusicContext(c.parentIndex)) {
             mcCueIdx = i;
             break;
         }
     }
     if (mcCueIdx < 0) return 0.0;
 
-    const auto* mc = m_cues[mcCueIdx].musicContext.get();
+    const auto* mc = musicContextOf(mcCueIdx);
     // Use cueElapsedSeconds for audio; for groups use stored fire frame.
     // For the quantize computation we need the elapsed time at originFrame,
     // not at enginePlayheadFrames(), so adjust for the difference.

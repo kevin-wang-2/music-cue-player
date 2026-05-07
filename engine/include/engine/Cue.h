@@ -113,6 +113,11 @@ struct Cue {
     // Valid for Audio, Group (Timeline/Sync) cues only.
     std::unique_ptr<MusicContext> musicContext;
 
+    // Index of the cue whose musicContext this cue inherits (-1 = own context).
+    // When set, CueList::musicContextOf() follows this index instead of musicContext.
+    // Cleared automatically by setCueMusicContext(); serialised as mcSourceNumber.
+    int mcSourceIdx{-1};
+
     bool isLoaded() const {
         if (type == CueType::Audio)        return audioFile.isLoaded();
         if (type == CueType::Fade)         return fadeData != nullptr && targetIndex >= 0;

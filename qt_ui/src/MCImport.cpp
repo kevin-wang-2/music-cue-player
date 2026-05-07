@@ -172,67 +172,68 @@ std::string parseSmt(const std::string& path, mcp::MusicContext& mc) {
     };
     std::vector<TempoEvent> tempoEvents;
 
-    // Parse XML
+    // Parse XML.
+    // All data objects in SMT use <obj class="ClassName"> — the element name is
+    // always "obj"; the type is in the "class" attribute.
     while (!xml.atEnd() && !xml.hasError()) {
         xml.readNext();
-        if (xml.isStartElement()) {
-            const QString elemName = xml.name().toString();
+        if (!xml.isStartElement()) continue;
 
-            if (elemName == "MTimeSignatureEvent") {
-                // Read child float/int elements
-                int    bar0 = 0, num = 4, den = 4;
-                int64_t pos = 0;
-                // Read until end of this element
-                while (!xml.atEnd()) {
-                    xml.readNext();
-                    if (xml.isEndElement() && xml.name().toString() == "MTimeSignatureEvent")
-                        break;
-                    if (xml.isStartElement()) {
-                        const QString n = xml.name().toString();
-                        const QString nameAttr = xml.attributes().value("name").toString();
-                        const QString valAttr  = xml.attributes().value("value").toString();
-                        if (n == "int") {
-                            if (nameAttr == "Bar")         bar0 = valAttr.toInt();
-                            else if (nameAttr == "Numerator")   num  = valAttr.toInt();
-                            else if (nameAttr == "Denominator") den  = valAttr.toInt();
-                            else if (nameAttr == "Position")    pos  = valAttr.toLongLong();
-                        }
+        const QString elemName  = xml.name().toString();
+        const QString classAttr = xml.attributes().value("class").toString();
+
+        if (elemName == "obj" && classAttr == "MTimeSignatureEvent") {
+            int    bar0 = 0, num = 4, den = 4;
+            int64_t pos = 0;
+            while (!xml.atEnd()) {
+                xml.readNext();
+                // End of this <obj> — stop (MTimeSignatureEvent has no nested <obj>)
+                if (xml.isEndElement() && xml.name().toString() == "obj") break;
+                if (xml.isStartElement()) {
+                    const QString n        = xml.name().toString();
+                    const QString nameAttr = xml.attributes().value("name").toString();
+                    const QString valAttr  = xml.attributes().value("value").toString();
+                    if (n == "int") {
+                        if      (nameAttr == "Bar")         bar0 = valAttr.toInt();
+                        else if (nameAttr == "Numerator")   num  = valAttr.toInt();
+                        else if (nameAttr == "Denominator") den  = valAttr.toInt();
+                        else if (nameAttr == "Position")    pos  = valAttr.toLongLong();
                     }
                 }
-                SigEvent se;
-                se.tick = pos;
-                se.bar0 = bar0;
-                se.num  = num;
-                se.den  = den;
-                sigEvents.push_back(se);
-
-            } else if (elemName == "MTempoEvent") {
-                double  bpm   = 120.0;
-                int64_t ppq   = 0;
-                bool    isRamp = false;
-                while (!xml.atEnd()) {
-                    xml.readNext();
-                    if (xml.isEndElement() && xml.name().toString() == "MTempoEvent")
-                        break;
-                    if (xml.isStartElement()) {
-                        const QString n        = xml.name().toString();
-                        const QString nameAttr = xml.attributes().value("name").toString();
-                        const QString valAttr  = xml.attributes().value("value").toString();
-                        if (n == "float") {
-                            if (nameAttr == "BPM") bpm = valAttr.toDouble();
-                            else if (nameAttr == "PPQ") ppq = (int64_t)valAttr.toDouble();
-                        } else if (n == "int") {
-                            if (nameAttr == "Func" && valAttr.toInt() == 1)
-                                isRamp = true;
-                        }
-                    }
-                }
-                TempoEvent te;
-                te.tick   = ppq;
-                te.bpm    = bpm;
-                te.isRamp = isRamp;
-                tempoEvents.push_back(te);
             }
+            SigEvent se;
+            se.tick = pos;
+            se.bar0 = bar0;
+            se.num  = num;
+            se.den  = den;
+            sigEvents.push_back(se);
+
+        } else if (elemName == "obj" && classAttr == "MTempoEvent") {
+            double  bpm    = 120.0;
+            int64_t ppq    = 0;
+            bool    isRamp = false;
+            while (!xml.atEnd()) {
+                xml.readNext();
+                // End of this <obj> — stop (MTempoEvent has no nested <obj>)
+                if (xml.isEndElement() && xml.name().toString() == "obj") break;
+                if (xml.isStartElement()) {
+                    const QString n        = xml.name().toString();
+                    const QString nameAttr = xml.attributes().value("name").toString();
+                    const QString valAttr  = xml.attributes().value("value").toString();
+                    if (n == "float") {
+                        if      (nameAttr == "BPM") bpm = valAttr.toDouble();
+                        else if (nameAttr == "PPQ") ppq = (int64_t)valAttr.toDouble();
+                    } else if (n == "int") {
+                        if (nameAttr == "Func" && valAttr.toInt() == 1)
+                            isRamp = true;
+                    }
+                }
+            }
+            TempoEvent te;
+            te.tick   = ppq;
+            te.bpm    = bpm;
+            te.isRamp = isRamp;
+            tempoEvents.push_back(te);
         }
     }
 

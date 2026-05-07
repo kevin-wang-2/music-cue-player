@@ -39,7 +39,7 @@ MusicContextView::MusicContextView(AppModel* model, QWidget* parent)
 mcp::MusicContext* MusicContextView::getMC() const {
     if (m_cueIdx < 0) return nullptr;
     const auto* c = m_model->cues.cueAt(m_cueIdx);
-    return c ? c->musicContext.get() : nullptr;
+    return c ? m_model->cues.musicContextOf(m_cueIdx) : nullptr;
 }
 
 double MusicContextView::qnToX(double qn) const {
@@ -514,6 +514,14 @@ void MusicContextView::wheelEvent(QWheelEvent* ev) {
         m_pixPerQN    = std::clamp(m_pixPerQN / factor, 2.0, 600.0);
         m_viewStartQN = mouseQN - (mouseQN - m_viewStartQN) * factor;
     }
+
+    // Hard left limit: never scroll past (firstBar - 0.5 QN) so the first
+    // bar line always stays reachable.
+    if (const auto* mc = getMC(); mc && !mc->points.empty()) {
+        const double floor = mc->musicalToQN(mc->points.front().bar, 1) - 0.5;
+        m_viewStartQN = std::max(m_viewStartQN, floor);
+    }
+
     ev->accept();
     update();
 }

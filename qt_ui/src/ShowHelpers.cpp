@@ -8,6 +8,7 @@
 #include <cstdio>
 #include <filesystem>
 #include <functional>
+#include <unordered_map>
 
 namespace ShowHelpers {
 
@@ -236,6 +237,32 @@ bool rebuildCueList(AppModel& m, std::string& /*err*/) {
     };
 
     process(topCues, -1);
+
+    // Second pass: resolve mcSourceNumber → setCueMCSource.
+    // Done after process() so forward-references (source cue comes later) work.
+    {
+        std::unordered_map<std::string, int> numToFlatIdx;
+        for (int i = 0; i < m.cues.cueCount(); ++i) {
+            const auto* c = m.cues.cueAt(i);
+            if (c && !c->cueNumber.empty()) numToFlatIdx[c->cueNumber] = i;
+        }
+        // Walk the CueData tree to find pending mcSourceNumber entries.
+        std::function<void(const std::vector<mcp::ShowFile::CueData>&, int&)> resolveSource;
+        resolveSource = [&](const std::vector<mcp::ShowFile::CueData>& cues, int& flatIdx) {
+            for (const auto& cd : cues) {
+                const int myIdx = flatIdx++;
+                if (!cd.mcSourceNumber.empty()) {
+                    auto it = numToFlatIdx.find(cd.mcSourceNumber);
+                    if (it != numToFlatIdx.end())
+                        m.cues.setCueMCSource(myIdx, it->second);
+                }
+                if (!cd.children.empty()) resolveSource(cd.children, flatIdx);
+            }
+        };
+        int idx = 0;
+        resolveSource(topCues, idx);
+    }
+
     return true;
 }
 
@@ -246,7 +273,14 @@ void syncSfFromCues(AppModel& m) {
 
     const int total = m.cues.cueCount();
 
-    auto fillCommon = [](mcp::ShowFile::CueData& cd, const mcp::Cue& c) {
+    // Build a helper to look up a cue's number by flat index.
+    auto cueNumAt = [&](int idx) -> std::string {
+        if (idx < 0 || idx >= total) return "";
+        const auto* c = m.cues.cueAt(idx);
+        return c ? c->cueNumber : "";
+    };
+
+    auto fillCommon = [&](mcp::ShowFile::CueData& cd, const mcp::Cue& c) {
         cd.cueNumber      = c.cueNumber;
         cd.name           = c.name;
         cd.preWait        = c.preWaitSeconds;
@@ -254,7 +288,10 @@ void syncSfFromCues(AppModel& m) {
         cd.autoContinue   = c.autoContinue;
         cd.autoFollow     = c.autoFollow;
         cd.timelineOffset = c.timelineOffset;
-        if (c.musicContext) {
+        if (c.mcSourceIdx >= 0) {
+            // Inherited MC: store the source cue number, not the MC data itself.
+            cd.mcSourceNumber = cueNumAt(c.mcSourceIdx);
+        } else if (c.musicContext) {
             cd.musicContext.enabled            = true;
             cd.musicContext.startOffsetSeconds = c.musicContext->startOffsetSeconds;
             cd.musicContext.applyBeforeStart   = c.musicContext->applyBeforeStart;
@@ -270,13 +307,6 @@ void syncSfFromCues(AppModel& m) {
                 cd.musicContext.points.push_back(pt);
             }
         }
-    };
-
-    // Build a helper to look up a cue's number by flat index.
-    auto cueNumAt = [&](int idx) -> std::string {
-        if (idx < 0 || idx >= total) return "";
-        const auto* c = m.cues.cueAt(idx);
-        return c ? c->cueNumber : "";
     };
 
     // Recursively reconstruct nesting.
