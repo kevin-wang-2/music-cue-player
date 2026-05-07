@@ -60,9 +60,16 @@ void TimelineGroupView::clearArmCursor() {
 }
 
 void TimelineGroupView::setGroupCueIndex(int groupFlatIdx) {
-    m_groupIdx      = groupFlatIdx;
-    m_dragBlock     = -1;
-    m_laneScrollPx  = 0;
+    const bool groupChanged = (groupFlatIdx != m_groupIdx);
+    m_groupIdx     = groupFlatIdx;
+    m_dragBlock    = -1;
+    m_dragMode     = DragMode::None;
+    m_selBlock     = -1;
+    if (groupChanged) {
+        m_laneScrollPx = 0;
+        m_viewStart    = 0.0;
+        m_pixPerSec    = 80.0;
+    }
     rebuildBlocks();
     updateGeometry();
     update();
@@ -82,9 +89,10 @@ void TimelineGroupView::rebuildBlocks() {
             b.flatIdx   = i;
             b.offset    = c->timelineOffset;
             b.startTime = c->startTime;
+            b.fileDur   = (c->type == mcp::CueType::Audio)
+                          ? m_model->cues.cueTotalSeconds(i) : 0.0;
             b.duration  = (c->duration > 0.0) ? c->duration
-                        : (c->type == mcp::CueType::Audio
-                           ? m_model->cues.cueTotalSeconds(i) : 2.0);
+                        : (b.fileDur > 0.0 ? b.fileDur - c->startTime : 2.0);
             b.label = QString::fromStdString(
                 c->cueNumber.empty() ? c->name
                                      : (c->cueNumber + (c->name.empty() ? "" : " " + c->name)));
@@ -102,8 +110,8 @@ void TimelineGroupView::rebuildBlocks() {
 }
 
 void TimelineGroupView::buildPeaksAsync(const std::string& path) {
-    if (m_peakCache.count(path)) return;   // already cached or building
-    m_peakCache[path] = {};                // placeholder — prevents double launch
+    if (m_peakCache.count(path)) return;
+    m_peakCache[path] = {};
     std::thread([this, path]() {
         PeakCache pc;
         pc.valid = mcp::buildWaveformPeaks(path, 800,
@@ -141,6 +149,23 @@ void TimelineGroupView::updateSnapTargets() {
     m_snapTimes.push_back(0.0);
 }
 
+void TimelineGroupView::updateHoverCursor(int px, int py) {
+    for (int i = 0; i < (int)m_blocks.size(); ++i) {
+        const int ly = laneY(i);
+        if (ly + kBlockH <= kRulerH || ly >= height()) continue;
+        if (py < ly || py >= ly + kBlockH) continue;
+        const int x1 = secToPix(m_blocks[i].offset);
+        const int x2 = secToPix(m_blocks[i].offset + m_blocks[i].duration);
+        if (px < x1 || px > x2) continue;
+        if (px <= x1 + kHandleW || px >= x2 - kHandleW)
+            setCursor(Qt::SizeHorCursor);
+        else
+            setCursor(Qt::SizeAllCursor);
+        return;
+    }
+    unsetCursor();
+}
+
 // ---------------------------------------------------------------------------
 // Paint
 
@@ -154,13 +179,11 @@ void TimelineGroupView::paintEvent(QPaintEvent*) {
     p.setPen(QColor(0x55, 0x55, 0x55));
     p.drawLine(0, kRulerH, W, kRulerH);
 
-    // Pick the smallest tick step giving >= 55 px between ticks.
     const double vis = viewDuration();
     double tickStep = 300.0;
     for (double s : {0.05, 0.1, 0.25, 0.5, 1.0, 2.0, 5.0, 10.0, 30.0, 60.0, 120.0, 300.0})
         if (W * s / vis > 55.0) { tickStep = s; break; }
 
-    // Label only every Nth tick so labels stay >= 65 px apart.
     const int labelMult = std::max(1, (int)std::ceil(65.0 / (m_pixPerSec * tickStep)));
 
     p.setPen(QColor(0x77, 0x77, 0x77));
@@ -184,58 +207,72 @@ void TimelineGroupView::paintEvent(QPaintEvent*) {
         const int   x2      = secToPix(b.offset + b.duration);
         const int   bw      = std::max(4, x2 - x1);
         const bool  isDrag  = (i == m_dragBlock);
+        const bool  isSel   = (i == m_selBlock);
 
         // Lane background track
         p.fillRect(0, ly, W, kBlockH, QColor(0x18, 0x18, 0x18));
 
         // Block fill
-        const QColor fill   = isDrag ? QColor(0x44, 0x88, 0xdd) : QColor(0x28, 0x60, 0xa8);
-        const QColor border = isDrag ? QColor(0x88, 0xcc, 0xff) : QColor(0x44, 0x88, 0xcc);
+        QColor fill, border;
+        if (isDrag)        { fill = QColor(0x44, 0x88, 0xdd); border = QColor(0x88, 0xcc, 0xff); }
+        else if (isSel)    { fill = QColor(0x30, 0x70, 0xc0); border = QColor(0x66, 0xaa, 0xff); }
+        else               { fill = QColor(0x28, 0x60, 0xa8); border = QColor(0x44, 0x88, 0xcc); }
         p.fillRect(x1, ly, bw, kBlockH, fill);
 
-        // ── Waveform thumbnail (audio cues only) ─────────────────────────
+        // ── Waveform thumbnail ────────────────────────────────────────────
         if (!b.audioPath.empty()) {
             auto it = m_peakCache.find(b.audioPath);
             if (it != m_peakCache.end() && it->second.valid
                 && it->second.fileDur > 0.0 && !it->second.minPk[0].empty()) {
                 const PeakCache& pk = it->second;
                 const int nBuckets  = (int)pk.minPk[0].size();
-                const int waveTop   = ly + 4;
-                const int waveBot   = ly + kBlockH - 4;
+                const int waveTop   = ly + 14;   // leave room for label
+                const int waveBot   = ly + kBlockH - 3;
                 const int mid       = (waveTop + waveBot) / 2;
                 const int halfH     = (waveBot - waveTop) / 2;
 
                 p.setPen(QPen(QColor(0xaa, 0xdd, 0xff, 0xb0), 1));
-                for (int px = x1; px < x1 + bw; ++px) {
-                    if (px < 0 || px >= W) continue;
+                for (int px2 = std::max(0, x1); px2 < std::min(W, x1 + bw); ++px2) {
                     const double t  = b.startTime
-                                    + (double)(px - x1) / bw * b.duration;
+                                    + (double)(px2 - x1) / bw * b.duration;
                     const int bi = std::clamp(
                         (int)(t / pk.fileDur * nBuckets), 0, nBuckets - 1);
                     const float mn = pk.minPk[0][bi];
                     const float mx = pk.maxPk[0][bi];
-                    const int y1p  = mid - (int)(mx * halfH);
-                    const int y2p  = mid - (int)(mn * halfH);
-                    p.drawLine(px, std::max(waveTop, y1p),
-                               px, std::min(waveBot, y2p));
+                    p.drawLine(px2, std::max(waveTop, mid - (int)(mx * halfH)),
+                               px2, std::min(waveBot, mid - (int)(mn * halfH)));
                 }
             }
         }
+
+        // Trim handles (subtle bright strip at edges)
+        p.fillRect(x1,           ly, kHandleW, kBlockH, QColor(255,255,255,25));
+        p.fillRect(x1+bw-kHandleW, ly, kHandleW, kBlockH, QColor(255,255,255,25));
 
         // Block border
         p.setPen(border);
         p.drawRect(x1, ly, bw - 1, kBlockH - 1);
 
-        // Label (clipped to block)
-        p.setClipRect(x1 + 1, ly + 1, bw - 2, kBlockH - 2);
-        p.setPen(Qt::white);
-        p.drawText(x1 + 4, ly, bw - 8, kBlockH,
-                   Qt::AlignLeft | Qt::AlignVCenter, b.label);
-        p.setClipping(false);
+        // ── Sticky label + prewait sub-label ──────────────────────────────
+        // labelX: anchored to max(block left, viewport left) so label stays
+        // visible even when block starts off the left edge of the view.
+        const int labelX = std::max(x1 + 4, 2);
+        const int labelR = x1 + bw - 2;
+        if (labelR > labelX) {
+            p.save();
+            p.setClipRect(labelX, ly + 1, labelR - labelX, kBlockH - 2, Qt::IntersectClip);
+            p.setPen(Qt::white);
+            p.drawText(labelX, ly, labelR - labelX, kBlockH / 2 + 2,
+                       Qt::AlignLeft | Qt::AlignVCenter, b.label);
+            p.setPen(QColor(180, 210, 255, 180));
+            p.drawText(labelX, ly + kBlockH / 2, labelR - labelX, kBlockH / 2,
+                       Qt::AlignLeft | Qt::AlignVCenter, fmtRulerTick(b.offset));
+            p.restore();
+        }
     }
     p.setClipping(false);
 
-    // ── Arm cursor (drawn last so it's on top of waveform thumbnails) ────────
+    // ── Arm cursor ───────────────────────────────────────────────────────────
     if (m_armSec >= 0.0) {
         const int ax = secToPix(m_armSec);
         if (ax >= 0 && ax < W) {
@@ -259,81 +296,135 @@ void TimelineGroupView::mousePressEvent(QMouseEvent* ev) {
     const int py = ev->pos().y();
     const int px = ev->pos().x();
 
-    // Block drag: hit-test per lane
     for (int i = 0; i < (int)m_blocks.size(); ++i) {
         const int ly = laneY(i);
-        if (ly + kBlockH <= kRulerH) continue;  // scrolled above ruler
-        if (ly >= height()) break;              // scrolled below view
-        if (py >= ly && py < ly + kBlockH) {
-            const int x1 = secToPix(m_blocks[i].offset);
-            const int x2 = secToPix(m_blocks[i].offset + m_blocks[i].duration);
-            if (px >= x1 && px <= x2) {
-                m_dragBlock       = i;
-                m_dragStartX      = px;
-                m_dragStartOffset = m_blocks[i].offset;
-                updateSnapTargets();
-                return;
-            }
+        if (ly + kBlockH <= kRulerH) continue;
+        if (ly >= height()) break;
+        if (py < ly || py >= ly + kBlockH) continue;
+
+        const int x1 = secToPix(m_blocks[i].offset);
+        const int x2 = secToPix(m_blocks[i].offset + m_blocks[i].duration);
+        if (px < x1 || px > x2) continue;
+
+        m_selBlock            = i;
+        m_dragBlock           = i;
+        m_dragStartX          = px;
+        m_dragStartOffset     = m_blocks[i].offset;
+        m_dragStartStartTime  = m_blocks[i].startTime;
+        m_dragStartDuration   = m_blocks[i].duration;
+
+        if (px <= x1 + kHandleW)
+            m_dragMode = DragMode::TrimLeft;
+        else if (px >= x2 - kHandleW)
+            m_dragMode = DragMode::TrimRight;
+        else {
+            m_dragMode = DragMode::Move;
+            updateSnapTargets();
         }
+        update();
+        return;
     }
 
-    // Ruler click → set arm cursor and notify engine to arm from this position.
+    // Ruler click → arm cursor
     if (py < kRulerH) {
         m_armSec = std::max(0.0, pixToSec(px));
         update();
         emit rulerClicked(m_armSec);
+    } else {
+        // Click in empty lane area → deselect
+        m_selBlock = -1;
+        update();
     }
 }
 
 void TimelineGroupView::mouseMoveEvent(QMouseEvent* ev) {
-    if (m_dragBlock < 0) return;
+    const int px = ev->pos().x();
+    const int py = ev->pos().y();
 
-    const double deltaSec = static_cast<double>(ev->pos().x() - m_dragStartX) / m_pixPerSec;
-    double newOffset = std::max(0.0, m_dragStartOffset + deltaSec);
-
-    const double snapThreshSec = kSnapThreshPx / m_pixPerSec;
-    for (double t : m_snapTimes) {
-        if (std::fabs(newOffset - t) < snapThreshSec) {
-            newOffset = t;
-            break;
-        }
-        const double blockEnd = newOffset + m_blocks[m_dragBlock].duration;
-        const double endSnap  = t - m_blocks[m_dragBlock].duration;
-        if (std::fabs(blockEnd - t) < snapThreshSec && endSnap >= 0.0) {
-            newOffset = endSnap;
-            break;
-        }
+    if (m_dragBlock < 0) {
+        updateHoverCursor(px, py);
+        return;
     }
 
-    m_blocks[m_dragBlock].offset = newOffset;
+    const double deltaSec = static_cast<double>(px - m_dragStartX) / m_pixPerSec;
+
+    if (m_dragMode == DragMode::Move) {
+        double newOffset = std::max(0.0, m_dragStartOffset + deltaSec);
+        const double snapThreshSec = kSnapThreshPx / m_pixPerSec;
+        for (double t : m_snapTimes) {
+            if (std::fabs(newOffset - t) < snapThreshSec) { newOffset = t; break; }
+            const double blockEnd = newOffset + m_blocks[m_dragBlock].duration;
+            const double endSnap  = t - m_blocks[m_dragBlock].duration;
+            if (std::fabs(blockEnd - t) < snapThreshSec && endSnap >= 0.0) {
+                newOffset = endSnap; break;
+            }
+        }
+        m_blocks[m_dragBlock].offset = newOffset;
+
+    } else if (m_dragMode == DragMode::TrimLeft) {
+        // Both offset and startTime shift together; duration adjusts to keep right edge fixed.
+        const double newOffset    = std::max(0.0, m_dragStartOffset + deltaSec);
+        const double actualDelta  = newOffset - m_dragStartOffset;
+        double newStartTime       = m_dragStartStartTime + actualDelta;
+        double newDuration        = m_dragStartDuration   - actualDelta;
+        const double fileDur      = m_blocks[m_dragBlock].fileDur;
+
+        // Clamp: startTime >= 0, duration >= 0.05, startTime stays within file
+        if (newStartTime < 0.0) {
+            const double adj = -newStartTime;
+            newStartTime = 0.0;
+            newDuration  += adj;
+        }
+        if (fileDur > 0.0 && newStartTime > fileDur - 0.05)
+            newStartTime = fileDur - 0.05;
+        newDuration = std::max(0.05, newDuration);
+
+        m_blocks[m_dragBlock].offset    = m_dragStartOffset + (newStartTime - m_dragStartStartTime);
+        m_blocks[m_dragBlock].startTime = newStartTime;
+        m_blocks[m_dragBlock].duration  = newDuration;
+
+    } else if (m_dragMode == DragMode::TrimRight) {
+        double newDuration = std::max(0.05, m_dragStartDuration + deltaSec);
+        const double fileDur = m_blocks[m_dragBlock].fileDur;
+        if (fileDur > 0.0)
+            newDuration = std::min(newDuration, fileDur - m_blocks[m_dragBlock].startTime);
+        m_blocks[m_dragBlock].duration = newDuration;
+    }
+
     update();
 }
 
 void TimelineGroupView::mouseReleaseEvent(QMouseEvent*) {
-    if (m_dragBlock >= 0) {
-        const double newOff = m_blocks[m_dragBlock].offset;
-        const int flatIdx   = m_blocks[m_dragBlock].flatIdx;
-        m_dragBlock = -1;
+    if (m_dragBlock < 0) return;
+
+    const int flatIdx = m_blocks[m_dragBlock].flatIdx;
+    const DragMode mode = m_dragMode;
+    const double newOff  = m_blocks[m_dragBlock].offset;
+    const double newSt   = m_blocks[m_dragBlock].startTime;
+    const double newDur  = m_blocks[m_dragBlock].duration;
+
+    m_dragBlock = -1;
+    m_dragMode  = DragMode::None;
+
+    if (mode == DragMode::Move)
         emit childOffsetChanged(flatIdx, newOff);
-    }
+    else if (mode == DragMode::TrimLeft || mode == DragMode::TrimRight)
+        emit childTrimChanged(flatIdx, newOff, newSt, newDur);
 }
 
 void TimelineGroupView::wheelEvent(QWheelEvent* ev) {
     if (ev->modifiers() & Qt::ControlModifier) {
-        // Cmd/Ctrl+scroll → zoom around mouse pivot
         const double steps = ev->angleDelta().y() / 120.0;
         const double pivotSec = pixToSec(ev->position().x());
         m_pixPerSec = std::clamp(m_pixPerSec * std::pow(1.25, steps), 4.0, 8000.0);
         m_viewStart = std::max(0.0, pivotSec - ev->position().x() / m_pixPerSec);
     } else if ((ev->modifiers() & Qt::ShiftModifier) || ev->angleDelta().x() != 0) {
-        // Shift+scroll → horizontal pan (macOS converts Shift+vertical to angleDelta.x)
         const double delta = ev->angleDelta().x() != 0
             ? ev->angleDelta().x() : ev->angleDelta().y();
         const double steps = delta / 120.0;
         const double viewWidth = width() > 0 ? width() / m_pixPerSec : 1.0;
         m_viewStart = std::max(0.0, m_viewStart - steps * viewWidth * 0.3);
     } else {
-        // Plain scroll → vertical lane scroll
         const double steps = ev->angleDelta().y() / 120.0;
         const int n = (int)m_blocks.size();
         const int totalH = kTopPad + n * (kBlockH + kLaneGap);

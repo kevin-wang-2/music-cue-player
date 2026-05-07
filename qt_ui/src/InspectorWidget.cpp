@@ -64,9 +64,9 @@ InspectorWidget::InspectorWidget(AppModel* model, QWidget* parent)
     buildBasicTab();
     buildLevelsTab();
     buildTrimTab();
-    buildTimeTab();
     buildCurveTab();
     buildModeTab();
+    buildTimeTab();
     buildTimelineTab();
 }
 
@@ -274,6 +274,11 @@ void InspectorWidget::buildTimeTab() {
     connect(m_syncGroupView, &SyncGroupView::cueModified, this, [this]() {
         emit cueEdited();
     });
+    connect(m_syncGroupView, &SyncGroupView::rulerClicked, this, [this](double timeSec) {
+        if (m_cueIdx < 0) return;
+        m_model->cues.setCueTimelineArmSec(m_cueIdx, timeSec);
+        emit cueEdited();
+    });
 
     m_tabs->addTab(m_timePage, "Time & Loop");
 
@@ -436,12 +441,22 @@ void InspectorWidget::buildTimelineTab() {
         emit cueEdited();
     });
 
+    connect(m_timelineView, &TimelineGroupView::childTrimChanged,
+            this, [this](int childFlatIdx, double newOffsetSec,
+                         double newStartTimeSec, double newDurationSec) {
+        m_model->pushUndo();
+        m_model->cues.setCueTimelineOffset(childFlatIdx, newOffsetSec);
+        m_model->cues.setCueStartTime(childFlatIdx, newStartTimeSec);
+        m_model->cues.setCueDuration(childFlatIdx, newDurationSec);
+        ShowHelpers::syncSfFromCues(*m_model);
+        emit cueEdited();
+    });
+
     connect(m_timelineView, &TimelineGroupView::rulerClicked,
             this, [this](double timeSec) {
-        // Arm the timeline group at timeSec — stored as a starting offset on the engine.
-        // The visual cursor is already drawn by TimelineGroupView itself.
         if (m_cueIdx < 0) return;
         m_model->cues.setCueTimelineArmSec(m_cueIdx, timeSec);
+        emit cueEdited();   // refresh table so "armed" state appears
     });
 }
 
@@ -494,9 +509,10 @@ void InspectorWidget::updatePlayhead() {
 }
 
 void InspectorWidget::clearTimelineArm() {
-    if (m_timelineView && m_timelinePage &&
-        m_tabs->isTabVisible(m_tabs->indexOf(m_timelinePage)))
+    if (m_timelineView)
         m_timelineView->clearArmCursor();
+    if (m_syncGroupView)
+        m_syncGroupView->clearArmCursor();
 }
 
 int InspectorWidget::currentTabIndex() const {

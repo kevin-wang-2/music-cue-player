@@ -31,6 +31,8 @@ struct GroupData {
     int  syncGeneration{0};  // bumped to invalidate stale slice-end callbacks
     int  syncPlaySlice{0};   // which slice index is currently playing
     int  syncLoopsLeft{-1};  // -1=unset; 0=infinite; N>0=N loops remaining
+    int  syncDevampMode{-1};    // -1=none; 0=next-slice; 1=go-stop; 2=go-keep
+    bool syncDevampPreVamp{false}; // skip next slice if it loops
 };
 
 struct Cue {

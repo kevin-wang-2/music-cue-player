@@ -20,12 +20,14 @@ public:
 
     void setGroupCueIndex(int groupFlatIdx);
     void clearSelMarker();
+    void clearArmCursor();
 
     QSize sizeHint() const override;
 
 signals:
     void markerSelected(int markerIdx);   // -1 = deselected
     void cueModified();                   // model was changed; caller should emit cueEdited()
+    void rulerClicked(double timeSec);    // arm playback position
 
 protected:
     void paintEvent(QPaintEvent*)            override;
@@ -43,6 +45,7 @@ private:
         double      offset{0.0};
         double      duration{0.0};
         double      startTime{0.0};
+        double      fileDur{0.0};
         QString     label;
         std::string audioPath;
     };
@@ -61,6 +64,7 @@ private:
     double pixToSec(double px) const;
     int    secToPix(double sec) const;
     int    laneY(int i) const;
+    void   updateHoverCursor(int px, int py);
     void   startLoopEdit(int sliceIdx, int blX, int brX, const QString& current);
     void   commitLoopEdit();
 
@@ -69,6 +73,7 @@ private:
     static constexpr int kLaneGap = 3;
     static constexpr int kTopPad  = 4;
     static constexpr int kLoopH   = 18;
+    static constexpr int kHandleW = 6;
 
     AppModel* m_model{nullptr};
     int       m_groupIdx{-1};
@@ -80,16 +85,24 @@ private:
     double m_pixPerSec{80.0};
     int    m_laneScrollPx{0};   // vertical scroll offset for the lane area
 
-    // Child block drag
-    int    m_dragBlock{-1};
-    int    m_dragStartX{0};
-    double m_dragStartOffset{0.0};
+    enum class DragMode { None, Move, TrimLeft, TrimRight };
+
+    // Child block drag / selection
+    int       m_selBlock{-1};
+    int       m_dragBlock{-1};
+    DragMode  m_dragMode{DragMode::None};
+    int       m_dragStartX{0};
+    double    m_dragStartOffset{0.0};
+    double    m_dragStartStartTime{0.0};
+    double    m_dragStartDuration{0.0};
 
     // Marker drag: -2 = none, >= 0 = marker index
     int    m_dragMarker{-2};
     double m_dragMarkerOrig{0.0};
     int    m_dragMarkerPxOrig{0};
     int    m_selMarker{-1};
+
+    double m_armSec{-1.0};     // ruler arm cursor position (-1 = none)
 
     // Right-button pan
     double m_panOriginX{0.0};

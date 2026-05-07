@@ -42,16 +42,26 @@ SyncGroupView::SyncGroupView(AppModel* model, QWidget* parent)
 }
 
 void SyncGroupView::setGroupCueIndex(int groupFlatIdx) {
+    const bool groupChanged = (groupFlatIdx != m_groupIdx);
     m_groupIdx     = groupFlatIdx;
     m_dragBlock    = -1;
+    m_dragMode     = DragMode::None;
     m_dragMarker   = -2;
-    m_laneScrollPx = 0;
+    m_selBlock     = -1;
     rebuildBlocks();
-    // Fit view to content on first load
-    const double dur = viewDuration();
-    if (dur > 0.0 && width() > 0)
-        m_pixPerSec = width() / dur;
+    if (groupChanged) {
+        m_laneScrollPx = 0;
+        m_viewStart    = 0.0;
+        const double dur = viewDuration();
+        if (dur > 0.0 && width() > 0)
+            m_pixPerSec = width() / dur;
+    }
     updateGeometry();
+    update();
+}
+
+void SyncGroupView::clearArmCursor() {
+    m_armSec = -1.0;
     update();
 }
 
@@ -110,9 +120,10 @@ void SyncGroupView::rebuildBlocks() {
             b.flatIdx   = i;
             b.offset    = c->timelineOffset;
             b.startTime = c->startTime;
+            b.fileDur   = (c->type == mcp::CueType::Audio)
+                          ? m_model->cues.cueTotalSeconds(i) : 0.0;
             b.duration  = (c->duration > 0.0) ? c->duration
-                        : (c->type == mcp::CueType::Audio
-                           ? m_model->cues.cueTotalSeconds(i) : 2.0);
+                        : (b.fileDur > 0.0 ? b.fileDur - c->startTime : 2.0);
             b.label = QString::fromStdString(
                 c->cueNumber.empty() ? c->name
                                      : (c->cueNumber + (c->name.empty() ? "" : " " + c->name)));
@@ -214,22 +225,24 @@ void SyncGroupView::paintEvent(QPaintEvent*) {
         p.fillRect(0, ly, W, kBlockH, QColor(0x18, 0x18, 0x18));
 
         const bool  isDrag  = (i == m_dragBlock);
-        const QColor fill   = isDrag ? QColor(0x44, 0x88, 0xdd) : QColor(0x28, 0x60, 0xa8);
-        const QColor border = isDrag ? QColor(0x88, 0xcc, 0xff) : QColor(0x44, 0x88, 0xcc);
+        const bool  isSel   = (i == m_selBlock);
+        QColor fill, border;
+        if (isDrag)     { fill = QColor(0x44,0x88,0xdd); border = QColor(0x88,0xcc,0xff); }
+        else if (isSel) { fill = QColor(0x30,0x70,0xc0); border = QColor(0x66,0xaa,0xff); }
+        else            { fill = QColor(0x28,0x60,0xa8); border = QColor(0x44,0x88,0xcc); }
         p.fillRect(x1, ly, bw, kBlockH, fill);
 
-        // Mini waveform thumbnail
+        // Mini waveform thumbnail (below label area)
         if (!b.audioPath.empty()) {
             auto it = m_peakCache.find(b.audioPath);
             if (it != m_peakCache.end() && it->second.valid && it->second.fileDur > 0.0) {
                 const PeakCache& pk = it->second;
                 const int nBuckets = (int)pk.minPk[0].size();
-                const int wTop = ly + 4, wBot = ly + kBlockH - 4;
+                const int wTop = ly + 14, wBot = ly + kBlockH - 3;
                 const int mid  = (wTop + wBot) / 2;
                 const int half = (wBot - wTop) / 2;
                 p.setPen(QPen(QColor(0xaa, 0xdd, 0xff, 0xb0), 1));
-                for (int px2 = x1; px2 < x1 + bw; ++px2) {
-                    if (px2 < 0 || px2 >= W) continue;
+                for (int px2 = std::max(0, x1); px2 < std::min(W, x1 + bw); ++px2) {
                     const double t  = b.startTime + (double)(px2 - x1) / bw * b.duration;
                     const int bi    = std::clamp((int)(t / pk.fileDur * nBuckets), 0, nBuckets - 1);
                     p.drawLine(px2, std::max(wTop, mid - (int)(pk.maxPk[0][bi] * half)),
@@ -238,12 +251,27 @@ void SyncGroupView::paintEvent(QPaintEvent*) {
             }
         }
 
+        // Trim handles
+        p.fillRect(x1,            ly, kHandleW, kBlockH, QColor(255,255,255,25));
+        p.fillRect(x1+bw-kHandleW, ly, kHandleW, kBlockH, QColor(255,255,255,25));
+
         p.setPen(border);
         p.drawRect(x1, ly, bw - 1, kBlockH - 1);
-        p.setClipRect(x1 + 1, ly + 1, bw - 2, kBlockH - 2);
-        p.setPen(Qt::white);
-        p.drawText(x1 + 4, ly, bw - 8, kBlockH, Qt::AlignLeft | Qt::AlignVCenter, b.label);
-        p.setClipping(false);
+
+        // Sticky label + prewait sub-label
+        const int labelX = std::max(x1 + 4, 2);
+        const int labelR = x1 + bw - 2;
+        if (labelR > labelX) {
+            p.save();
+            p.setClipRect(labelX, ly + 1, labelR - labelX, kBlockH - 2, Qt::IntersectClip);
+            p.setPen(Qt::white);
+            p.drawText(labelX, ly, labelR - labelX, kBlockH / 2 + 2,
+                       Qt::AlignLeft | Qt::AlignVCenter, b.label);
+            p.setPen(QColor(180, 210, 255, 180));
+            p.drawText(labelX, ly + kBlockH / 2, labelR - labelX, kBlockH / 2,
+                       Qt::AlignLeft | Qt::AlignVCenter, fmtRulerTick(b.offset));
+            p.restore();
+        }
     }
     p.setClipping(false);
 
@@ -272,6 +300,22 @@ void SyncGroupView::paintEvent(QPaintEvent*) {
         }
     }
 
+    // ── Arm cursor ─────────────────────────────────────────────────────────
+    if (m_armSec >= 0.0) {
+        const int ax = secToPix(m_armSec);
+        if (ax >= 0 && ax < W) {
+            p.setPen(QPen(QColor(0x40, 0xee, 0x80, 0xc0), 1));
+            p.drawLine(ax, kRulerH, ax, loopStripY);
+            QPolygon tri;
+            tri << QPoint(ax, kRulerH)
+                << QPoint(ax - 5, 4)
+                << QPoint(ax + 5, 4);
+            p.setBrush(QColor(0x40, 0xee, 0x80, 0xc0));
+            p.setPen(Qt::NoPen);
+            p.drawPolygon(tri);
+        }
+    }
+
     // ── Loop count strip ───────────────────────────────────────────────────
     p.fillRect(0, loopStripY, W, kLoopH, QColor(14, 16, 24));
     if (group && baseDur > 0.0) {
@@ -296,6 +340,24 @@ void SyncGroupView::paintEvent(QPaintEvent*) {
 
 // ── Mouse ─────────────────────────────────────────────────────────────────────
 
+void SyncGroupView::updateHoverCursor(int px, int py) {
+    const int lsY = height() - kLoopH;
+    for (int i = 0; i < (int)m_blocks.size(); ++i) {
+        const int ly = laneY(i);
+        if (ly + kBlockH <= kRulerH || ly >= lsY) continue;
+        if (py < ly || py >= ly + kBlockH) continue;
+        const int x1 = secToPix(m_blocks[i].offset);
+        const int x2 = secToPix(m_blocks[i].offset + m_blocks[i].duration);
+        if (px < x1 || px > x2) continue;
+        if (px <= x1 + kHandleW || px >= x2 - kHandleW)
+            setCursor(Qt::SizeHorCursor);
+        else
+            setCursor(Qt::SizeAllCursor);
+        return;
+    }
+    unsetCursor();
+}
+
 void SyncGroupView::mousePressEvent(QMouseEvent* ev) {
     const int    px  = ev->pos().x();
     const int    py  = ev->pos().y();
@@ -316,27 +378,49 @@ void SyncGroupView::mousePressEvent(QMouseEvent* ev) {
                         m_selMarker = mi;
                         emit markerSelected(mi);
                     }
+                    m_armSec = group->markers[mi].time;
+                    update();
+                    emit rulerClicked(m_armSec);
                     ev->accept(); return;
                 }
             }
+        }
+
+        // Ruler click (no marker hit) → set arm cursor
+        if (py < kRulerH) {
+            m_armSec = std::max(0.0, pixToSec(px));
+            update();
+            emit rulerClicked(m_armSec);
+            ev->accept(); return;
         }
 
         // Child block drag in lane area
         if (py >= kRulerH && py < lsY) {
             for (int i = 0; i < (int)m_blocks.size(); ++i) {
                 const int ly = laneY(i);
-                if (ly + kBlockH <= kRulerH) continue;  // scrolled above ruler
+                if (ly + kBlockH <= kRulerH) continue;
                 if (ly + kBlockH > lsY) break;
-                if (py >= ly && py < ly + kBlockH) {
-                    const int x1 = secToPix(m_blocks[i].offset);
-                    const int x2 = secToPix(m_blocks[i].offset + m_blocks[i].duration);
-                    if (px >= x1 && px <= x2) {
-                        m_dragBlock       = i;
-                        m_dragStartX      = px;
-                        m_dragStartOffset = m_blocks[i].offset;
-                        ev->accept(); return;
-                    }
-                }
+                if (py < ly || py >= ly + kBlockH) continue;
+                const int x1 = secToPix(m_blocks[i].offset);
+                const int x2 = secToPix(m_blocks[i].offset + m_blocks[i].duration);
+                if (px < x1 || px > x2) continue;
+
+                m_selBlock           = i;
+                m_dragBlock          = i;
+                m_dragStartX         = px;
+                m_dragStartOffset    = m_blocks[i].offset;
+                m_dragStartStartTime = m_blocks[i].startTime;
+                m_dragStartDuration  = m_blocks[i].duration;
+
+                if (px <= x1 + kHandleW)
+                    m_dragMode = DragMode::TrimLeft;
+                else if (px >= x2 - kHandleW)
+                    m_dragMode = DragMode::TrimRight;
+                else
+                    m_dragMode = DragMode::Move;
+
+                update();
+                ev->accept(); return;
             }
         }
 
@@ -356,6 +440,10 @@ void SyncGroupView::mousePressEvent(QMouseEvent* ev) {
 
 void SyncGroupView::mouseMoveEvent(QMouseEvent* ev) {
     const int px = ev->pos().x();
+    const int py = ev->pos().y();
+
+    if (!(ev->buttons() & Qt::LeftButton) && !(ev->buttons() & Qt::RightButton))
+        updateHoverCursor(px, py);
 
     if ((ev->buttons() & Qt::LeftButton) && m_dragMarker >= 0) {
         const double delta = static_cast<double>(px - m_dragMarkerPxOrig) / m_pixPerSec;
@@ -377,7 +465,28 @@ void SyncGroupView::mouseMoveEvent(QMouseEvent* ev) {
 
     if ((ev->buttons() & Qt::LeftButton) && m_dragBlock >= 0) {
         const double delta = static_cast<double>(px - m_dragStartX) / m_pixPerSec;
-        m_blocks[m_dragBlock].offset = std::max(0.0, m_dragStartOffset + delta);
+
+        if (m_dragMode == DragMode::Move) {
+            m_blocks[m_dragBlock].offset = std::max(0.0, m_dragStartOffset + delta);
+        } else if (m_dragMode == DragMode::TrimLeft) {
+            const double newOffset   = std::max(0.0, m_dragStartOffset + delta);
+            const double actualDelta = newOffset - m_dragStartOffset;
+            double newStartTime      = m_dragStartStartTime + actualDelta;
+            double newDuration       = m_dragStartDuration   - actualDelta;
+            const double fileDur     = m_blocks[m_dragBlock].fileDur;
+            if (newStartTime < 0.0) { newDuration += -newStartTime; newStartTime = 0.0; }
+            if (fileDur > 0.0 && newStartTime > fileDur - 0.05) newStartTime = fileDur - 0.05;
+            newDuration = std::max(0.05, newDuration);
+            m_blocks[m_dragBlock].offset    = m_dragStartOffset + (newStartTime - m_dragStartStartTime);
+            m_blocks[m_dragBlock].startTime = newStartTime;
+            m_blocks[m_dragBlock].duration  = newDuration;
+        } else if (m_dragMode == DragMode::TrimRight) {
+            double newDuration = std::max(0.05, m_dragStartDuration + delta);
+            const double fileDur = m_blocks[m_dragBlock].fileDur;
+            if (fileDur > 0.0)
+                newDuration = std::min(newDuration, fileDur - m_blocks[m_dragBlock].startTime);
+            m_blocks[m_dragBlock].duration = newDuration;
+        }
         update();
     }
 
@@ -402,12 +511,22 @@ void SyncGroupView::mouseReleaseEvent(QMouseEvent* ev) {
             update();
         }
         if (m_dragBlock >= 0) {
+            const int    flatIdx = m_blocks[m_dragBlock].flatIdx;
+            const DragMode mode  = m_dragMode;
+            const double newOff  = m_blocks[m_dragBlock].offset;
+            const double newSt   = m_blocks[m_dragBlock].startTime;
+            const double newDur  = m_blocks[m_dragBlock].duration;
+            m_dragBlock = -1;
+            m_dragMode  = DragMode::None;
+
             m_model->pushUndo();
-            m_model->cues.setCueTimelineOffset(m_blocks[m_dragBlock].flatIdx,
-                                               m_blocks[m_dragBlock].offset);
+            m_model->cues.setCueTimelineOffset(flatIdx, newOff);
+            if (mode == DragMode::TrimLeft || mode == DragMode::TrimRight) {
+                m_model->cues.setCueStartTime(flatIdx, newSt);
+                m_model->cues.setCueDuration(flatIdx, newDur);
+            }
             ShowHelpers::syncSfFromCues(*m_model);
             emit cueModified();
-            m_dragBlock = -1;
         }
     }
     ev->accept();
@@ -580,8 +699,7 @@ void SyncGroupView::commitLoopEdit() {
     } else {
         bool ok = false;
         const int v = raw.toInt(&ok);
-        if (!ok || v < 1) { update(); return; }
-        newLc = v;
+        newLc = (ok && v >= 1) ? v : 0;   // non-numeric or out-of-range → infinity
     }
 
     m_model->pushUndo();

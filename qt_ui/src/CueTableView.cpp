@@ -896,7 +896,7 @@ void CueTableView::createGroupFromSelection(const std::vector<int>& rows) {
     // Build a group CueData containing the removed cues as children.
     mcp::ShowFile::CueData groupCd;
     groupCd.type      = "group";
-    groupCd.groupMode = "timeline";
+    groupCd.groupMode = "sync";
     groupCd.cueNumber = ShowHelpers::nextCueNumber(m_model->sf);
     groupCd.name      = "Group";
     groupCd.children  = std::move(children);

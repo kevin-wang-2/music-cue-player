@@ -13,12 +13,14 @@ public:
     explicit TimelineGroupView(AppModel* model, QWidget* parent = nullptr);
 
     void setGroupCueIndex(int groupFlatIdx);
-    void clearArmCursor();   // call after GO fires or Esc clears the arm
+    void clearArmCursor();
 
     QSize sizeHint() const override;
 
 signals:
     void childOffsetChanged(int childFlatIdx, double newOffsetSec);
+    void childTrimChanged(int childFlatIdx, double newOffsetSec,
+                          double newStartTimeSec, double newDurationSec);
     void rulerClicked(double timeSec);
 
 protected:
@@ -34,9 +36,10 @@ private:
         int         flatIdx{-1};
         double      offset{0.0};
         double      duration{0.0};
-        double      startTime{0.0};   // audio file start offset
+        double      startTime{0.0};
+        double      fileDur{0.0};     // total audio file duration (for trim clamping)
         QString     label;
-        std::string audioPath;        // non-empty for Audio cues
+        std::string audioPath;
     };
 
     struct PeakCache {
@@ -47,38 +50,42 @@ private:
         bool   valid{false};
     };
 
+    enum class DragMode { None, Move, TrimLeft, TrimRight };
+
     void   rebuildBlocks();
     void   buildPeaksAsync(const std::string& path);
     double pixToSec(int px) const;
     int    secToPix(double sec) const;
     double viewDuration() const;
     void   updateSnapTargets();
-    int    laneY(int blockIdx) const;  // top-Y of lane i (below ruler)
+    int    laneY(int blockIdx) const;
+    void   updateHoverCursor(int px, int py);
 
     AppModel* m_model{nullptr};
     int       m_groupIdx{-1};
 
     std::vector<ChildBlock> m_blocks;
 
-    // Ruler / geometry constants
     static constexpr int kRulerH  = 20;
-    static constexpr int kBlockH  = 44;   // tall enough for mini waveform
-    static constexpr int kLaneGap = 3;    // vertical gap between lanes
-    static constexpr int kTopPad  = 4;    // gap between ruler and first lane
+    static constexpr int kBlockH  = 44;
+    static constexpr int kLaneGap = 3;
+    static constexpr int kTopPad  = 4;
+    static constexpr int kHandleW = 6;   // trim-handle hit width in px
 
     double m_viewStart{0.0};
     double m_pixPerSec{80.0};
-    int    m_laneScrollPx{0};   // vertical scroll offset for the lane area
+    int    m_laneScrollPx{0};
 
-    // Drag state
-    int    m_dragBlock{-1};
-    int    m_dragStartX{0};
-    double m_dragStartOffset{0.0};
+    int       m_selBlock{-1};
+    int       m_dragBlock{-1};
+    DragMode  m_dragMode{DragMode::None};
+    int       m_dragStartX{0};
+    double    m_dragStartOffset{0.0};
+    double    m_dragStartStartTime{0.0};
+    double    m_dragStartDuration{0.0};
 
     std::vector<double> m_snapTimes;
+    double m_armSec{-1.0};
 
-    double m_armSec{-1.0};   // ruler arm cursor position (-1 = none)
-
-    // Per-path peak cache (shared across group changes)
     std::unordered_map<std::string, PeakCache> m_peakCache;
 };

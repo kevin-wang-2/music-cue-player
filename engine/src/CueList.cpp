@@ -219,18 +219,20 @@ bool CueList::isArmed(int index) const {
         if (s && !s->hasError() && s->isArmed()) return true;
     }
 
-    // Timeline group with arm position set
+    // Timeline or Sync group with arm position set
     if (cue.type == CueType::Group && cue.groupData &&
-        cue.groupData->mode == GroupData::Mode::Timeline &&
+        (cue.groupData->mode == GroupData::Mode::Timeline ||
+         cue.groupData->mode == GroupData::Mode::Sync) &&
         cue.timelineArmSec > 0.0)
         return true;
 
-    // Child of an armed Timeline group that would not be skipped
+    // Child of an armed Timeline/Sync group that would not be skipped
     const int pi = cue.parentIndex;
     if (pi >= 0 && pi < cueCount()) {
         const auto& parent = m_cues[pi];
         if (parent.type == CueType::Group && parent.groupData &&
-            parent.groupData->mode == GroupData::Mode::Timeline &&
+            (parent.groupData->mode == GroupData::Mode::Timeline ||
+             parent.groupData->mode == GroupData::Mode::Sync) &&
             parent.timelineArmSec > 0.0) {
             const double armInto  = parent.timelineArmSec - cue.timelineOffset;
             const double childDur = (cue.duration > 0.0) ? cue.duration
@@ -1155,7 +1157,13 @@ bool CueList::isAnyCuePlaying() const { return m_engine.activeVoiceCount() > 0; 
 
 bool CueList::isCuePlaying(int index) const {
     if (index < 0 || index >= cueCount()) return false;
-    return m_engine.anyVoiceActiveWithTag(index);
+    if (m_engine.anyVoiceActiveWithTag(index)) return true;
+    const auto* cue = cueAt(index);
+    if (cue && cue->type == CueType::Group && cue->childCount > 0) {
+        for (int i = index + 1; i <= index + cue->childCount; ++i)
+            if (m_engine.anyVoiceActiveWithTag(i)) return true;
+    }
+    return false;
 }
 
 bool CueList::isCuePending(int index) const {
@@ -1318,8 +1326,10 @@ void CueList::fireSyncGroup(int gi, double armPos, int64_t originFrame) {
     for (int i = 0; i < numSlices; ++i)
         if (armPos < bounds[i + 1]) { sliceIdx = i; break; }
 
-    // Bump generation → stale callbacks become no-ops
+    // Bump generation → stale callbacks become no-ops; clear devamp flags
     ++g.groupData->syncGeneration;
+    g.groupData->syncDevampMode    = -1;
+    g.groupData->syncDevampPreVamp = false;
     const int gen = g.groupData->syncGeneration;
 
     g.groupData->syncPlaySlice = sliceIdx;
@@ -1391,47 +1401,67 @@ void CueList::fireSyncGroup(int gi, double armPos, int64_t originFrame) {
                     if (loopsLeft > 1) --gd->syncLoopsLeft;
                     stopSyncGroupChildren(gi);
                     fireSyncGroup(gi, bounds[sliceIdx], now);
-                } else if (sliceIdx + 1 < numSlices) {
-                    gd->syncLoopsLeft = -1;
-                    stopSyncGroupChildren(gi);
-                    fireSyncGroup(gi, bounds[sliceIdx + 1], now);
                 } else {
-                    gd->syncLoopsLeft = -1;
-                    if (m_cues[gi].autoFollow) go();
+                    // Last (or only) iteration: execute devamp or natural advance.
+                    const int  devMode = gd->syncDevampMode;
+                    const bool prv     = gd->syncDevampPreVamp;
+                    gd->syncLoopsLeft      = -1;
+                    gd->syncDevampMode     = -1;
+                    gd->syncDevampPreVamp  = false;
+                    stopSyncGroupChildren(gi);
+
+                    if (devMode < 0) {
+                        // Natural end — normal slice advance
+                        if (sliceIdx + 1 < numSlices)
+                            fireSyncGroup(gi, bounds[sliceIdx + 1], now);
+                        else { ++gd->syncGeneration; if (m_cues[gi].autoFollow) go(); }
+                    } else {
+                        // Devamp: choose target slice, honouring prevamp skip
+                        int target = sliceIdx + 1;
+                        if (prv && target < numSlices) {
+                            // Skip target if it is configured to loop
+                            const int cfg = (target < (int)m_cues[gi].sliceLoops.size())
+                                            ? m_cues[gi].sliceLoops[target] : 1;
+                            if (cfg != 1) ++target;
+                        }
+                        const bool hasTarget = (target < numSlices);
+                        if (devMode == 0) {
+                            // Next slice (no go())
+                            if (hasTarget) fireSyncGroup(gi, bounds[target], now);
+                            else ++gd->syncGeneration;
+                        } else if (devMode == 1) {
+                            // Stop group + go()
+                            ++gd->syncGeneration;
+                            go();
+                        } else {
+                            // Keep group (fire target if any) + go()
+                            if (hasTarget) fireSyncGroup(gi, bounds[target], now);
+                            else ++gd->syncGeneration;
+                            go();
+                        }
+                    }
                 }
             },
             "sg-end[" + std::to_string(gi) + "]");
     }
 }
 
-void CueList::devampSyncGroup(int gi, int devampMode, bool /*preVamp*/) {
+void CueList::devampSyncGroup(int gi, int devampMode, bool preVamp) {
     if (gi < 0 || gi >= cueCount()) return;
-    auto& g = m_cues[gi];
-    auto* gd = g.groupData.get();
+    auto* gd = m_cues[gi].groupData.get();
     if (!gd) return;
 
-    const double baseDur = syncGroupBaseDuration(gi);
-    std::vector<double> bounds = {0.0};
-    for (const auto& m : g.markers) bounds.push_back(m.time);
-    if (bounds.back() < baseDur) bounds.push_back(baseDur);
-    const int numSlices = (int)bounds.size() - 1;
-    const int curSlice  = gd->syncPlaySlice;
-    const bool hasNext  = (curSlice + 1 < numSlices);
-    const int64_t now   = m_engine.enginePlayheadFrames();
+    // Always wait for the current slice to finish its iteration.
+    // If the slice is currently looping (infinite or multi), cut to 1 remaining
+    // so the end-of-slice callback fires after this playthrough.
+    const bool isLooping = (gd->syncLoopsLeft == 0 || gd->syncLoopsLeft > 1);
+    if (isLooping) gd->syncLoopsLeft = 1;
 
-    if (devampMode == 0) {
-        stopSyncGroupChildren(gi);
-        if (hasNext) fireSyncGroup(gi, bounds[curSlice + 1], now);
-        else ++gd->syncGeneration;
-    } else {
-        stopSyncGroupChildren(gi);
-        ++gd->syncGeneration;
-        if (devampMode == 2 && hasNext)
-            fireSyncGroup(gi, bounds[curSlice + 1], now);
-        if (m_selectedIndex >= 0 && m_selectedIndex < cueCount())
-            arm(m_selectedIndex);
-        go();
-    }
+    // Store the operation.  Prevamp skip only applies when the current slice
+    // itself is not looping — when in a looping slice, behaviour is identical
+    // to normal devamp (user spec: "在B里devamp发现自己是loop则behavior和普通devamp相同").
+    gd->syncDevampMode    = devampMode;
+    gd->syncDevampPreVamp = preVamp && !isLooping;
 }
 
 // ---------------------------------------------------------------------------
