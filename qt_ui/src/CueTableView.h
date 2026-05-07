@@ -34,6 +34,9 @@ public:
     // Called from MainWindow::onTick() to sync UI when the engine advances selection.
     void syncEngineSelection(int engineIdx);
 
+    // Create a group wrapping the given sorted flat-index selection.
+    void createGroupFromSelection(const std::vector<int>& rows);
+
 signals:
     void rowSelected(int index);     // -1 = none
     void cueListModified();          // structural change — refresh + save
@@ -64,9 +67,15 @@ private:
     void   addCueOfType(const QString& type, int beforeRow, int autoTarget = -1);
     void   deleteRows(const std::vector<int>& rows);
 
+    // Compute the nesting depth (0 = top-level) for the cue at flat index `row`.
+    int cueDepth(int row) const;
+
     AppModel* m_model{nullptr};
     int       m_selRow{-1};
     bool      m_refreshing{false};  // guard against onCellChanged re-entry
+
+    // Flat indices of collapsed group cues.  Their descendants are hidden in the table.
+    std::set<int> m_collapsed;
 
     // Drop indicator state: -1 = inactive.
     // m_dropTargetRow: row whose Target cell to outline (target-setting drop).

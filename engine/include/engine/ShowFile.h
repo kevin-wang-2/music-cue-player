@@ -76,6 +76,15 @@ struct ShowFile {
         std::vector<FadeOutLevel> fadeOutLevels;
         struct FadeXpEntry { int s{0}; int o{0}; bool enabled{false}; float target{0.0f}; };
         std::vector<FadeXpEntry> fadeXpEntries;
+
+        // Group cues
+        std::string groupMode{"timeline"};   // "timeline" | "playlist" | "startfirst"
+        bool        groupRandom{false};      // Playlist: randomise child order
+        // For child cues: position in the parent Timeline (seconds).
+        double      timelineOffset{0.0};
+        // Nested children — populated for group cues only.
+        // Serialised as a recursive JSON array under the key "children".
+        std::vector<CueData> children;
     };
 
     // ---- Cue list ----------------------------------------------------------

@@ -159,7 +159,10 @@ void MainWindow::buildGoBar() {
     m_goBtn->setStyleSheet(kGoBtnStyle);
     m_goBtn->setFixedSize(110, 72);
     m_goBtn->setShortcut(Qt::Key_Space);
-    connect(m_goBtn, &QPushButton::clicked, this, [this]() { m_model->cues.go(); });
+    connect(m_goBtn, &QPushButton::clicked, this, [this]() {
+        m_model->cues.go();
+        m_inspector->clearTimelineArm();
+    });
     hlay->addWidget(m_goBtn);
 
     // Vertical divider
@@ -204,32 +207,62 @@ void MainWindow::buildIconBar() {
     auto addCue = [this](const QString& type) {
         if (m_model->sf.cueLists.empty())
             m_model->sf.cueLists.push_back({});
-        auto& cds = m_model->sf.cueLists[0].cues;
-        mcp::ShowFile::CueData cd;
-        cd.type      = type.toLower().toStdString();
-        cd.cueNumber = ShowHelpers::nextCueNumber(m_model->sf);
 
         const int selRow = m_cueTable->selectedRow();
-        const int ins    = (selRow >= 0) ? selRow + 1 : static_cast<int>(cds.size());
         m_model->pushUndo();
 
+        const std::string typeStr = type.toLower().toStdString();
+
+        if (typeStr == "group") {
+            // Wrap ALL selected rows.  Fall back to selRow-only if nothing multi-selected.
+            std::vector<int> rows;
+            for (const auto& idx : m_cueTable->selectionModel()->selectedRows())
+                rows.push_back(idx.row());
+            std::sort(rows.begin(), rows.end());
+            if (rows.empty() && selRow >= 0) rows.push_back(selRow);
+
+            if (!rows.empty()) {
+                // createGroupFromSelection handles undo, rebuild, refresh, and selection.
+                m_cueTable->createGroupFromSelection(rows);
+            } else {
+                // Nothing selected → empty group at end.
+                mcp::ShowFile::CueData cd;
+                cd.type      = "group";
+                cd.groupMode = "timeline";
+                cd.cueNumber = ShowHelpers::nextCueNumber(m_model->sf);
+                ShowHelpers::sfInsertBefore(m_model->sf, -1, std::move(cd));
+                std::string err;
+                ShowHelpers::rebuildCueList(*m_model, err);
+                onCueListModified();
+                m_cueTable->refresh();
+                m_cueTable->selectRow(m_model->cues.cueCount() - 1);
+            }
+            return;
+        }
+
+        mcp::ShowFile::CueData cd;
+        cd.type      = typeStr;
+        cd.cueNumber = ShowHelpers::nextCueNumber(m_model->sf);
+
         // Auto-assign target for cue types that reference another cue.
-        if (selRow >= 0 && selRow < (int)cds.size()) {
-            const std::string& t = cd.type;
-            if (t == "fade" || t == "start" || t == "stop" || t == "arm" || t == "devamp")
+        if (selRow >= 0) {
+            if (typeStr == "fade" || typeStr == "start" || typeStr == "stop"
+                || typeStr == "arm" || typeStr == "devamp")
                 cd.target = selRow;
         }
 
-        cds.insert(cds.begin() + ins, cd);
+        const int ins = (selRow >= 0) ? selRow + 1 : -1;
+        ShowHelpers::sfInsertBefore(m_model->sf, ins, std::move(cd));
         std::string err;
         ShowHelpers::rebuildCueList(*m_model, err);
         onCueListModified();
         m_cueTable->refresh();
-        m_cueTable->selectRow(ins);
+        m_cueTable->selectRow(selRow >= 0 ? selRow + 1 : m_model->cues.cueCount() - 1);
     };
 
     // Add-cue type buttons
     struct { const char* icon; const char* tip; const char* type; } cueBtns[] = {
+        { "▤",  "Add Group cue",   "group"  },
         { "♫",  "Add Audio cue",   "audio"  },
         { "▷",  "Add Start cue",   "start"  },
         { "□",  "Add Stop cue",    "stop"   },
@@ -253,20 +286,27 @@ void MainWindow::buildIconBar() {
     auto* btnGo = makeIconBtn("▶", "Go  [Space]",
         "QToolButton:hover{background:#1a4d1a;border-color:#2a7a2a;color:#5f5;}"
         "QToolButton:pressed{background:#0f2f0f;}");
-    connect(btnGo, &QToolButton::clicked, this, [this]() { m_model->cues.go(); });
+    connect(btnGo, &QToolButton::clicked, this, [this]() {
+        m_model->cues.go();
+        m_inspector->clearTimelineArm();
+    });
     hlay->addWidget(btnGo);
 
     auto* btnStop = makeIconBtn("■", "Stop selected  [Esc]");
     connect(btnStop, &QToolButton::clicked, this, [this]() {
         const int sel = m_cueTable->selectedRow();
         if (sel >= 0) m_model->cues.stop(sel);
+        m_inspector->clearTimelineArm();
     });
     hlay->addWidget(btnStop);
 
     auto* btnPanic = makeIconBtn("✕", "Panic — stop all  [⇧Esc]",
         "QToolButton:hover{background:#4d1a1a;border-color:#aa2222;color:#f88;}"
         "QToolButton:pressed{background:#2f0f0f;}");
-    connect(btnPanic, &QToolButton::clicked, this, [this]() { m_model->cues.panic(); });
+    connect(btnPanic, &QToolButton::clicked, this, [this]() {
+        m_model->cues.panic();
+        m_inspector->clearTimelineArm();
+    });
     hlay->addWidget(btnPanic);
 
     hlay->addStretch();
@@ -354,7 +394,10 @@ void MainWindow::buildMenuBar() {
     showMenu->addAction("Audio &Device…", this, &MainWindow::onOpenDeviceDialog);
     showMenu->addSeparator();
 
-    auto* actPanic = showMenu->addAction("Panic", this, [this]() { m_model->cues.panic(); });
+    auto* actPanic = showMenu->addAction("Panic", this, [this]() {
+        m_model->cues.panic();
+        m_inspector->clearTimelineArm();
+    });
     actPanic->setShortcut(QKeySequence(Qt::Key_Escape));
 }
 
@@ -569,18 +612,30 @@ void MainWindow::updateCueInfo() {
     const QString name = QString::fromStdString(c->name.empty() ? c->path : c->name);
     m_lblCueName->setText(name.isEmpty() ? "—" : name);
 
-    // Detail line: "Q3 · Audio · 00:56.000"
-    QString detail = QString::fromStdString(c->cueNumber);
-    if (!detail.isEmpty()) detail += "  ·  ";
+    // Detail line: "Q3 · Audio · 00:56.000"  (Group leads: "Group · Q5 · 3 cues")
+    QString detail;
+    const QString cueNum = QString::fromStdString(c->cueNumber);
 
-    switch (c->type) {
-        case mcp::CueType::Audio:  detail += "Audio";  break;
-        case mcp::CueType::Start:  detail += "Start";  break;
-        case mcp::CueType::Stop:   detail += "Stop";   break;
-        case mcp::CueType::Fade:   detail += "Fade";   break;
-        case mcp::CueType::Arm:    detail += "Arm";    break;
-        case mcp::CueType::Devamp: detail += "Devamp"; break;
+    if (c->type == mcp::CueType::Group) {
+        detail = "Group";
+        if (!cueNum.isEmpty()) detail += "  ·  " + cueNum;
+        if (c->childCount > 0)
+            detail += QString("  ·  %1 cue%2").arg(c->childCount)
+                                               .arg(c->childCount == 1 ? "" : "s");
+    } else {
+        detail = cueNum;
+        if (!detail.isEmpty()) detail += "  ·  ";
+        switch (c->type) {
+            case mcp::CueType::Audio:  detail += "Audio";  break;
+            case mcp::CueType::Start:  detail += "Start";  break;
+            case mcp::CueType::Stop:   detail += "Stop";   break;
+            case mcp::CueType::Fade:   detail += "Fade";   break;
+            case mcp::CueType::Arm:    detail += "Arm";    break;
+            case mcp::CueType::Devamp: detail += "Devamp"; break;
+            case mcp::CueType::Group:  break;  // handled above
+        }
     }
+
     if (c->type == mcp::CueType::Audio && c->duration > 0.0)
         detail += "  ·  " + QString::fromStdString(ShowHelpers::fmtDuration(c->duration));
 

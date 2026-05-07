@@ -85,6 +85,13 @@ public:
     bool addDevampCue(int targetIndex, const std::string& name = "", double preWait = 0.0,
                       int devampMode = 0);
 
+    // Append a Group cue header.  The caller must immediately append all child
+    // cues (and nested sub-group cues) after this call.  Once the entire flat
+    // list has been built, call setCueChildCount / setCueParentIndex / setCueTimelineOffset
+    // to wire up the parent-child relationships.
+    bool addGroupCue(GroupData::Mode mode, bool random = false,
+                     const std::string& name = "", double preWait = 0.0);
+
     void clear();
     int  cueCount() const;
 
@@ -115,6 +122,14 @@ public:
     // Devamp cue setters (no-op if cue[index] is not a Devamp cue).
     void setCueDevampMode   (int index, int mode);      // 0/1/2 — see addDevampCue
     void setCueDevampPreVamp(int index, bool enabled);  // skip following looping slices
+
+    // Group structure setters — must be called once the full flat list is built.
+    void setCueParentIndex   (int index, int parentIndex); // flat index of parent group (-1 = top-level)
+    void setCueChildCount    (int index, int childCount);  // total descendant count (not just direct children)
+    void setCueTimelineOffset(int index, double seconds);    // offset within parent Timeline group
+    void setCueTimelineArmSec(int index, double seconds);   // arm start position for Timeline groups
+    void setCueGroupMode     (int index, GroupData::Mode mode);
+    void setCueGroupRandom   (int index, bool random);
 
     // Audio cue routing setters.
     // outCh / srcCh: 0-based channel indices.
@@ -203,9 +218,29 @@ public:
     // Returns 0 for non-audio cues or unloaded files.
     double cueTotalSeconds(int index) const;
 
+    // SyncGroup queries (safe from main thread).
+    double syncGroupBaseDuration(int gi) const;  // max endpoint of direct children
+    double syncGroupTotalSeconds(int gi) const;  // base × slice loops (inf if any ∞ slice)
+    bool   isSyncGroupBroken   (int gi) const;   // any audio child has infinite loops
+
 private:
     bool fire(int cueIndex);
     int64_t scheduleVoice(int cueIndex);
+
+    // Returns the flat index that should become selectedIndex after cue[idx] is fired:
+    //   Group (any mode): idx + childCount + 1  (jump over all descendants)
+    //   Last child of a Group: logicalNext(parentIndex)  (exit the group recursively)
+    //   Otherwise: idx + 1
+    int logicalNext(int idx) const;
+
+    // Fire all children of a Timeline or Playlist group cue at the correct times.
+    // baseOffset is accumulated from ancestor Timeline groups.
+    void fireGroup(int groupIdx, double baseOffset, int64_t originFrame);
+
+    // Sync group helpers.
+    void fireSyncGroup      (int gi, double armPos, int64_t originFrame);
+    void devampSyncGroup    (int gi, int devampMode, bool preVamp);
+    void stopSyncGroupChildren(int gi);
 
     // Build linear routing gains from cue.routing and set them on `reader`.
     // srcCh = reader's native file channel count; outCh = engine.channels().
@@ -231,6 +266,12 @@ private:
     // Accessed only from the main thread — no lock needed.
     struct FollowUp { int watchCueIdx; bool waitForStop; };
     std::vector<FollowUp> m_followUps;
+
+    // Pending playlist sequencing: when watchCueIdx finishes, fire nextCueIdx.
+    // activated is set to true once watchCueIdx starts playing, so that we don't
+    // fire nextCueIdx before watchCueIdx has even started.
+    struct PlaylistFollowUp { int watchCueIdx; int nextCueIdx; bool activated{false}; };
+    std::vector<PlaylistFollowUp> m_playlistFollowUps;
 
     // Protected by m_slotMutex: written by scheduleVoice() / go() (possibly
     // from the scheduler thread), read from any thread.

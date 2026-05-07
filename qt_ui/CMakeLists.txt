@@ -30,6 +30,10 @@ set(QT_UI_SOURCES
     src/CueTableView.cpp
     src/InspectorWidget.h
     src/InspectorWidget.cpp
+    src/TimelineGroupView.h
+    src/TimelineGroupView.cpp
+    src/SyncGroupView.h
+    src/SyncGroupView.cpp
     src/DeviceDialog.h
     src/DeviceDialog.cpp
     src/MainWindow.h

@@ -65,6 +65,15 @@ static ShowFile::CueData parseCue(const json& j) {
         c.sliceLoops.resize(static_cast<size_t>(want));
     }
 
+    // Group cue parameters
+    c.groupMode      = jget<std::string>(j, "groupMode",      "timeline");
+    c.groupRandom    = jget<bool>       (j, "groupRandom",    false);
+    c.timelineOffset = jget<double>     (j, "timelineOffset", 0.0);
+    if (j.contains("children") && j["children"].is_array()) {
+        for (const auto& ch : j["children"])
+            c.children.push_back(parseCue(ch));
+    }
+
     // Devamp cue parameters
     c.devampMode    = jget<int> (j, "devampMode",    0);
     c.devampPreVamp = jget<bool>(j, "devampPreVamp", false);
@@ -117,7 +126,8 @@ static json cueToJson(const ShowFile::CueData& c) {
     j["name"]      = c.name;
     j["preWait"]   = c.preWait;
 
-    if (c.type == "audio" && !c.markers.empty()) {
+    if ((c.type == "audio" || (c.type == "group" && c.groupMode == "sync"))
+        && !c.markers.empty()) {
         json arr = json::array();
         for (const auto& m : c.markers) {
             json mj; mj["time"] = m.time;
@@ -133,8 +143,6 @@ static json cueToJson(const ShowFile::CueData& c) {
             for (int v : c.sliceLoops) la.push_back(v);
             j["sliceLoops"] = la;
         }
-    } else if (!c.markers.empty()) {
-        // Keep markers for non-audio types (should not happen but be safe)
     }
 
     if (c.type == "audio") {
@@ -200,6 +208,19 @@ static json cueToJson(const ShowFile::CueData& c) {
             j["fadeXpEntries"] = arr;
         }
     }
+
+    if (c.type == "group") {
+        j["groupMode"] = c.groupMode;
+        if (c.groupRandom) j["groupRandom"] = true;
+        if (!c.children.empty()) {
+            json arr = json::array();
+            for (const auto& ch : c.children) arr.push_back(cueToJson(ch));
+            j["children"] = arr;
+        }
+    }
+
+    // Child cues inside a Timeline group carry their offset; skip default 0.
+    if (c.timelineOffset != 0.0) j["timelineOffset"] = c.timelineOffset;
 
     if (c.autoContinue) j["autoContinue"] = true;
     if (c.autoFollow)   j["autoFollow"]   = true;

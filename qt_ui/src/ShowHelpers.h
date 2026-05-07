@@ -19,4 +19,17 @@ void syncSfFromCues(AppModel& model);
 void saveShow(AppModel& model);
 void setCueNumberChecked(AppModel& model, int index, const std::string& num);
 
+// Navigate the nested ShowFile cue tree by flat engine index.
+// DFS pre-order matches the engine flat list built by rebuildCueList.
+mcp::ShowFile::CueData*       sfCueAt(mcp::ShowFile& sf, int flatIdx);
+const mcp::ShowFile::CueData* sfCueAt(const mcp::ShowFile& sf, int flatIdx);
+
+// Remove and return the CueData at flatIdx (includes group subtree if group).
+// No-op (returns default) if index is out of range.
+mcp::ShowFile::CueData sfRemoveAt(mcp::ShowFile& sf, int flatIdx);
+
+// Insert cd immediately before the cue at beforeFlatIdx (same parent container).
+// If beforeFlatIdx >= total count, appends to the top-level cues list.
+void sfInsertBefore(mcp::ShowFile& sf, int beforeFlatIdx, mcp::ShowFile::CueData cd);
+
 } // namespace ShowHelpers

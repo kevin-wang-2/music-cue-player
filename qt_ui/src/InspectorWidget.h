@@ -6,7 +6,10 @@
 
 class AppModel;
 class FaderWidget;
+class TimelineGroupView;
 class WaveformView;
+
+class SyncGroupView;
 
 class QCheckBox;
 class QComboBox;
@@ -37,6 +40,8 @@ public:
     void setCueIndex(int idx);
     // Call on timer tick to update the waveform playhead.
     void updatePlayhead();
+    // Clear the timeline arm cursor (call after GO fires or panic/stop).
+    void clearTimelineArm();
 
     int  currentTabIndex() const;
     void restoreTabIndex(int idx);   // restores only if idx is a visible tab
@@ -58,12 +63,16 @@ private:
     void buildTrimTab();
     void buildTimeTab();
     void buildCurveTab();
+    void buildModeTab();
+    void buildTimelineTab();
 
     void loadBasic();
     void loadLevels();
     void loadTrim();
     void loadTime();
     void loadCurve();
+    void loadMode();
+    void loadSyncSection();
 
     void rebuildLevelsForCue();   // re-creates fader layout on cue change
 
@@ -78,11 +87,14 @@ private:
     QWidget*     m_trimPage{nullptr};
     QWidget*     m_timePage{nullptr};
     QWidget*     m_curvePage{nullptr};
+    QWidget*     m_modePage{nullptr};
+    QWidget*     m_timelinePage{nullptr};
 
     // Basic tab controls
     QLineEdit*    m_editNum{nullptr};
     QLineEdit*    m_editName{nullptr};
     QDoubleSpinBox* m_spinPreWait{nullptr};
+    QDoubleSpinBox* m_spinDurationBasic{nullptr};  // shown for Fade/Group (Audio uses Time tab)
     QCheckBox*    m_chkAutoCont{nullptr};
     QCheckBox*    m_chkAutoFollow{nullptr};
     // Devamp-specific
@@ -109,9 +121,13 @@ private:
     FaderWidget*  m_trimFader{nullptr};
 
     // Time & Loop tab
+    QWidget*        m_audioTimeSection{nullptr};  // wrapper for audio-only controls
     QDoubleSpinBox* m_spinStart{nullptr};
     QDoubleSpinBox* m_spinDuration{nullptr};
     WaveformView*   m_waveform{nullptr};
+
+    // SyncGroup visual editor (inside Time & Loop tab)
+    SyncGroupView* m_syncGroupView{nullptr};
 
     // Marker editor (shown when a marker is selected in the waveform)
     QWidget*        m_markerPanel{nullptr};
@@ -123,6 +139,13 @@ private:
     // Curve tab
     QComboBox*    m_comboCurve{nullptr};
     QCheckBox*    m_chkStopWhenDone{nullptr};
+
+    // Mode tab (group cues)
+    QComboBox*    m_comboGroupMode{nullptr};
+    QCheckBox*    m_chkGroupRandom{nullptr};
+
+    // Timeline tab (Timeline group cues)
+    TimelineGroupView* m_timelineView{nullptr};
 
     bool m_loading{false};   // guard re-entrant signals during load
 };

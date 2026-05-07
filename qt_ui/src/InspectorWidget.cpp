@@ -2,6 +2,8 @@
 #include "AppModel.h"
 #include "FaderWidget.h"
 #include "ShowHelpers.h"
+#include "SyncGroupView.h"
+#include "TimelineGroupView.h"
 #include "WaveformView.h"
 
 #include "engine/Cue.h"
@@ -64,6 +66,8 @@ InspectorWidget::InspectorWidget(AppModel* model, QWidget* parent)
     buildTrimTab();
     buildTimeTab();
     buildCurveTab();
+    buildModeTab();
+    buildTimelineTab();
 }
 
 // ── tab builders ───────────────────────────────────────────────────────────
@@ -82,9 +86,16 @@ void InspectorWidget::buildBasicTab() {
     m_chkAutoCont   = new QCheckBox("Auto-continue");
     m_chkAutoFollow = new QCheckBox("Auto-follow");
 
+    m_spinDurationBasic = new QDoubleSpinBox;
+    m_spinDurationBasic->setRange(0.0, 99999.0);
+    m_spinDurationBasic->setDecimals(3);
+    m_spinDurationBasic->setSuffix(" s");
+    m_spinDurationBasic->setSpecialValueText("(to end)");
+
     form->addRow("Cue #:",    m_editNum);
     form->addRow("Name:",     m_editName);
     form->addRow("Pre-wait:", m_spinPreWait);
+    form->addRow("Duration:", m_spinDurationBasic);
 
     auto* flagRow = new QHBoxLayout;
     flagRow->addWidget(m_chkAutoCont);
@@ -126,6 +137,13 @@ void InspectorWidget::buildBasicTab() {
             this, &InspectorWidget::onBasicChanged);
     connect(m_spinArmStart, &QDoubleSpinBox::editingFinished,
             this, &InspectorWidget::onBasicChanged);
+    connect(m_spinDurationBasic, &QDoubleSpinBox::editingFinished, this, [this]() {
+        if (m_loading || m_cueIdx < 0) return;
+        m_model->pushUndo();
+        m_model->cues.setCueDuration(m_cueIdx, m_spinDurationBasic->value());
+        ShowHelpers::syncSfFromCues(*m_model);
+        emit cueEdited();
+    });
 }
 
 void InspectorWidget::buildLevelsTab() {
@@ -181,6 +199,12 @@ void InspectorWidget::buildTimeTab() {
     lay->setContentsMargins(8, 8, 8, 8);
     lay->setSpacing(6);
 
+    // ── Audio-only section (start/duration/waveform) ────────────────────────
+    m_audioTimeSection = new QWidget(content);
+    auto* audioLay = new QVBoxLayout(m_audioTimeSection);
+    audioLay->setContentsMargins(0, 0, 0, 0);
+    audioLay->setSpacing(6);
+
     auto* form = new QFormLayout;
     form->setSpacing(4);
 
@@ -197,12 +221,19 @@ void InspectorWidget::buildTimeTab() {
 
     form->addRow("Start:", m_spinStart);
     form->addRow("Duration:", m_spinDuration);
-    lay->addLayout(form);
+    audioLay->addLayout(form);
 
-    m_waveform = new WaveformView(m_model, content);
-    lay->addWidget(m_waveform, 1);
+    m_waveform = new WaveformView(m_model, m_audioTimeSection);
+    audioLay->addWidget(m_waveform, 1);
 
-    // ── Marker editor panel ──────────────────────────────────────────────
+    lay->addWidget(m_audioTimeSection, 1);
+
+    // ── SyncGroup visual editor ──────────────────────────────────────────────
+    m_syncGroupView = new SyncGroupView(m_model, content);
+    m_syncGroupView->hide();
+    lay->addWidget(m_syncGroupView, 1);
+
+    // ── Marker editor panel (shared by audio and SyncGroup) ──────────────────
     m_markerPanel = new QGroupBox("Marker", content);
     auto* mform = new QFormLayout(m_markerPanel);
     mform->setSpacing(4);
@@ -222,6 +253,27 @@ void InspectorWidget::buildTimeTab() {
     mform->addRow("Name:", m_markerNameEdit);
     m_markerPanel->hide();
     lay->addWidget(m_markerPanel);
+
+    // SyncGroupView signals
+    connect(m_syncGroupView, &SyncGroupView::markerSelected, this, [this](int mi) {
+        if (mi < 0 || m_cueIdx < 0) {
+            m_selMarker = -1;
+            m_markerPanel->hide();
+            return;
+        }
+        const mcp::Cue* c = m_model->cues.cueAt(m_cueIdx);
+        if (!c || mi >= (int)c->markers.size()) { m_markerPanel->hide(); return; }
+        m_selMarker = mi;
+        m_loading = true;
+        m_markerLabel->setText(QString("Marker %1").arg(mi + 1));
+        m_markerTimeSpin->setValue(c->markers[mi].time);
+        m_markerNameEdit->setText(QString::fromStdString(c->markers[mi].name));
+        m_loading = false;
+        m_markerPanel->show();
+    });
+    connect(m_syncGroupView, &SyncGroupView::cueModified, this, [this]() {
+        emit cueEdited();
+    });
 
     m_tabs->addTab(m_timePage, "Time & Loop");
 
@@ -268,6 +320,7 @@ void InspectorWidget::buildTimeTab() {
         m_model->pushUndo();
         m_model->cues.setCueMarkerTime(m_cueIdx, m_selMarker, m_markerTimeSpin->value());
         ShowHelpers::syncSfFromCues(*m_model);
+        if (m_syncGroupView->isVisible()) m_syncGroupView->update();
         emit cueEdited();
     });
 
@@ -278,6 +331,7 @@ void InspectorWidget::buildTimeTab() {
         m_model->cues.setCueMarkerName(m_cueIdx, m_selMarker,
                                         m_markerNameEdit->text().toStdString());
         ShowHelpers::syncSfFromCues(*m_model);
+        if (m_syncGroupView->isVisible()) m_syncGroupView->update();
         emit cueEdited();
     });
 }
@@ -315,6 +369,82 @@ void InspectorWidget::buildCurveTab() {
     });
 }
 
+void InspectorWidget::buildModeTab() {
+    m_modePage = new QWidget;
+    auto* form = new QFormLayout(m_modePage);
+    form->setContentsMargins(8, 8, 8, 8);
+    form->setSpacing(6);
+
+    m_comboGroupMode = new QComboBox;
+    m_comboGroupMode->addItem("Timeline",           static_cast<int>(mcp::GroupData::Mode::Timeline));
+    m_comboGroupMode->addItem("Playlist",           static_cast<int>(mcp::GroupData::Mode::Playlist));
+    m_comboGroupMode->addItem("Start First & Enter",static_cast<int>(mcp::GroupData::Mode::StartFirst));
+    m_comboGroupMode->addItem("Synchronization",    static_cast<int>(mcp::GroupData::Mode::Sync));
+    form->addRow("Mode:", m_comboGroupMode);
+
+    m_chkGroupRandom = new QCheckBox("Random order (Playlist only)");
+    form->addRow("", m_chkGroupRandom);
+
+    m_tabs->addTab(m_modePage, "Mode");
+
+    connect(m_comboGroupMode, QOverload<int>::of(&QComboBox::currentIndexChanged),
+            this, [this](int) {
+        if (m_loading || m_cueIdx < 0) return;
+        const mcp::Cue* c = m_model->cues.cueAt(m_cueIdx);
+        if (!c || !c->groupData) return;
+        m_model->pushUndo();
+        auto mode = static_cast<mcp::GroupData::Mode>(
+            m_comboGroupMode->currentData().toInt());
+        m_model->cues.setCueGroupMode(m_cueIdx, mode);
+        ShowHelpers::syncSfFromCues(*m_model);
+        // Show/hide Time and Timeline tabs based on new mode
+        const bool isTimeline = (mode == mcp::GroupData::Mode::Timeline);
+        const bool isSyncMode = (mode == mcp::GroupData::Mode::Sync);
+        m_tabs->setTabVisible(m_tabs->indexOf(m_timePage),     isSyncMode);
+        m_tabs->setTabVisible(m_tabs->indexOf(m_timelinePage), isTimeline);
+        m_chkGroupRandom->setEnabled(mode == mcp::GroupData::Mode::Playlist);
+        if (isSyncMode) loadTime();
+        emit cueEdited();
+    });
+
+    connect(m_chkGroupRandom, &QCheckBox::toggled, this, [this](bool v) {
+        if (m_loading || m_cueIdx < 0) return;
+        m_model->pushUndo();
+        m_model->cues.setCueGroupRandom(m_cueIdx, v);
+        ShowHelpers::syncSfFromCues(*m_model);
+        emit cueEdited();
+    });
+}
+
+void InspectorWidget::buildTimelineTab() {
+    m_timelinePage = new QWidget;
+    auto* lay = new QVBoxLayout(m_timelinePage);
+    lay->setContentsMargins(0, 0, 0, 0);
+    lay->setSpacing(0);
+
+    m_timelineView = new TimelineGroupView(m_model, m_timelinePage);
+    lay->addWidget(m_timelineView);
+    lay->addStretch(1);
+
+    m_tabs->addTab(m_timelinePage, "Timeline");
+
+    connect(m_timelineView, &TimelineGroupView::childOffsetChanged,
+            this, [this](int childFlatIdx, double newOffsetSec) {
+        m_model->pushUndo();
+        m_model->cues.setCueTimelineOffset(childFlatIdx, newOffsetSec);
+        ShowHelpers::syncSfFromCues(*m_model);
+        emit cueEdited();
+    });
+
+    connect(m_timelineView, &TimelineGroupView::rulerClicked,
+            this, [this](double timeSec) {
+        // Arm the timeline group at timeSec — stored as a starting offset on the engine.
+        // The visual cursor is already drawn by TimelineGroupView itself.
+        if (m_cueIdx < 0) return;
+        m_model->cues.setCueTimelineArmSec(m_cueIdx, timeSec);
+    });
+}
+
 // ── public API ─────────────────────────────────────────────────────────────
 
 void InspectorWidget::setCueIndex(int idx) {
@@ -324,23 +454,36 @@ void InspectorWidget::setCueIndex(int idx) {
 
     const mcp::Cue* c = (idx >= 0) ? m_model->cues.cueAt(idx) : nullptr;
 
-    const bool isAudio  = c && c->type == mcp::CueType::Audio;
-    const bool isFade   = c && c->type == mcp::CueType::Fade;
-    const bool isDevamp = c && c->type == mcp::CueType::Devamp;
-    const bool isArm    = c && c->type == mcp::CueType::Arm;
+    const bool isAudio    = c && c->type == mcp::CueType::Audio;
+    const bool isFade     = c && c->type == mcp::CueType::Fade;
+    const bool isDevamp   = c && c->type == mcp::CueType::Devamp;
+    const bool isArm      = c && c->type == mcp::CueType::Arm;
+    const bool isGroup    = c && c->type == mcp::CueType::Group;
+    const bool isSyncGroup = isGroup && c->groupData &&
+                             c->groupData->mode == mcp::GroupData::Mode::Sync;
+    const bool isTimeline  = isGroup && c->groupData &&
+                             c->groupData->mode == mcp::GroupData::Mode::Timeline;
 
-    m_tabs->setTabVisible(m_tabs->indexOf(m_levelsPage), isAudio || isFade);
-    m_tabs->setTabVisible(m_tabs->indexOf(m_trimPage),   isAudio);
-    m_tabs->setTabVisible(m_tabs->indexOf(m_timePage),   isAudio);
-    m_tabs->setTabVisible(m_tabs->indexOf(m_curvePage),  isFade);
+    m_tabs->setTabVisible(m_tabs->indexOf(m_levelsPage),   isAudio || isFade);
+    m_tabs->setTabVisible(m_tabs->indexOf(m_trimPage),     isAudio);
+    m_tabs->setTabVisible(m_tabs->indexOf(m_timePage),     isAudio || isSyncGroup);
+    m_tabs->setTabVisible(m_tabs->indexOf(m_curvePage),    isFade);
+    m_tabs->setTabVisible(m_tabs->indexOf(m_modePage),     isGroup);
+    m_tabs->setTabVisible(m_tabs->indexOf(m_timelinePage), isTimeline);
 
+    m_spinDurationBasic->setVisible(true);
     m_devampGroup->setVisible(isDevamp);
     m_armGroup->setVisible(isArm);
 
     loadBasic();
     if (isAudio || isFade) rebuildLevelsForCue();
     if (isAudio) { loadTrim(); loadTime(); }
+    if (isSyncGroup) loadTime();
     if (isFade)  loadCurve();
+    if (isGroup) {
+        loadMode();
+        if (isTimeline) m_timelineView->setGroupCueIndex(idx);
+    }
 
     m_markerPanel->hide();
     m_loading = false;
@@ -348,6 +491,12 @@ void InspectorWidget::setCueIndex(int idx) {
 
 void InspectorWidget::updatePlayhead() {
     if (m_waveform) m_waveform->updatePlayhead();
+}
+
+void InspectorWidget::clearTimelineArm() {
+    if (m_timelineView && m_timelinePage &&
+        m_tabs->isTabVisible(m_tabs->indexOf(m_timelinePage)))
+        m_timelineView->clearArmCursor();
 }
 
 int InspectorWidget::currentTabIndex() const {
@@ -381,6 +530,10 @@ void InspectorWidget::loadBasic() {
     m_editNum->setText(QString::fromStdString(c->cueNumber));
     m_editName->setText(QString::fromStdString(c->name));
     m_spinPreWait->setValue(c->preWaitSeconds);
+    // Fade cues treat stored duration=0 as "use 3 s default" — show the real value.
+    const double effectiveDur = (c->type == mcp::CueType::Fade && c->duration == 0.0)
+                                ? 3.0 : c->duration;
+    m_spinDurationBasic->setValue(effectiveDur);
     m_chkAutoCont->setChecked(c->autoContinue);
     m_chkAutoFollow->setChecked(c->autoFollow);
     if (c->type == mcp::CueType::Devamp) {
@@ -398,6 +551,21 @@ void InspectorWidget::loadTrim() {
 
 void InspectorWidget::loadTime() {
     const mcp::Cue* c = (m_cueIdx >= 0) ? m_model->cues.cueAt(m_cueIdx) : nullptr;
+
+    const bool isSyncGroup = c && c->type == mcp::CueType::Group && c->groupData &&
+                             c->groupData->mode == mcp::GroupData::Mode::Sync;
+
+    if (isSyncGroup) {
+        m_audioTimeSection->hide();
+        m_syncGroupView->show();
+        m_markerPanel->hide();
+        loadSyncSection();
+        return;
+    }
+
+    m_audioTimeSection->show();
+    m_syncGroupView->hide();
+
     if (!c) {
         m_spinStart->setValue(0.0);
         m_spinDuration->setValue(0.0);
@@ -407,6 +575,10 @@ void InspectorWidget::loadTime() {
     m_spinStart->setValue(c->startTime);
     m_spinDuration->setValue(c->duration);
     m_waveform->setCueIndex(m_cueIdx);
+}
+
+void InspectorWidget::loadSyncSection() {
+    m_syncGroupView->setGroupCueIndex(m_cueIdx);
 }
 
 void InspectorWidget::loadCurve() {
@@ -419,6 +591,21 @@ void InspectorWidget::loadCurve() {
     m_comboCurve->setCurrentIndex(
         c->fadeData->curve == mcp::FadeData::Curve::EqualPower ? 1 : 0);
     m_chkStopWhenDone->setChecked(c->fadeData->stopWhenDone);
+}
+
+void InspectorWidget::loadMode() {
+    const mcp::Cue* c = (m_cueIdx >= 0) ? m_model->cues.cueAt(m_cueIdx) : nullptr;
+    if (!c || !c->groupData) return;
+
+    const auto mode = c->groupData->mode;
+    for (int i = 0; i < m_comboGroupMode->count(); ++i) {
+        if (m_comboGroupMode->itemData(i).toInt() == static_cast<int>(mode)) {
+            m_comboGroupMode->setCurrentIndex(i);
+            break;
+        }
+    }
+    m_chkGroupRandom->setChecked(c->groupData->random);
+    m_chkGroupRandom->setEnabled(mode == mcp::GroupData::Mode::Playlist);
 }
 
 // ── rebuildLevelsForCue ────────────────────────────────────────────────────

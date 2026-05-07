@@ -77,7 +77,15 @@ double WaveformView::xToSec(double x) const {
 }
 
 QString WaveformView::fmtTick(double s) const {
-    return QString::fromStdString(ShowHelpers::fmtTime(s));
+    if (s < 0.0) s = 0.0;
+    const int t100 = static_cast<int>(std::round(s * 100.0));
+    const int cs   = t100 % 100;
+    const int sec  = (t100 / 100) % 60;
+    const int min  = t100 / 6000;
+    char buf[24];
+    if (min > 0) std::snprintf(buf, sizeof(buf), "%d:%02d", min, sec);
+    else         std::snprintf(buf, sizeof(buf), "%d.%02d", sec, cs);
+    return QString(buf);
 }
 
 // ---------------------------------------------------------------------------
@@ -471,15 +479,30 @@ void WaveformView::mouseDoubleClickEvent(QMouseEvent* ev) {
 }
 
 void WaveformView::wheelEvent(QWheelEvent* ev) {
-    const double pivot = xToSec(ev->position().x());
-    const double steps = ev->angleDelta().y() / 120.0;
-    const double factor = std::pow(0.8, steps);
     const double fd = m_peaks.valid ? m_peaks.fileDur : 1.0;
-    m_viewDur = std::clamp(m_viewDur * factor, 0.05, fd > 0 ? fd : 60.0);
-    m_viewStart = pivot - (pivot - m_viewStart) * factor;
-    m_viewStart = std::clamp(m_viewStart, 0.0, std::max(0.0, fd - m_viewDur));
-    update();
-    ev->accept();
+    if (ev->modifiers() & Qt::ControlModifier) {
+        // Cmd/Ctrl+scroll → zoom around mouse pivot
+        const double steps  = ev->angleDelta().y() / 120.0;
+        const double pivot  = xToSec(ev->position().x());
+        const double factor = std::pow(0.8, steps);
+        m_viewDur   = std::clamp(m_viewDur * factor, 0.05, fd > 0 ? fd : 60.0);
+        m_viewStart = pivot - (pivot - m_viewStart) * factor;
+        m_viewStart = std::clamp(m_viewStart, 0.0, std::max(0.0, fd - m_viewDur));
+        update();
+        ev->accept();
+    } else if ((ev->modifiers() & Qt::ShiftModifier) || ev->angleDelta().x() != 0) {
+        // Shift+scroll → horizontal pan (macOS converts Shift+vertical to angleDelta.x)
+        const double delta = ev->angleDelta().x() != 0
+            ? ev->angleDelta().x() : ev->angleDelta().y();
+        const double steps = delta / 120.0;
+        const double shift = steps * m_viewDur * 0.3;
+        m_viewStart = std::clamp(m_viewStart - shift, 0.0, std::max(0.0, fd - m_viewDur));
+        update();
+        ev->accept();
+    } else {
+        // Plain scroll → pass to parent (scroll area) for vertical scrolling
+        ev->ignore();
+    }
 }
 
 void WaveformView::contextMenuEvent(QContextMenuEvent* ev) {

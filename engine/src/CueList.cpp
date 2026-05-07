@@ -139,6 +139,22 @@ bool CueList::addDevampCue(int targetIndex, const std::string& name, double preW
     return true;
 }
 
+bool CueList::addGroupCue(GroupData::Mode mode, bool random,
+                           const std::string& name, double preWait) {
+    Cue cue;
+    cue.type           = CueType::Group;
+    cue.preWaitSeconds = preWait;
+    cue.name           = name.empty() ? "Group" : name;
+    cue.groupData      = std::make_unique<GroupData>();
+    cue.groupData->mode   = mode;
+    cue.groupData->random = random;
+    m_cues.push_back(std::move(cue));
+    std::lock_guard<std::mutex> lk(m_slotMutex);
+    m_lastSlot.push_back(-1);
+    m_pendingEventId.push_back(-1);
+    return true;
+}
+
 void CueList::clear() {
     panic();
     // Signal all active I/O threads to stop early.
@@ -194,14 +210,42 @@ void CueList::disarm(int index) {
 
 bool CueList::isArmed(int index) const {
     if (index < 0 || index >= cueCount()) return false;
-    std::lock_guard<std::mutex> lk(m_slotMutex);
-    const auto& s = m_cues[index].armedStream;
-    return s && !s->hasError() && s->isArmed();
+    const auto& cue = m_cues[index];
+
+    // Audio cue with pre-buffered stream
+    if (cue.type == CueType::Audio) {
+        std::lock_guard<std::mutex> lk(m_slotMutex);
+        const auto& s = cue.armedStream;
+        if (s && !s->hasError() && s->isArmed()) return true;
+    }
+
+    // Timeline group with arm position set
+    if (cue.type == CueType::Group && cue.groupData &&
+        cue.groupData->mode == GroupData::Mode::Timeline &&
+        cue.timelineArmSec > 0.0)
+        return true;
+
+    // Child of an armed Timeline group that would not be skipped
+    const int pi = cue.parentIndex;
+    if (pi >= 0 && pi < cueCount()) {
+        const auto& parent = m_cues[pi];
+        if (parent.type == CueType::Group && parent.groupData &&
+            parent.groupData->mode == GroupData::Mode::Timeline &&
+            parent.timelineArmSec > 0.0) {
+            const double armInto  = parent.timelineArmSec - cue.timelineOffset;
+            const double childDur = (cue.duration > 0.0) ? cue.duration
+                : (cue.type == CueType::Audio ? cueTotalSeconds(index) : 2.0);
+            return armInto < childDur;  // would fire (not entirely past arm point)
+        }
+    }
+
+    return false;
 }
 
 void CueList::softPanic(double fadeSecs) {
     m_scheduler.cancelAll();
     m_followUps.clear();
+    m_playlistFollowUps.clear();
     for (auto& s : m_slotStream)
         if (s) s->requestStop();
     m_engine.softPanic(fadeSecs);
@@ -215,6 +259,23 @@ void CueList::softPanic(double fadeSecs) {
 }
 
 void CueList::update() {
+    // Process playlist follow-ups: fire the next child once the watched child finishes.
+    for (auto it = m_playlistFollowUps.begin(); it != m_playlistFollowUps.end(); ) {
+        if (!it->activated) {
+            // Wait until the watched cue actually starts playing before monitoring.
+            if (isCuePlaying(it->watchCueIdx) || isCuePending(it->watchCueIdx))
+                it->activated = true;
+            ++it;
+        } else if (!isCuePlaying(it->watchCueIdx) && !isCuePending(it->watchCueIdx)) {
+            const int next = it->nextCueIdx;
+            it = m_playlistFollowUps.erase(it);
+            if (next >= 0 && next < cueCount())
+                fire(next);
+        } else {
+            ++it;
+        }
+    }
+
     // Process devamp follow-ups: fire the next cue when the trigger condition fires.
     for (auto it = m_followUps.begin(); it != m_followUps.end(); ) {
         bool triggered = false;
@@ -291,6 +352,17 @@ void CueList::setCueTarget(int i, int targetIdx) {
 
 void CueList::setCueDevampMode   (int i, int mode) { if (i>=0&&i<cueCount()&&m_cues[i].type==CueType::Devamp) m_cues[i].devampMode    = mode; }
 void CueList::setCueDevampPreVamp(int i, bool v)   { if (i>=0&&i<cueCount()&&m_cues[i].type==CueType::Devamp) m_cues[i].devampPreVamp = v; }
+
+void CueList::setCueParentIndex   (int i, int p)   { if (i>=0&&i<cueCount()) m_cues[i].parentIndex    = p; }
+void CueList::setCueChildCount    (int i, int c)   { if (i>=0&&i<cueCount()) m_cues[i].childCount     = c; }
+void CueList::setCueTimelineOffset(int i, double s){ if (i>=0&&i<cueCount()) m_cues[i].timelineOffset  = s; }
+void CueList::setCueTimelineArmSec(int i, double s){ if (i>=0&&i<cueCount()) m_cues[i].timelineArmSec = s; }
+void CueList::setCueGroupMode(int i, GroupData::Mode m) {
+    if (i>=0&&i<cueCount()&&m_cues[i].groupData) m_cues[i].groupData->mode = m;
+}
+void CueList::setCueGroupRandom(int i, bool r) {
+    if (i>=0&&i<cueCount()&&m_cues[i].groupData) m_cues[i].groupData->random = r;
+}
 
 // ---------------------------------------------------------------------------
 // Routing setters
@@ -532,6 +604,115 @@ static int64_t voiceFrames(const Cue& cue) {
         : avail;
 }
 
+int CueList::logicalNext(int idx) const {
+    if (idx < 0 || idx >= cueCount()) return cueCount();
+    const auto& cue = m_cues[idx];
+
+    // A Group cue: skip over all its descendants in one step.
+    if (cue.type == CueType::Group) {
+        return idx + cue.childCount + 1;
+    }
+
+    // A child cue: check if it is the last descendant of its parent group.
+    if (cue.parentIndex >= 0 && cue.parentIndex < cueCount()) {
+        const int pi       = cue.parentIndex;
+        const int lastDesc = pi + m_cues[pi].childCount;
+        if (idx == lastDesc) {
+            // Exit the group — recurse to handle nested groups.
+            return logicalNext(pi);
+        }
+    }
+
+    return idx + 1;
+}
+
+// ---------------------------------------------------------------------------
+// Group execution helpers
+
+void CueList::fireGroup(int groupIdx, double baseOffset, int64_t originFrame) {
+    if (groupIdx < 0 || groupIdx >= cueCount()) return;
+    const auto& group = m_cues[groupIdx];
+    if (!group.groupData) return;
+    if (group.childCount == 0) return;
+
+    const bool isPlaylist = (group.groupData->mode == GroupData::Mode::Playlist);
+
+    // Collect direct children (those whose parentIndex == groupIdx).
+    std::vector<int> directChildren;
+    for (int i = groupIdx + 1; i <= groupIdx + group.childCount; ) {
+        if (m_cues[i].parentIndex == groupIdx) {
+            directChildren.push_back(i);
+            // Jump over this child's descendants (if it is itself a group).
+            const int cc = (m_cues[i].type == CueType::Group) ? m_cues[i].childCount : 0;
+            i += cc + 1;
+        } else {
+            ++i;
+        }
+    }
+    if (directChildren.empty()) return;
+
+    if (isPlaylist) {
+        // Optionally randomise child order.
+        if (group.groupData->random) {
+            for (int i = (int)directChildren.size() - 1; i > 0; --i) {
+                const int j = std::rand() % (i + 1);
+                std::swap(directChildren[i], directChildren[j]);
+            }
+        }
+        // Register follow-ups: after child[i] finishes, fire child[i+1].
+        for (int i = 0; i + 1 < (int)directChildren.size(); ++i)
+            m_playlistFollowUps.push_back({directChildren[i], directChildren[i + 1], false});
+        // Fire the first child immediately (baseOffset not used for playlist).
+        fire(directChildren[0]);
+    } else {
+        // Timeline mode.
+        // baseOffset = timelineArmSec: how many seconds into the timeline we are starting.
+        // For each child:
+        //   armInto  = baseOffset - child.timelineOffset
+        //            > 0  → child has already started; seek audio by armInto, fire now
+        //            = 0  → child starts exactly now, fire now
+        //            < 0  → child starts in the future, schedule after -armInto secs
+        //   if armInto >= childDuration → child is fully past, skip
+        for (int ci : directChildren) {
+            const double childTL  = m_cues[ci].timelineOffset;
+            const double armInto  = baseOffset - childTL;          // how far into child we are
+
+            // Effective duration: stored, or derived for audio, or a safe fallback.
+            const double childDur = (m_cues[ci].duration > 0.0) ? m_cues[ci].duration
+                : (m_cues[ci].type == CueType::Audio ? cueTotalSeconds(ci) : 2.0);
+
+            if (armInto >= childDur) continue;   // entirely in the past — skip
+
+            const double fireDelay = std::max(0.0, -armInto);   // seconds until child starts
+
+            if (m_cues[ci].type == CueType::Group && m_cues[ci].groupData) {
+                // Nested group: recurse with the arm position relative to that group's origin.
+                const double nestedArm = std::max(0.0, armInto);
+                if (fireDelay > 0.0)
+                    m_scheduler.scheduleFromFrame(originFrame, fireDelay,
+                        [this, ci, nestedArm, originFrame]() {
+                            fireGroup(ci, nestedArm, originFrame);
+                        }, "tl-group[" + std::to_string(ci) + "]");
+                else
+                    fireGroup(ci, nestedArm, originFrame);
+            } else if (fireDelay > 0.0) {
+                // Child hasn't started yet — schedule at the right moment.
+                m_scheduler.scheduleFromFrame(originFrame, fireDelay,
+                    [this, ci]() { fire(ci); },
+                    "tl-child[" + std::to_string(ci) + "]");
+            } else if (armInto > 0.0 && m_cues[ci].type == CueType::Audio) {
+                // Child is mid-play — seek into the audio file by armInto seconds.
+                const double origStart = m_cues[ci].startTime;
+                m_cues[ci].startTime = origStart + armInto;
+                fire(ci);
+                m_cues[ci].startTime = origStart;
+            } else {
+                fire(ci);
+            }
+        }
+    }
+}
+
 int64_t CueList::scheduleVoice(int cueIndex) {
     const auto& cue = m_cues[cueIndex];
 
@@ -593,11 +774,23 @@ bool CueList::fire(int idx) {
             break;
         }
 
-        case CueType::Stop:
-            m_engine.clearVoicesByTag(cue.targetIndex);
-            result = true;
-            // followFrames = 0 → autoFollow fires in the next scheduler poll
+        case CueType::Stop: {
+            const int ti = cue.targetIndex;
+            // Block stop if the target is a direct child of a SyncGroup
+            bool blocked = false;
+            if (ti >= 0 && ti < cueCount()) {
+                const int pi = m_cues[ti].parentIndex;
+                blocked = (pi >= 0 && pi < cueCount() &&
+                           m_cues[pi].type == CueType::Group &&
+                           m_cues[pi].groupData &&
+                           m_cues[pi].groupData->mode == GroupData::Mode::Sync);
+            }
+            if (!blocked) {
+                m_engine.clearVoicesByTag(ti);
+                result = true;
+            }
             break;
+        }
 
         case CueType::Arm: {
             const int ti = cue.targetIndex;
@@ -612,6 +805,14 @@ bool CueList::fire(int idx) {
         case CueType::Devamp: {
             const int ti = cue.targetIndex;
             if (ti < 0 || ti >= cueCount()) break;
+
+            // SyncGroup devamp: advance slice without using StreamReader
+            if (m_cues[ti].type == CueType::Group && m_cues[ti].groupData &&
+                m_cues[ti].groupData->mode == GroupData::Mode::Sync) {
+                devampSyncGroup(ti, cue.devampMode, cue.devampPreVamp);
+                result = true;
+                break;
+            }
 
             // Get the raw StreamReader pointer for the target cue's active voice.
             // Obtained under the mutex; valid as long as the voice stays active.
@@ -737,13 +938,25 @@ bool CueList::fire(int idx) {
 
                         // Master level fade — apply to live voice gain only
                         if (fd->masterLevel.enabled) {
-                            const float amp  = interpAmp(fd->masterLevelStartDb,
-                                                          fd->masterLevel.targetDb);
-                            const auto& tc2  = m_cues[static_cast<size_t>(tIdx)];
-                            const int   slot = cueVoiceSlot(tIdx);
-                            if (slot >= 0 && m_engine.isVoiceActive(slot))
-                                m_engine.setVoiceGain(slot, levelGain(lut::linearToDB(amp),
-                                                                        tc2.trim));
+                            const float amp = interpAmp(fd->masterLevelStartDb,
+                                                         fd->masterLevel.targetDb);
+                            const auto& tc2 = m_cues[static_cast<size_t>(tIdx)];
+                            if (tc2.type == CueType::Group) {
+                                // Fade all Audio descendants of the group
+                                for (int di = tIdx + 1;
+                                     di <= tIdx + tc2.childCount && di < cueCount(); ++di) {
+                                    if (m_cues[di].type != CueType::Audio) continue;
+                                    const int ds = cueVoiceSlot(di);
+                                    if (ds >= 0 && m_engine.isVoiceActive(ds))
+                                        m_engine.setVoiceGain(ds,
+                                            levelGain(lut::linearToDB(amp), m_cues[di].trim));
+                                }
+                            } else {
+                                const int slot = cueVoiceSlot(tIdx);
+                                if (slot >= 0 && m_engine.isVoiceActive(slot))
+                                    m_engine.setVoiceGain(slot, levelGain(lut::linearToDB(amp),
+                                                                           tc2.trim));
+                            }
                         }
 
                         // Per-output-channel level fades
@@ -769,8 +982,26 @@ bool CueList::fire(int idx) {
                             }
                         }
 
-                        if (isLast && fd->stopWhenDone)
-                            m_engine.clearVoicesByTag(tIdx);
+                        if (isLast && fd->stopWhenDone) {
+                            // Don't stop if the target is a child of a SyncGroup
+                            const int pi2 = (tIdx >= 0 && tIdx < cueCount())
+                                            ? m_cues[tIdx].parentIndex : -1;
+                            const bool blocked =
+                                pi2 >= 0 && pi2 < cueCount() &&
+                                m_cues[pi2].type == CueType::Group &&
+                                m_cues[pi2].groupData &&
+                                m_cues[pi2].groupData->mode == GroupData::Mode::Sync;
+                            if (!blocked) {
+                                const auto& tc2 = m_cues[static_cast<size_t>(tIdx)];
+                                if (tc2.type == CueType::Group) {
+                                    for (int di = tIdx + 1;
+                                         di <= tIdx + tc2.childCount && di < cueCount(); ++di)
+                                        m_engine.clearVoicesByTag(di);
+                                } else {
+                                    m_engine.clearVoicesByTag(tIdx);
+                                }
+                            }
+                        }
                         fd->activeSteps.fetch_sub(1, std::memory_order_relaxed);
                     },
                     "fade[" + std::to_string(idx) + "][" + std::to_string(s) + "]");
@@ -778,6 +1009,26 @@ bool CueList::fire(int idx) {
 
             followFrames = (sr > 0) ? static_cast<int64_t>(length * sr) : 0;
             result = true;
+            break;
+        }
+
+        case CueType::Group: {
+            if (!cue.groupData) break;
+            if (cue.groupData->mode == GroupData::Mode::StartFirst) break;
+            const double armBase = m_cues[idx].timelineArmSec;
+            m_cues[idx].timelineArmSec = 0.0;
+            if (cue.groupData->mode == GroupData::Mode::Sync) {
+                if (!isSyncGroupBroken(idx)) {
+                    fireSyncGroup(idx, armBase, m_engine.enginePlayheadFrames());
+                    const double total = syncGroupTotalSeconds(idx);
+                    if (std::isfinite(total) && total > 0.0 && m_engine.sampleRate() > 0)
+                        followFrames = static_cast<int64_t>(total * m_engine.sampleRate());
+                    result = true;
+                }
+            } else {
+                fireGroup(idx, armBase, m_engine.enginePlayheadFrames());
+                result = true;
+            }
             break;
         }
     }
@@ -808,11 +1059,22 @@ bool CueList::go(int64_t originFrame) {
     // each one has autoContinue set.  All cues in the cascade share the same
     // originFrame so their prewait deadlines are computed from the same base.
     while (m_selectedIndex < cueCount()) {
-        const int    idx = m_selectedIndex++;
-        const auto&  cue = m_cues[idx];
+        const int   idx = m_selectedIndex;
+        const auto& cue = m_cues[idx];
+
+        // StartFirst Group: enter transparently — advance into first child and
+        // re-enter the loop so that child fires on this same go() call.
+        if (cue.type == CueType::Group && cue.groupData &&
+            cue.groupData->mode == GroupData::Mode::StartFirst) {
+            m_selectedIndex = (cue.childCount > 0) ? idx + 1 : logicalNext(idx);
+            continue;
+        }
+
+        // Advance selection logically past this cue (skips group descendants).
+        m_selectedIndex = logicalNext(idx);
 
         // A cue that is already playing or pending cannot be re-triggered.
-        // Advance the selection past it but leave it running.
+        // Selection has already been advanced; leave the cue running.
         if (isCuePlaying(idx) || isCuePending(idx)) break;
 
         const double pw = cue.preWaitSeconds;
@@ -866,18 +1128,23 @@ void CueList::stop(int index) {
     { std::lock_guard<std::mutex> lk(m_slotMutex); evtId = m_pendingEventId[index]; m_pendingEventId[index] = -1; }
     if (evtId >= 0) m_scheduler.cancel(evtId);
     m_engine.clearVoicesByTag(index);
+    // Clear timeline arm position on group stop so next GO starts from 0.
+    if (m_cues[index].type == CueType::Group)
+        m_cues[index].timelineArmSec = 0.0;
 }
 
 void CueList::panic() {
     m_scheduler.cancelAll();
     m_engine.clearAllVoices();
     m_followUps.clear();
+    m_playlistFollowUps.clear();
     std::lock_guard<std::mutex> lk(m_slotMutex);
     for (auto& cue : m_cues) {
         if (cue.armedStream) {
             cue.armedStream->requestStop();
             cue.armedStream.reset();
         }
+        if (cue.type == CueType::Group) cue.timelineArmSec = 0.0;
     }
 }
 
@@ -966,9 +1233,219 @@ double CueList::cuePlayheadFileSeconds(int index) const {
     return sm.fileStartSecs + elapsed;
 }
 
+// ---------------------------------------------------------------------------
+// Sync group helpers
+
+double CueList::syncGroupBaseDuration(int gi) const {
+    if (gi < 0 || gi >= cueCount()) return 0.0;
+    const auto& g = m_cues[gi];
+    double maxEnd = 0.0;
+    for (int i = gi + 1; i <= gi + g.childCount; ) {
+        if (m_cues[i].parentIndex == gi) {
+            const int ci = i;
+            double childDur = m_cues[ci].duration;
+            if (childDur <= 0.0 && m_cues[ci].type == CueType::Audio)
+                childDur = cueTotalSeconds(ci);  // 0 if infinite (broken guard handles that)
+            if (childDur <= 0.0) childDur = 2.0;
+            maxEnd = std::max(maxEnd, m_cues[ci].timelineOffset + childDur);
+            const int cc = (m_cues[ci].type == CueType::Group) ? m_cues[ci].childCount : 0;
+            i += cc + 1;
+        } else { ++i; }
+    }
+    return maxEnd;
+}
+
+double CueList::syncGroupTotalSeconds(int gi) const {
+    if (gi < 0 || gi >= cueCount()) return 0.0;
+    const auto& g = m_cues[gi];
+    if (!g.groupData || g.groupData->mode != GroupData::Mode::Sync) return 0.0;
+    const double base = syncGroupBaseDuration(gi);
+    if (base <= 0.0) return 0.0;
+    if (g.markers.empty()) {
+        const int lc = g.sliceLoops.empty() ? 1 : g.sliceLoops[0];
+        if (lc == 0) return std::numeric_limits<double>::infinity();
+        return base * lc;
+    }
+    std::vector<double> bounds = {0.0};
+    for (const auto& m : g.markers) bounds.push_back(m.time);
+    if (bounds.back() < base) bounds.push_back(base);
+    double total = 0.0;
+    for (int i = 0; i + 1 < (int)bounds.size(); ++i) {
+        const int lc = (i < (int)g.sliceLoops.size()) ? g.sliceLoops[i] : 1;
+        if (lc == 0) return std::numeric_limits<double>::infinity();
+        total += (bounds[i + 1] - bounds[i]) * lc;
+    }
+    return total;
+}
+
+bool CueList::isSyncGroupBroken(int gi) const {
+    if (gi < 0 || gi >= cueCount()) return false;
+    const auto& g = m_cues[gi];
+    for (int i = gi + 1; i <= gi + g.childCount && i < cueCount(); ++i) {
+        if (m_cues[i].type == CueType::Audio) {
+            for (int lc : m_cues[i].sliceLoops)
+                if (lc == 0) return true;
+        }
+    }
+    return false;
+}
+
+void CueList::stopSyncGroupChildren(int gi) {
+    if (gi < 0 || gi >= cueCount()) return;
+    const auto& g = m_cues[gi];
+    for (int i = gi + 1; i <= gi + g.childCount && i < cueCount(); ++i)
+        if (m_cues[i].type == CueType::Audio)
+            m_engine.clearVoicesByTag(i);
+}
+
+void CueList::fireSyncGroup(int gi, double armPos, int64_t originFrame) {
+    if (gi < 0 || gi >= cueCount()) return;
+    auto& g = m_cues[gi];
+    if (!g.groupData || g.childCount == 0) return;
+    if (isSyncGroupBroken(gi)) return;
+
+    const double baseDur = syncGroupBaseDuration(gi);
+    if (baseDur <= 0.0) return;
+
+    // Build slice boundaries from group's own markers
+    std::vector<double> bounds = {0.0};
+    for (const auto& m : g.markers) bounds.push_back(m.time);
+    if (bounds.back() < baseDur) bounds.push_back(baseDur);
+    const int numSlices = (int)bounds.size() - 1;
+
+    // Find which slice armPos falls in
+    int sliceIdx = numSlices - 1;
+    for (int i = 0; i < numSlices; ++i)
+        if (armPos < bounds[i + 1]) { sliceIdx = i; break; }
+
+    // Bump generation → stale callbacks become no-ops
+    ++g.groupData->syncGeneration;
+    const int gen = g.groupData->syncGeneration;
+
+    g.groupData->syncPlaySlice = sliceIdx;
+    g.groupData->syncLoopsLeft = (sliceIdx < (int)g.sliceLoops.size())
+                                  ? g.sliceLoops[sliceIdx] : 1;
+
+    const double sliceEnd = bounds[sliceIdx + 1];
+
+    // Collect direct children
+    std::vector<int> directChildren;
+    for (int i = gi + 1; i <= gi + g.childCount; ) {
+        if (m_cues[i].parentIndex == gi) {
+            directChildren.push_back(i);
+            const int cc = (m_cues[i].type == CueType::Group) ? m_cues[i].childCount : 0;
+            i += cc + 1;
+        } else { ++i; }
+    }
+
+    // Fire children (same timeline-arm logic as fireGroup)
+    for (int ci : directChildren) {
+        const double armInto  = armPos - m_cues[ci].timelineOffset;
+        const double childDur = (m_cues[ci].duration > 0.0) ? m_cues[ci].duration
+            : (m_cues[ci].type == CueType::Audio ? cueTotalSeconds(ci) : 2.0);
+        if (childDur > 0.0 && armInto >= childDur) continue;  // past
+
+        const double fireDelay = std::max(0.0, -armInto);
+
+        if (m_cues[ci].type == CueType::Group && m_cues[ci].groupData) {
+            const double nestedArm = std::max(0.0, armInto);
+            if (fireDelay > 0.0)
+                m_scheduler.scheduleFromFrame(originFrame, fireDelay,
+                    [this, ci, nestedArm, originFrame, gi, gen]() {
+                        if (m_cues[gi].groupData &&
+                            m_cues[gi].groupData->syncGeneration == gen)
+                            fireGroup(ci, nestedArm, originFrame);
+                    }, "sg-nest[" + std::to_string(ci) + "]");
+            else
+                fireGroup(ci, nestedArm, originFrame);
+        } else if (fireDelay > 0.0) {
+            m_scheduler.scheduleFromFrame(originFrame, fireDelay,
+                [this, ci, gi, gen]() {
+                    if (m_cues[gi].groupData &&
+                        m_cues[gi].groupData->syncGeneration == gen)
+                        fire(ci);
+                }, "sg-child[" + std::to_string(ci) + "]");
+        } else if (armInto > 0.0 && m_cues[ci].type == CueType::Audio) {
+            const double origStart = m_cues[ci].startTime;
+            m_cues[ci].startTime = origStart + armInto;
+            fire(ci);
+            m_cues[ci].startTime = origStart;
+        } else {
+            fire(ci);
+        }
+    }
+
+    // Schedule end-of-slice callback
+    const double timeToEnd = sliceEnd - armPos;
+    if (timeToEnd > 0.001) {
+        m_scheduler.scheduleFromFrame(originFrame, timeToEnd,
+            [this, gi, gen, sliceIdx, numSlices, bounds]() mutable {
+                if (gi >= cueCount()) return;
+                auto* gd = m_cues[gi].groupData.get();
+                if (!gd || gd->syncGeneration != gen) return;
+
+                const int64_t now = m_engine.enginePlayheadFrames();
+                const int loopsLeft = gd->syncLoopsLeft;
+
+                if (loopsLeft == 0 || loopsLeft > 1) {
+                    if (loopsLeft > 1) --gd->syncLoopsLeft;
+                    stopSyncGroupChildren(gi);
+                    fireSyncGroup(gi, bounds[sliceIdx], now);
+                } else if (sliceIdx + 1 < numSlices) {
+                    gd->syncLoopsLeft = -1;
+                    stopSyncGroupChildren(gi);
+                    fireSyncGroup(gi, bounds[sliceIdx + 1], now);
+                } else {
+                    gd->syncLoopsLeft = -1;
+                    if (m_cues[gi].autoFollow) go();
+                }
+            },
+            "sg-end[" + std::to_string(gi) + "]");
+    }
+}
+
+void CueList::devampSyncGroup(int gi, int devampMode, bool /*preVamp*/) {
+    if (gi < 0 || gi >= cueCount()) return;
+    auto& g = m_cues[gi];
+    auto* gd = g.groupData.get();
+    if (!gd) return;
+
+    const double baseDur = syncGroupBaseDuration(gi);
+    std::vector<double> bounds = {0.0};
+    for (const auto& m : g.markers) bounds.push_back(m.time);
+    if (bounds.back() < baseDur) bounds.push_back(baseDur);
+    const int numSlices = (int)bounds.size() - 1;
+    const int curSlice  = gd->syncPlaySlice;
+    const bool hasNext  = (curSlice + 1 < numSlices);
+    const int64_t now   = m_engine.enginePlayheadFrames();
+
+    if (devampMode == 0) {
+        stopSyncGroupChildren(gi);
+        if (hasNext) fireSyncGroup(gi, bounds[curSlice + 1], now);
+        else ++gd->syncGeneration;
+    } else {
+        stopSyncGroupChildren(gi);
+        ++gd->syncGeneration;
+        if (devampMode == 2 && hasNext)
+            fireSyncGroup(gi, bounds[curSlice + 1], now);
+        if (m_selectedIndex >= 0 && m_selectedIndex < cueCount())
+            arm(m_selectedIndex);
+        go();
+    }
+}
+
+// ---------------------------------------------------------------------------
+// cueTotalSeconds
+
 double CueList::cueTotalSeconds(int index) const {
     if (index < 0 || index >= cueCount()) return 0.0;
     const auto& cue = m_cues[index];
+    // Delegate SyncGroup to its own calculator
+    if (cue.type == CueType::Group && cue.groupData &&
+        cue.groupData->mode == GroupData::Mode::Sync) {
+        const double t = syncGroupTotalSeconds(index);
+        return std::isfinite(t) ? t : 0.0;
+    }
     if (cue.type != CueType::Audio || !cue.audioFile.isLoaded()) return 0.0;
     const auto& meta = cue.audioFile.metadata();
     const int sr = meta.sampleRate;
