@@ -53,8 +53,9 @@ public:
     void cancel(int eventId);
     void cancelAll();
 
-    int  pendingCount() const;
-    bool isPending(int eventId) const;
+    int     pendingCount() const;
+    bool    isPending(int eventId) const;
+    int64_t pendingEventTargetFrame(int eventId) const;
 
     // When enabled, prints scheduling and firing info to stderr.
     void setDebugLog(bool enable) { m_debugLog.store(enable); }

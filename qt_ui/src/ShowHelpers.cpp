@@ -194,6 +194,8 @@ bool rebuildCueList(AppModel& m, std::string& /*err*/) {
                     m.cues.addDevampCue(target, cd.name, cd.preWait, cd.devampMode);
                 } else if (cd.type == "mc") {
                     m.cues.addMCCue(cd.name, cd.preWait);
+                } else if (cd.type == "marker") {
+                    m.cues.addMarkerCue(target, cd.markerIndex, cd.name, cd.preWait);
                 }
 
                 m.cues.setCueCueNumber   (myIdx, cd.cueNumber);
@@ -213,6 +215,8 @@ bool rebuildCueList(AppModel& m, std::string& /*err*/) {
                     m.cues.setCueDevampMode   (myIdx, cd.devampMode);
                     m.cues.setCueDevampPreVamp(myIdx, cd.devampPreVamp);
                 }
+                if (cd.type == "marker")
+                    m.cues.setCueMarkerIndex(myIdx, cd.markerIndex);
                 if (cd.type == "audio") {
                     std::vector<mcp::Cue::TimeMarker> marks;
                     for (const auto& mk : cd.markers) marks.push_back({mk.time, mk.name});
@@ -261,6 +265,31 @@ bool rebuildCueList(AppModel& m, std::string& /*err*/) {
         };
         int idx = 0;
         resolveSource(topCues, idx);
+    }
+
+    // Third pass: resolve anchorMarkerCueNumber → setMarkerAnchor.
+    {
+        std::function<void(const std::vector<mcp::ShowFile::CueData>&, int&)> resolveAnchors;
+        resolveAnchors = [&](const std::vector<mcp::ShowFile::CueData>& cues, int& flatIdx) {
+            for (const auto& cd : cues) {
+                const int myIdx = flatIdx++;
+                if (cd.type == "audio") {
+                    for (int mi = 0; mi < (int)cd.markers.size(); ++mi) {
+                        const auto& mkNum = cd.markers[static_cast<size_t>(mi)].anchorMarkerCueNumber;
+                        if (mkNum.empty()) continue;
+                        // Find the Marker cue with this cue number
+                        for (int ci = 0; ci < m.cues.cueCount(); ++ci) {
+                            const auto* cc = m.cues.cueAt(ci);
+                            if (cc && cc->cueNumber == mkNum)
+                                m.cues.setMarkerAnchor(myIdx, mi, ci);
+                        }
+                    }
+                }
+                if (!cd.children.empty()) resolveAnchors(cd.children, flatIdx);
+            }
+        };
+        int idx2 = 0;
+        resolveAnchors(topCues, idx2);
     }
 
     return true;
@@ -328,8 +357,13 @@ void syncSfFromCues(AppModel& m) {
                     cd.duration  = c->duration;
                     cd.level     = c->level;
                     cd.trim      = c->trim;
-                    for (const auto& mk : c->markers)
-                        cd.markers.push_back({mk.time, mk.name});
+                    for (const auto& mk : c->markers) {
+                        mcp::ShowFile::CueData::TimeMarker tm;
+                        tm.time = mk.time; tm.name = mk.name;
+                        if (mk.anchorMarkerCueIdx >= 0)
+                            tm.anchorMarkerCueNumber = cueNumAt(mk.anchorMarkerCueIdx);
+                        cd.markers.push_back(std::move(tm));
+                    }
                     cd.sliceLoops = c->sliceLoops;
                     cd.outLevelDb = c->routing.outLevelDb;
                     for (int s = 0; s < (int)c->routing.xpoint.size(); ++s)
@@ -405,8 +439,13 @@ void syncSfFromCues(AppModel& m) {
                         cd.groupRandom = c->groupData->random;
                         // SyncGroup: serialize its own markers and slice loops
                         if (c->groupData->mode == mcp::GroupData::Mode::Sync) {
-                            for (const auto& mk : c->markers)
-                                cd.markers.push_back({mk.time, mk.name});
+                            for (const auto& mk : c->markers) {
+                                mcp::ShowFile::CueData::TimeMarker tm;
+                                tm.time = mk.time; tm.name = mk.name;
+                                if (mk.anchorMarkerCueIdx >= 0)
+                                    tm.anchorMarkerCueNumber = cueNumAt(mk.anchorMarkerCueIdx);
+                                cd.markers.push_back(std::move(tm));
+                            }
                             cd.sliceLoops = c->sliceLoops;
                         }
                     }
@@ -417,6 +456,14 @@ void syncSfFromCues(AppModel& m) {
 
                 case mcp::CueType::MusicContext:
                     cd.type = "mc";
+                    ++i;
+                    break;
+
+                case mcp::CueType::Marker:
+                    cd.type            = "marker";
+                    cd.target          = c->targetIndex;
+                    cd.targetCueNumber = cueNumAt(c->targetIndex);
+                    cd.markerIndex     = c->markerIndex;
                     ++i;
                     break;
             }
@@ -474,6 +521,19 @@ mcp::ShowFile::CueData sfRemoveAt(mcp::ShowFile& sf, int flatIdx) {
     return removed;
 }
 
+void sfFixTargetsAfterRemoval(mcp::ShowFile& sf, int removedFlatIdx) {
+    if (sf.cueLists.empty()) return;
+    std::function<void(std::vector<mcp::ShowFile::CueData>&)> fix;
+    fix = [&](std::vector<mcp::ShowFile::CueData>& cues) {
+        for (auto& cd : cues) {
+            if (cd.target == removedFlatIdx)       cd.target = -1;
+            else if (cd.target > removedFlatIdx)   --cd.target;
+            if (!cd.children.empty()) fix(cd.children);
+        }
+    };
+    fix(sf.cueLists[0].cues);
+}
+
 void sfInsertBefore(mcp::ShowFile& sf, int beforeFlatIdx, mcp::ShowFile::CueData cd) {
     if (sf.cueLists.empty()) return;
     int counter = 0;
@@ -492,6 +552,11 @@ void sfInsertBefore(mcp::ShowFile& sf, int beforeFlatIdx, mcp::ShowFile::CueData
     };
     if (!ins(sf.cueLists[0].cues))
         sf.cueLists[0].cues.push_back(std::move(cd));   // past-end → append top-level
+}
+
+void sfAppendToGroup(mcp::ShowFile& sf, int groupFlatIdx, mcp::ShowFile::CueData cd) {
+    auto* group = sfCueAt(sf, groupFlatIdx);
+    if (group) group->children.push_back(std::move(cd));
 }
 
 void saveShow(AppModel& m) {

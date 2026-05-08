@@ -48,6 +48,7 @@ protected:
     void mouseDoubleClickEvent(QMouseEvent*) override;
     void wheelEvent(QWheelEvent*) override;
     void contextMenuEvent(QContextMenuEvent*) override;
+    void keyPressEvent(QKeyEvent*) override;
     void leaveEvent(QEvent*) override;
     QSize sizeHint() const override { return {600, 160}; }
 

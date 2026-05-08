@@ -53,6 +53,7 @@ void SyncGroupView::setGroupCueIndex(int groupFlatIdx) {
     m_dragMode     = DragMode::None;
     m_dragMarker   = -2;
     m_selBlock     = -1;
+    m_selMarker    = -1;   // reset silently; inspector hides the panel itself
     rebuildBlocks();
     if (groupChanged) {
         m_laneScrollPx = 0;

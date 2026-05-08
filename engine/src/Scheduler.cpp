@@ -81,6 +81,14 @@ bool Scheduler::isPending(int eventId) const {
     return false;
 }
 
+int64_t Scheduler::pendingEventTargetFrame(int eventId) const {
+    if (eventId < 0) return -1;
+    std::lock_guard<std::mutex> lk(m_mutex);
+    for (const auto& e : m_events)
+        if (e.id == eventId) return e.targetFrame;
+    return -1;
+}
+
 void Scheduler::threadLoop() {
     // This is the scheduler thread — I/O (stderr logging) is safe here.
     // The audio callback never enters this function.

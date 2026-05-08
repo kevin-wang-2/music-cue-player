@@ -3,6 +3,7 @@
 #include "CueTableView.h"
 #include "DeviceDialog.h"
 #include "InspectorWidget.h"
+#include "RenumberDialog.h"
 #include "ShowHelpers.h"
 
 #include "engine/CueList.h"
@@ -260,35 +261,64 @@ void MainWindow::buildIconBar() {
             if (typeStr == "fade" || typeStr == "start" || typeStr == "stop"
                 || typeStr == "arm" || typeStr == "devamp")
                 cd.target = selRow;
+            if (typeStr == "marker") {
+                const auto* tc = m_model->cues.cueAt(selRow);
+                if (tc && tc->type == mcp::CueType::Audio) {
+                    cd.target      = selRow;
+                    cd.markerIndex = -1;
+                    cd.targetCueNumber = tc->cueNumber;
+                }
+            }
         }
 
-        const int ins = (selRow >= 0) ? selRow + 1 : -1;
+        // Insert after the selected cue and all its children (for Group cues).
+        int ins = (selRow >= 0) ? selRow + 1 : -1;
+        if (selRow >= 0) {
+            const auto* sc = m_model->cues.cueAt(selRow);
+            if (sc && sc->type == mcp::CueType::Group)
+                ins = selRow + 1 + sc->childCount;
+        }
         ShowHelpers::sfInsertBefore(m_model->sf, ins, std::move(cd));
         std::string err;
         ShowHelpers::rebuildCueList(*m_model, err);
+        const int newRow = (ins >= 0) ? ins : m_model->cues.cueCount() - 1;
+        m_model->cues.setSelectedIndex(newRow);
         onCueListModified();
         m_cueTable->refresh();
-        m_cueTable->selectRow(selRow >= 0 ? selRow + 1 : m_model->cues.cueCount() - 1);
+        m_cueTable->selectRow(newRow);
     };
 
-    // Add-cue type buttons
-    struct { const char* icon; const char* tip; const char* type; } cueBtns[] = {
+    // Add-cue type buttons grouped by category.
+    // A null entry inserts a visual separator between groups.
+    struct CueBtnDef { const char* icon; const char* tip; const char* type; };
+    const CueBtnDef cueBtns[] = {
         { "▤",  "Add Group cue",          "group"  },
+        { nullptr, nullptr, nullptr },
         { "♫",  "Add Audio cue",          "audio"  },
+        { "♩",  "Add Music Context cue",  "mc"     },
+        { nullptr, nullptr, nullptr },
+        { "〰", "Add Fade cue",           "fade"   },
+        { nullptr, nullptr, nullptr },
         { "▷",  "Add Start cue",          "start"  },
         { "□",  "Add Stop cue",           "stop"   },
-        { "〰", "Add Fade cue",           "fade"   },
         { "⊙",  "Add Arm cue",            "arm"    },
         { "⤴",  "Add Devamp cue",         "devamp" },
-        { "♩",  "Add Music Context cue",  "mc"     },
+        { "◈",  "Add Marker cue",         "marker" },
     };
     for (const auto& b : cueBtns) {
-        auto* btn = makeIconBtn(b.icon, b.tip);
-        connect(btn, &QToolButton::clicked, this, [=]() { addCue(b.type); });
-        hlay->addWidget(btn);
+        if (!b.type) {
+            auto* s = new QFrame(bar);
+            s->setFrameShape(QFrame::VLine);
+            s->setStyleSheet("color:#333; margin:4px 2px;");
+            hlay->addWidget(s);
+        } else {
+            auto* btn = makeIconBtn(b.icon, b.tip);
+            connect(btn, &QToolButton::clicked, this, [=]() { addCue(b.type); });
+            hlay->addWidget(btn);
+        }
     }
 
-    // Separator
+    // Separator before playback controls
     auto* sep = new QFrame(bar);
     sep->setFrameShape(QFrame::VLine);
     sep->setStyleSheet("color:#333; margin:4px 4px;");
@@ -401,6 +431,11 @@ void MainWindow::buildMenuBar() {
     m_actRedo->setShortcut(QKeySequence::Redo);
     m_actRedo->setEnabled(false);
     connect(m_actRedo, &QAction::triggered, this, &MainWindow::onRedo);
+
+    editMenu->addSeparator();
+    auto* actRenumber = editMenu->addAction("Renumber Cues…");
+    actRenumber->setShortcut(QKeySequence(Qt::CTRL | Qt::Key_R));
+    connect(actRenumber, &QAction::triggered, this, &MainWindow::onRenumberCues);
 
     auto* showMenu = mb->addMenu("&Show");
     showMenu->addAction("Audio &Device…", this, &MainWindow::onOpenDeviceDialog);
@@ -561,6 +596,65 @@ void MainWindow::onRedo() {
     m_actUndo->setEnabled(m_model->canUndo());
     m_actRedo->setEnabled(m_model->canRedo());
     updateTitle();
+}
+
+void MainWindow::onRenumberCues() {
+    if (m_model->sf.cueLists.empty()) return;
+
+    // Collect selected rows; fall back to all rows if nothing selected.
+    std::vector<int> rows;
+    for (const auto& idx : m_cueTable->selectionModel()->selectedRows())
+        rows.push_back(idx.row());
+    if (rows.empty()) {
+        const int n = m_model->cues.cueCount();
+        for (int i = 0; i < n; ++i) rows.push_back(i);
+    }
+    std::sort(rows.begin(), rows.end());
+
+    RenumberDialog dlg(static_cast<int>(rows.size()), this);
+    if (dlg.exec() != QDialog::Accepted) return;
+
+    const bool doRe  = dlg.renumberChecked();
+    const bool doPre = dlg.prefixChecked();
+    const bool doSuf = dlg.suffixChecked();
+    if (!doRe && !doPre && !doSuf) return;
+
+    const double start = dlg.startAt();
+    const double inc   = dlg.incrementBy();
+    const QString pfx  = doPre ? dlg.prefix()  : QString{};
+    const QString sfx  = doSuf ? dlg.suffix()  : QString{};
+
+    // Format a double as a cue number string (integer when possible)
+    auto fmtNum = [](double v) -> std::string {
+        if (v == std::floor(v) && std::abs(v) < 1e9)
+            return std::to_string(static_cast<long long>(v));
+        return std::to_string(v);  // fallback (rarely used)
+    };
+
+    m_model->pushUndo();
+
+    int reIdx = 0;
+    for (const int row : rows) {
+        auto* cd = ShowHelpers::sfCueAt(m_model->sf, row);
+        if (!cd) continue;
+
+        std::string base;
+        if (doRe) {
+            base = fmtNum(start + reIdx * inc);
+            ++reIdx;
+        } else {
+            // Without Renumber: only modify cues that already have a number.
+            if (cd->cueNumber.empty()) continue;
+            base = cd->cueNumber;
+        }
+
+        cd->cueNumber = pfx.toStdString() + base + sfx.toStdString();
+    }
+
+    std::string err;
+    ShowHelpers::rebuildCueList(*m_model, err);
+    onCueListModified();
+    m_cueTable->refresh();
 }
 
 void MainWindow::onRowSelected(int idx) {

@@ -42,6 +42,8 @@ set(QT_UI_SOURCES
     src/MainWindow.cpp
     src/MCImport.h
     src/MCImport.cpp
+    src/RenumberDialog.h
+    src/RenumberDialog.cpp
 )
 
 if(APPLE)

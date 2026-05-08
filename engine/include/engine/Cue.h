@@ -11,7 +11,7 @@
 
 namespace mcp {
 
-enum class CueType { Audio, Start, Stop, Fade, Arm, Devamp, Group, MusicContext };
+enum class CueType { Audio, Start, Stop, Fade, Arm, Devamp, Group, MusicContext, Marker };
 
 // Per-audio-cue channel routing.
 // outLevelDb[o]  — per-output-channel level in dB (0.0 = unity).
@@ -45,8 +45,10 @@ struct Cue {
     std::string path;
     AudioFile   audioFile;
 
-    // Start/Stop/Arm/Devamp/Fade cues: index of the target cue in the same CueList
+    // Start/Stop/Arm/Devamp/Fade/Marker cues: index of the target cue in the same CueList
     int    targetIndex{-1};
+    // Marker cues only: which marker within the target cue (-1 = cue start)
+    int    markerIndex{-1};
     // Arm cues only: pre-load the target audio from this offset (seconds). 0 = from start.
     double armStartTime{0.0};
 
@@ -80,6 +82,10 @@ struct Cue {
     struct TimeMarker {
         double      time{0.0};
         std::string name;
+        // Optional anchor: when an audio cue plays through this marker, the engine
+        // auto-advances selectedIndex to logicalNext(anchorMarkerCueIdx).
+        // -1 = no anchor.  At most one Marker cue per TimeMarker.
+        int anchorMarkerCueIdx{-1};
     };
     std::vector<TimeMarker> markers;
     std::vector<int>        sliceLoops;
@@ -123,6 +129,7 @@ struct Cue {
         if (type == CueType::Fade)         return fadeData != nullptr && targetIndex >= 0;
         if (type == CueType::Devamp)       return targetIndex >= 0;
         if (type == CueType::MusicContext) return musicContext != nullptr;
+        if (type == CueType::Marker)       return targetIndex >= 0 && markerIndex >= 0;
         return true;   // Group, Start, Stop, Arm always "loaded"
     }
 };

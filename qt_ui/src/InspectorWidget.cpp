@@ -72,6 +72,7 @@ InspectorWidget::InspectorWidget(AppModel* model, QWidget* parent)
     lay->addWidget(m_tabs);
 
     buildBasicTab();
+    buildMarkerTab();
     buildMCTab();
     buildLevelsTab();
     buildTrimTab();
@@ -154,6 +155,7 @@ void InspectorWidget::buildBasicTab() {
             this, &InspectorWidget::onBasicChanged);
     connect(m_spinArmStart, &QDoubleSpinBox::editingFinished,
             this, &InspectorWidget::onBasicChanged);
+
     connect(m_spinDurationBasic, &QDoubleSpinBox::editingFinished, this, [this]() {
         if (m_loading || m_cueIdx < 0) return;
         m_model->pushUndo();
@@ -265,9 +267,12 @@ void InspectorWidget::buildTimeTab() {
     m_markerNameEdit = new QLineEdit(m_markerPanel);
     m_markerNameEdit->setPlaceholderText("(no name)");
 
+    m_comboMarkerAnchor = new QComboBox(m_markerPanel);
+
     mform->addRow(m_markerLabel);
     mform->addRow("Time:", m_markerTimeSpin);
     mform->addRow("Name:", m_markerNameEdit);
+    mform->addRow("Anchor:", m_comboMarkerAnchor);
     m_markerPanel->hide();
     lay->addWidget(m_markerPanel);
 
@@ -286,6 +291,7 @@ void InspectorWidget::buildTimeTab() {
         m_markerTimeSpin->setValue(c->markers[mi].time);
         m_markerNameEdit->setText(QString::fromStdString(c->markers[mi].name));
         m_loading = false;
+        refreshMarkerAnchorCombo();
         m_markerPanel->show();
     });
     connect(m_syncGroupView, &SyncGroupView::cueModified, this, [this]() {
@@ -333,6 +339,7 @@ void InspectorWidget::buildTimeTab() {
         m_markerTimeSpin->setValue(c->markers[mi].time);
         m_markerNameEdit->setText(QString::fromStdString(c->markers[mi].name));
         m_loading = false;
+        refreshMarkerAnchorCombo();
         m_markerPanel->show();
     });
 
@@ -354,6 +361,18 @@ void InspectorWidget::buildTimeTab() {
                                         m_markerNameEdit->text().toStdString());
         ShowHelpers::syncSfFromCues(*m_model);
         if (m_syncGroupView->isVisible()) m_syncGroupView->update();
+        emit cueEdited();
+    });
+
+    // Anchor Marker cue combo
+    connect(m_comboMarkerAnchor, QOverload<int>::of(&QComboBox::currentIndexChanged),
+            this, [this](int) {
+        if (m_loading || m_cueIdx < 0 || m_selMarker < 0) return;
+        m_model->pushUndo();
+        // combo item data stores the flat index (-1 for "(none)")
+        const int anchorIdx = m_comboMarkerAnchor->currentData().toInt();
+        m_model->cues.setMarkerAnchor(m_cueIdx, m_selMarker, anchorIdx);
+        ShowHelpers::syncSfFromCues(*m_model);
         emit cueEdited();
     });
 }
@@ -733,6 +752,32 @@ void InspectorWidget::buildTimelineTab() {
     });
 }
 
+void InspectorWidget::buildMarkerTab() {
+    m_markerPage = new QWidget;
+    auto* form = new QFormLayout(m_markerPage);
+    form->setContentsMargins(8, 8, 8, 8);
+    form->setSpacing(6);
+
+    m_comboMarkerTarget = new QComboBox;
+    m_comboMarkerMkIdx  = new QComboBox;
+    form->addRow("Target cue:", m_comboMarkerTarget);
+    form->addRow("Marker:",     m_comboMarkerMkIdx);
+
+    m_tabs->addTab(m_markerPage, "Marker");
+
+    connect(m_comboMarkerTarget, QOverload<int>::of(&QComboBox::currentIndexChanged),
+            this, [this](int) {
+        if (m_loading) return;
+        refreshMarkerMkIdxCombo();
+        onBasicChanged();
+    });
+    connect(m_comboMarkerMkIdx, QOverload<int>::of(&QComboBox::currentIndexChanged),
+            this, [this](int) {
+        if (m_loading) return;
+        onBasicChanged();
+    });
+}
+
 // ── public API ─────────────────────────────────────────────────────────────
 
 void InspectorWidget::setCueIndex(int idx) {
@@ -763,6 +808,8 @@ void InspectorWidget::setCueIndex(int idx) {
     m_tabs->setTabVisible(m_tabs->indexOf(m_modePage),     isGroup);
     m_tabs->setTabVisible(m_tabs->indexOf(m_timelinePage), isTimeline);
 
+    const bool isMarkerCue = c && c->type == mcp::CueType::Marker;
+    m_tabs->setTabVisible(m_tabs->indexOf(m_markerPage), isMarkerCue);
     m_spinDurationBasic->setVisible(true);
     m_devampGroup->setVisible(isDevamp);
     m_armGroup->setVisible(isArm);
@@ -878,6 +925,10 @@ void InspectorWidget::loadBasic() {
     }
     if (c->type == mcp::CueType::Arm)
         m_spinArmStart->setValue(c->armStartTime);
+    if (c->type == mcp::CueType::Marker) {
+        refreshMarkerTargetCombo();
+        refreshMarkerMkIdxCombo();
+    }
 }
 
 void InspectorWidget::loadTrim() {
@@ -1276,6 +1327,97 @@ void InspectorWidget::rebuildLevelsForCue() {
     lay->addStretch();
 }
 
+// ── Marker cue combo helpers ──────────────────────────────────────────────
+
+void InspectorWidget::refreshMarkerTargetCombo() {
+    const bool wasLoading = m_loading;
+    m_loading = true;
+    m_comboMarkerTarget->clear();
+    const int n = m_model->cues.cueCount();
+    const mcp::Cue* cur = (m_cueIdx >= 0) ? m_model->cues.cueAt(m_cueIdx) : nullptr;
+    for (int i = 0; i < n; ++i) {
+        const auto* c = m_model->cues.cueAt(i);
+        if (!c) continue;
+        const bool isAudio = c->type == mcp::CueType::Audio;
+        const bool isSyncGroup = c->type == mcp::CueType::Group && c->groupData &&
+                                 c->groupData->mode == mcp::GroupData::Mode::Sync;
+        if (!isAudio && !isSyncGroup) continue;
+        const QString label = QString("Q%1 %2")
+            .arg(QString::fromStdString(c->cueNumber))
+            .arg(QString::fromStdString(c->name));
+        m_comboMarkerTarget->addItem(label, i);
+    }
+    // Select the current target
+    if (cur) {
+        for (int j = 0; j < m_comboMarkerTarget->count(); ++j) {
+            if (m_comboMarkerTarget->itemData(j).toInt() == cur->targetIndex) {
+                m_comboMarkerTarget->setCurrentIndex(j);
+                break;
+            }
+        }
+    }
+    m_loading = wasLoading;
+}
+
+void InspectorWidget::refreshMarkerMkIdxCombo() {
+    const bool wasLoading = m_loading;
+    m_loading = true;
+    m_comboMarkerMkIdx->clear();
+    const mcp::Cue* cur = (m_cueIdx >= 0) ? m_model->cues.cueAt(m_cueIdx) : nullptr;
+    const int ti = (m_comboMarkerTarget->count() > 0)
+                   ? m_comboMarkerTarget->currentData().toInt() : -1;
+    const mcp::Cue* target = (ti >= 0) ? m_model->cues.cueAt(ti) : nullptr;
+    if (target) {
+        for (int mi = 0; mi < (int)target->markers.size(); ++mi) {
+            const auto& mk = target->markers[static_cast<size_t>(mi)];
+            const QString label = mk.name.empty()
+                ? QString("Marker %1 (%2 s)").arg(mi + 1).arg(mk.time, 0, 'f', 3)
+                : QString("%1 (%2 s)").arg(QString::fromStdString(mk.name)).arg(mk.time, 0, 'f', 3);
+            m_comboMarkerMkIdx->addItem(label, mi);
+        }
+    }
+    // Select the current markerIndex
+    if (cur && cur->markerIndex >= 0) {
+        for (int j = 0; j < m_comboMarkerMkIdx->count(); ++j) {
+            if (m_comboMarkerMkIdx->itemData(j).toInt() == cur->markerIndex) {
+                m_comboMarkerMkIdx->setCurrentIndex(j);
+                break;
+            }
+        }
+    }
+    m_loading = wasLoading;
+}
+
+void InspectorWidget::refreshMarkerAnchorCombo() {
+    const bool wasLoading = m_loading;
+    m_loading = true;
+    m_comboMarkerAnchor->clear();
+    m_comboMarkerAnchor->addItem("(none)", -1);
+
+    const mcp::Cue* audioCue = (m_cueIdx >= 0) ? m_model->cues.cueAt(m_cueIdx) : nullptr;
+    if (audioCue && m_selMarker >= 0 && m_selMarker < (int)audioCue->markers.size()) {
+        // Only show Marker cues that point to this exact cue+marker
+        for (int i = 0; i < m_model->cues.cueCount(); ++i) {
+            const auto* c = m_model->cues.cueAt(i);
+            if (!c || c->type != mcp::CueType::Marker) continue;
+            if (c->targetIndex != m_cueIdx || c->markerIndex != m_selMarker) continue;
+            const QString label = QString("Q%1 %2")
+                .arg(QString::fromStdString(c->cueNumber))
+                .arg(QString::fromStdString(c->name));
+            m_comboMarkerAnchor->addItem(label, i);
+        }
+        // Select current anchor
+        const int cur = audioCue->markers[static_cast<size_t>(m_selMarker)].anchorMarkerCueIdx;
+        for (int j = 0; j < m_comboMarkerAnchor->count(); ++j) {
+            if (m_comboMarkerAnchor->itemData(j).toInt() == cur) {
+                m_comboMarkerAnchor->setCurrentIndex(j);
+                break;
+            }
+        }
+    }
+    m_loading = wasLoading;
+}
+
 // ── slot implementations ───────────────────────────────────────────────────
 
 void InspectorWidget::onBasicChanged() {
@@ -1297,6 +1439,14 @@ void InspectorWidget::onBasicChanged() {
     }
     if (c->type == mcp::CueType::Arm)
         m_model->cues.setCueArmStartTime(m_cueIdx, m_spinArmStart->value());
+    if (c->type == mcp::CueType::Marker) {
+        // Target: stored as item data (flat index)
+        const int ti = m_comboMarkerTarget->currentData().toInt();
+        m_model->cues.setCueTarget(m_cueIdx, ti);
+        // Marker index: stored as item data
+        const int mi = m_comboMarkerMkIdx->currentData().toInt();
+        m_model->cues.setCueMarkerIndex(m_cueIdx, mi);
+    }
 
     ShowHelpers::syncSfFromCues(*m_model);
     emit cueEdited();

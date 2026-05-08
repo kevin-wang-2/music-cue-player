@@ -96,6 +96,11 @@ public:
     // isCuePlaying() returns m_cueFireFrame[idx] >= 0 for MC cues.
     bool addMCCue(const std::string& name = "", double preWait = 0.0);
 
+    // Append a Marker cue.  When fired, starts cue[targetIndex] from the position
+    // of its markers[markerIndex].  markerIndex -1 means start of cue.
+    bool addMarkerCue(int targetIndex, int markerIndex,
+                      const std::string& name = "", double preWait = 0.0);
+
     void clear();
     int  cueCount() const;
 
@@ -120,9 +125,16 @@ public:
     void setCueName       (int index, const std::string& name);
     void setCueArmStartTime(int index, double seconds);  // Arm cues only
     void setCueCueNumber  (int index, const std::string& number);
-    // Set the target cue index for Start/Stop/Fade/Arm/Devamp cues.
+    // Set the target cue index for Start/Stop/Fade/Arm/Devamp/Marker cues.
     // Also updates the stored targetCueNumber to match.
     void setCueTarget     (int index, int targetIndex);
+
+    // Marker cue setter: which marker within the target cue.
+    void setCueMarkerIndex(int index, int markerIdx);
+
+    // Set or clear the anchor Marker cue for a specific TimeMarker.
+    // anchorCueIdx == -1 clears the anchor.
+    void setMarkerAnchor(int cueIdx, int markerIdx, int anchorCueIdx);
 
     // Devamp cue setters (no-op if cue[index] is not a Devamp cue).
     void setCueDevampMode   (int index, int mode);      // 0/1/2 — see addDevampCue
@@ -257,6 +269,13 @@ public:
     double syncGroupTotalSeconds(int gi) const;  // base × slice loops (inf if any ∞ slice)
     bool   isSyncGroupBroken   (int gi) const;   // any audio child has infinite loops
 
+    // Progress queries for UI animation (main thread only).
+    // cuePendingFraction: 0..1 fraction of pre-wait elapsed; -1 if not pending.
+    double cuePendingFraction(int index) const;
+    // cueSliceProgress: 0..1 progress within current marker slice; -1 if not playing.
+    // isLooping is set to true if the current slice has a loop count != 1.
+    double cueSliceProgress(int index, bool& isLooping) const;
+
 private:
     bool fire(int cueIndex);
     int64_t scheduleVoice(int cueIndex);
@@ -328,6 +347,11 @@ private:
     // Written on the main thread (fire() is always called from main).
     std::vector<int64_t> m_cueFireFrame;   // -1 = not yet fired
     std::vector<double>  m_cueFireArmBase; // seconds of timeline arm position at fire
+
+    // File-position snapshot from the previous update() call, used to detect when
+    // an audio cue's playhead crosses a TimeMarker with an anchor.
+    // -1.0 = no active voice yet.  Main-thread only; no mutex needed.
+    std::vector<double> m_lastFilePosSec;
 
     // One StreamReader per engine voice slot — keeps the reader alive until
     // the voice finishes.  Cleared by update() once isVoiceActive() is false.

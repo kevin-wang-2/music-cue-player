@@ -60,8 +60,15 @@ struct ShowFile {
         struct XpEntry { int s{0}; int o{0}; float db{0.0f}; };
         std::vector<XpEntry> xpEntries;
         // Time markers (audio cues only) — absolute file positions, sorted by time
-        struct TimeMarker { double time{0.0}; std::string name; };
+        struct TimeMarker {
+            double time{0.0};
+            std::string name;
+            // Cue number of the Marker cue anchored to this marker ("" = none).
+            std::string anchorMarkerCueNumber;
+        };
         std::vector<TimeMarker> markers;
+        // Marker cues only: which marker within the target cue (-1 = cue start)
+        int markerIndex{-1};
         std::vector<int>        sliceLoops;  // [i] = loops for slice i; 0 = infinite
 
         // Devamp cues

@@ -28,8 +28,15 @@ const mcp::ShowFile::CueData* sfCueAt(const mcp::ShowFile& sf, int flatIdx);
 // No-op (returns default) if index is out of range.
 mcp::ShowFile::CueData sfRemoveAt(mcp::ShowFile& sf, int flatIdx);
 
+// After removing a cue at removedFlatIdx, fix target fields across all remaining cues:
+// clears targets that pointed to it, decrements targets that were after it.
+void sfFixTargetsAfterRemoval(mcp::ShowFile& sf, int removedFlatIdx);
+
 // Insert cd immediately before the cue at beforeFlatIdx (same parent container).
 // If beforeFlatIdx >= total count, appends to the top-level cues list.
 void sfInsertBefore(mcp::ShowFile& sf, int beforeFlatIdx, mcp::ShowFile::CueData cd);
+
+// Append cd as the last child of the group cue at groupFlatIdx.
+void sfAppendToGroup(mcp::ShowFile& sf, int groupFlatIdx, mcp::ShowFile::CueData cd);
 
 } // namespace ShowHelpers

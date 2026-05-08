@@ -50,11 +50,14 @@ static ShowFile::CueData parseCue(const json& j) {
     if (j.contains("markers") && j["markers"].is_array()) {
         for (const auto& m : j["markers"]) {
             ShowFile::CueData::TimeMarker tm;
-            tm.time = jget<double>     (m, "time", 0.0);
-            tm.name = jget<std::string>(m, "name", "");
+            tm.time                 = jget<double>     (m, "time", 0.0);
+            tm.name                 = jget<std::string>(m, "name", "");
+            tm.anchorMarkerCueNumber = jget<std::string>(m, "anchorMarkerCueNumber", "");
             c.markers.push_back(tm);
         }
     }
+    // Marker cue: which marker within target
+    c.markerIndex = jget<int>(j, "markerIndex", -1);
     if (j.contains("sliceLoops") && j["sliceLoops"].is_array()) {
         for (const auto& v : j["sliceLoops"])
             c.sliceLoops.push_back(v.get<int>());
@@ -157,7 +160,8 @@ static json cueToJson(const ShowFile::CueData& c) {
         json arr = json::array();
         for (const auto& m : c.markers) {
             json mj; mj["time"] = m.time;
-            if (!m.name.empty()) mj["name"] = m.name;
+            if (!m.name.empty())                   mj["name"]                 = m.name;
+            if (!m.anchorMarkerCueNumber.empty())  mj["anchorMarkerCueNumber"] = m.anchorMarkerCueNumber;
             arr.push_back(mj);
         }
         j["markers"] = arr;
@@ -195,6 +199,10 @@ static json cueToJson(const ShowFile::CueData& c) {
             }
             j["xpoint"] = arr;
         }
+    } else if (c.type == "marker") {
+        j["target"]          = c.target;
+        j["targetCueNumber"] = c.targetCueNumber;
+        j["markerIndex"]     = c.markerIndex;
     } else if (c.type == "start" || c.type == "stop" || c.type == "arm") {
         j["target"]          = c.target;
         j["targetCueNumber"] = c.targetCueNumber;

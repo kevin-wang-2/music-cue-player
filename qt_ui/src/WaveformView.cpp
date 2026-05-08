@@ -3,6 +3,7 @@
 #include "ShowHelpers.h"
 
 #include <QContextMenuEvent>
+#include <QKeyEvent>
 #include <QLineEdit>
 #include <QMenu>
 #include <QMetaObject>
@@ -20,6 +21,7 @@ WaveformView::WaveformView(AppModel* model, QWidget* parent)
     setMouseTracking(true);
     setSizePolicy(QSizePolicy::Expanding, QSizePolicy::Expanding);
     setMinimumHeight(120);
+    setFocusPolicy(Qt::ClickFocus);
 }
 
 void WaveformView::setMusicContext(const mcp::MusicContext* mc, double cueStartTimeSec) {
@@ -29,7 +31,12 @@ void WaveformView::setMusicContext(const mcp::MusicContext* mc, double cueStartT
 }
 
 void WaveformView::setCueIndex(int idx) {
-    if (m_cueIdx == idx) return;
+    // Always reset per-marker state so clicking the same marker after a cue
+    // reload (which hides the inspector panel) re-emits the selection signal.
+    m_drag      = -2;
+    m_selMarker = -1;
+
+    if (m_cueIdx == idx) { update(); return; }
 
     // Save zoom state for the cue we're leaving.
     if (m_cueIdx >= 0 && m_viewDur > 0.0)
@@ -37,8 +44,6 @@ void WaveformView::setCueIndex(int idx) {
 
     m_cueIdx        = idx;
     m_armSec        = -1.0;
-    m_drag          = -2;
-    m_selMarker     = -1;
     m_editLoopSlice = -1;
     m_peaks.valid   = false;
 
@@ -563,6 +568,34 @@ void WaveformView::contextMenuEvent(QContextMenuEvent* ev) {
     const double snapSec = snapToGrid(rawSec);
     QMenu menu(this);
 
+    // If right-click is on an existing marker, offer Delete first.
+    const mcp::Cue* cCtx = (m_cueIdx >= 0) ? m_model->cues.cueAt(m_cueIdx) : nullptr;
+    if (cCtx) {
+        constexpr double kSnapPx = 8.0;
+        for (int mi = 0; mi < (int)cCtx->markers.size(); ++mi) {
+            if (std::abs(secToX(cCtx->markers[mi].time) - ev->x()) < kSnapPx) {
+                menu.addAction(
+                    QString("Delete marker %1").arg(mi + 1),
+                    [this, mi]() {
+                        m_model->pushUndo();
+                        const int prevSel = m_selMarker;
+                        m_model->cues.removeCueMarker(m_cueIdx, mi);
+                        ShowHelpers::syncSfFromCues(*m_model);
+                        // Adjust or clear selection
+                        if (prevSel == mi) {
+                            m_selMarker = -1;
+                            emit markerSelectionChanged(-1);
+                        } else if (prevSel > mi) {
+                            m_selMarker = prevSel - 1;
+                        }
+                        update();
+                    });
+                menu.addSeparator();
+                break;
+            }
+        }
+    }
+
     // "Add marker" label: show bar|beat when MC is active, else seconds
     QString posLabel;
     if (m_mc) {
@@ -607,6 +640,25 @@ void WaveformView::contextMenuEvent(QContextMenuEvent* ev) {
     });
     menu.exec(ev->globalPos());
     ev->accept();
+}
+
+void WaveformView::keyPressEvent(QKeyEvent* ev) {
+    if ((ev->key() == Qt::Key_Delete || ev->key() == Qt::Key_Backspace)
+            && m_selMarker >= 0 && m_cueIdx >= 0) {
+        const mcp::Cue* c = m_model->cues.cueAt(m_cueIdx);
+        if (c && m_selMarker < (int)c->markers.size()) {
+            m_model->pushUndo();
+            const int mi = m_selMarker;
+            m_selMarker  = -1;
+            emit markerSelectionChanged(-1);
+            m_model->cues.removeCueMarker(m_cueIdx, mi);
+            ShowHelpers::syncSfFromCues(*m_model);
+            update();
+            ev->accept();
+            return;
+        }
+    }
+    QWidget::keyPressEvent(ev);
 }
 
 void WaveformView::leaveEvent(QEvent* ev) {

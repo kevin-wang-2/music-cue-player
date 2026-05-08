@@ -9,7 +9,7 @@
 class AppModel;
 
 // Cue list table.
-// Columns: # | Type | Name | Target | Duration | Status
+// Columns: Status | Type | # | Name | Target | Pre-Wait | Duration | Follow
 // Features:
 //   - Single-click selects; Shift/Ctrl extends multiSel.
 //   - Double-click edits #, Name, or Duration inline.
@@ -56,7 +56,7 @@ private slots:
     void onCellChanged(int row, int col);
 
 private:
-    enum Col { ColNum=0, ColType, ColName, ColTarget, ColDuration, ColStatus, ColCount };
+    enum Col { ColStatus=0, ColType, ColNum, ColName, ColTarget, ColPreWait, ColDuration, ColFollow, ColCount };
 
     void   populateRow(int row);
     void   setRowStatus(int row);
@@ -70,9 +70,17 @@ private:
     // Compute the nesting depth (0 = top-level) for the cue at flat index `row`.
     int cueDepth(int row) const;
 
+    struct RowProgress {
+        double preWaitFrac{-1.0};   // -1 = not pending
+        double sliceFrac{-1.0};     // -1 = not playing
+        bool   sliceIsLoop{false};
+    };
+
     AppModel* m_model{nullptr};
     int       m_selRow{-1};
     bool      m_refreshing{false};  // guard against onCellChanged re-entry
+
+    std::vector<RowProgress> m_rowProgress;
 
     // Flat indices of collapsed group cues.  Their descendants are hidden in the table.
     std::set<int> m_collapsed;
@@ -81,6 +89,9 @@ private:
     // m_dropTargetRow: row whose Target cell to outline (target-setting drop).
     // m_dropInsertRow: row before which to draw insertion line (row reorder).
     //                  equals rowCount() = after last row.
-    int m_dropTargetRow{-1};
-    int m_dropInsertRow{-1};
+    // m_dropInsideGroup: true = indicator is inside m_dropGroupRow; false = normal insert.
+    int  m_dropTargetRow{-1};
+    int  m_dropInsertRow{-1};
+    bool m_dropInsideGroup{false};
+    int  m_dropGroupRow{-1};
 };

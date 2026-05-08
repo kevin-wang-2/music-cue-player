@@ -37,6 +37,7 @@ bool CueList::addCue(const std::string& path, const std::string& name,
     m_pendingEventId.push_back(-1);
     m_cueFireFrame.push_back(-1);
     m_cueFireArmBase.push_back(0.0);
+    m_lastFilePosSec.push_back(-1.0);
     return true;
 }
 
@@ -54,6 +55,7 @@ bool CueList::addStartCue(int targetIndex, const std::string& name, double preWa
     m_pendingEventId.push_back(-1);
     m_cueFireFrame.push_back(-1);
     m_cueFireArmBase.push_back(0.0);
+    m_lastFilePosSec.push_back(-1.0);
     return true;
 }
 
@@ -71,6 +73,7 @@ bool CueList::addStopCue(int targetIndex, const std::string& name, double preWai
     m_pendingEventId.push_back(-1);
     m_cueFireFrame.push_back(-1);
     m_cueFireArmBase.push_back(0.0);
+    m_lastFilePosSec.push_back(-1.0);
     return true;
 }
 
@@ -97,6 +100,7 @@ bool CueList::addFadeCue(int resolvedTargetIdx, const std::string& targetCueNumb
     m_pendingEventId.push_back(-1);
     m_cueFireFrame.push_back(-1);
     m_cueFireArmBase.push_back(0.0);
+    m_lastFilePosSec.push_back(-1.0);
     return true;
 }
 
@@ -114,6 +118,7 @@ bool CueList::addBrokenAudioCue(const std::string& path, const std::string& name
     m_pendingEventId.push_back(-1);
     m_cueFireFrame.push_back(-1);
     m_cueFireArmBase.push_back(0.0);
+    m_lastFilePosSec.push_back(-1.0);
     return true;
 }
 
@@ -131,6 +136,7 @@ bool CueList::addArmCue(int targetIndex, const std::string& name, double preWait
     m_pendingEventId.push_back(-1);
     m_cueFireFrame.push_back(-1);
     m_cueFireArmBase.push_back(0.0);
+    m_lastFilePosSec.push_back(-1.0);
     return true;
 }
 
@@ -150,6 +156,7 @@ bool CueList::addDevampCue(int targetIndex, const std::string& name, double preW
     m_pendingEventId.push_back(-1);
     m_cueFireFrame.push_back(-1);
     m_cueFireArmBase.push_back(0.0);
+    m_lastFilePosSec.push_back(-1.0);
     return true;
 }
 
@@ -168,6 +175,7 @@ bool CueList::addGroupCue(GroupData::Mode mode, bool random,
     m_pendingEventId.push_back(-1);
     m_cueFireFrame.push_back(-1);
     m_cueFireArmBase.push_back(0.0);
+    m_lastFilePosSec.push_back(-1.0);
     return true;
 }
 
@@ -182,6 +190,27 @@ bool CueList::addMCCue(const std::string& name, double preWait) {
     m_pendingEventId.push_back(-1);
     m_cueFireFrame.push_back(-1);
     m_cueFireArmBase.push_back(0.0);
+    m_lastFilePosSec.push_back(-1.0);
+    return true;
+}
+
+bool CueList::addMarkerCue(int targetIndex, int markerIndex,
+                            const std::string& name, double preWait) {
+    Cue cue;
+    cue.type           = CueType::Marker;
+    cue.targetIndex    = targetIndex;
+    cue.markerIndex    = markerIndex;
+    cue.preWaitSeconds = preWait;
+    cue.name           = name.empty()
+        ? ("mk(" + std::to_string(targetIndex) + ":" + std::to_string(markerIndex) + ")")
+        : name;
+    m_cues.push_back(std::move(cue));
+    std::lock_guard<std::mutex> lk(m_slotMutex);
+    m_lastSlot.push_back(-1);
+    m_pendingEventId.push_back(-1);
+    m_cueFireFrame.push_back(-1);
+    m_cueFireArmBase.push_back(0.0);
+    m_lastFilePosSec.push_back(-1.0);
     return true;
 }
 
@@ -204,6 +233,7 @@ void CueList::clear() {
     m_pendingEventId.clear();
     m_cueFireFrame.clear();
     m_cueFireArmBase.clear();
+    m_lastFilePosSec.clear();
     m_selectedIndex = 0;
 }
 
@@ -349,6 +379,73 @@ void CueList::update() {
             && !m_engine.isVoicePending(s)) {
             m_slotStream[s]->requestStop();
             m_slotStream[s].reset();
+        }
+    }
+
+    // Anchor-marker crossing: when an audio cue's playhead passes a TimeMarker that
+    // has anchorMarkerCueIdx set, auto-advance the selected index to the cue after
+    // the anchor Marker cue.
+    for (int i = 0; i < cueCount(); ++i) {
+        const auto& cue = m_cues[static_cast<size_t>(i)];
+        if (cue.markers.empty()) continue;
+
+        // Quick check: does this cue have any anchored markers?
+        bool hasAnchor = false;
+        for (const auto& mk : cue.markers)
+            if (mk.anchorMarkerCueIdx >= 0) { hasAnchor = true; break; }
+        if (!hasAnchor) continue;
+
+        if (cue.type == CueType::Audio) {
+            int slot;
+            { std::lock_guard<std::mutex> lk(m_slotMutex); slot = m_lastSlot[static_cast<size_t>(i)]; }
+            const double curr = (slot >= 0 && m_engine.isVoiceActive(slot))
+                                ? cuePlayheadFileSeconds(i) : 0.0;
+
+            if (curr <= 0.0) {
+                m_lastFilePosSec[static_cast<size_t>(i)] = -1.0;
+                continue;
+            }
+            double& prev = m_lastFilePosSec[static_cast<size_t>(i)];
+            if (prev < 0.0) {
+                prev = curr;
+                continue;
+            }
+
+            for (const auto& mk : cue.markers) {
+                if (mk.anchorMarkerCueIdx < 0) continue;
+                const double t = mk.time;
+                bool crossed = (curr >= prev)
+                    ? (t > prev && t <= curr)
+                    : (t > prev || t <= curr);
+                if (crossed) {
+                    const int anchor = mk.anchorMarkerCueIdx;
+                    if (anchor >= 0 && anchor < cueCount())
+                        m_selectedIndex = logicalNext(anchor);
+                }
+            }
+            prev = curr;
+
+        } else if (cue.type == CueType::Group && cue.groupData &&
+                   cue.groupData->mode == GroupData::Mode::Sync) {
+            if (!isCuePlaying(i)) {
+                m_lastFilePosSec[static_cast<size_t>(i)] = -1.0;
+                continue;
+            }
+            const int currSlice = cue.groupData->syncPlaySlice;
+            double& prev = m_lastFilePosSec[static_cast<size_t>(i)];
+            if (prev < 0.0) {
+                // First tick after the group started — initialise without triggering.
+                prev = static_cast<double>(currSlice);
+                continue;
+            }
+            const int prevSlice = static_cast<int>(prev);
+            // Only fire on a single natural step forward (not devamp jumps).
+            if (currSlice == prevSlice + 1 && prevSlice < (int)cue.markers.size()) {
+                const int anchor = cue.markers[static_cast<size_t>(prevSlice)].anchorMarkerCueIdx;
+                if (anchor >= 0 && anchor < cueCount())
+                    m_selectedIndex = logicalNext(anchor);
+            }
+            prev = static_cast<double>(currSlice);
         }
     }
 }
@@ -565,6 +662,18 @@ void CueList::setCueMarkerName(int i, int mi, const std::string& n) {
     if (i < 0 || i >= cueCount() || mi < 0 || mi >= (int)m_cues[i].markers.size()) return;
     m_cues[i].markers[static_cast<size_t>(mi)].name = n;
 }
+void CueList::setCueMarkerIndex(int i, int mi) {
+    if (i < 0 || i >= cueCount()) return;
+    m_cues[static_cast<size_t>(i)].markerIndex = mi;
+}
+
+void CueList::setMarkerAnchor(int cueIdx, int markerIdx, int anchorCueIdx) {
+    if (cueIdx < 0 || cueIdx >= cueCount()) return;
+    auto& markers = m_cues[static_cast<size_t>(cueIdx)].markers;
+    if (markerIdx < 0 || markerIdx >= (int)markers.size()) return;
+    markers[static_cast<size_t>(markerIdx)].anchorMarkerCueIdx = anchorCueIdx;
+}
+
 void CueList::addCueMarker(int i, double time, const std::string& name) {
     if (i < 0 || i >= cueCount()) return;
     Cue::TimeMarker tm; tm.time = time; tm.name = name;
@@ -1147,6 +1256,41 @@ bool CueList::fire(int idx) {
             m_cueFireFrame[static_cast<size_t>(idx)] = m_engine.enginePlayheadFrames();
             result = true;
             break;
+
+        case CueType::Marker: {
+            const int ti = cue.targetIndex;
+            const int mi = cue.markerIndex;
+            if (ti < 0 || ti >= cueCount()) break;
+            auto& tgt = m_cues[static_cast<size_t>(ti)];
+
+            // Resolve the marker time (0.0 = start of target if no marker selected).
+            double markerTime = 0.0;
+            if (mi >= 0 && mi < (int)tgt.markers.size())
+                markerTime = tgt.markers[static_cast<size_t>(mi)].time;
+
+            if (tgt.type == CueType::Audio) {
+                if (!tgt.audioFile.isLoaded()) break;
+                disarm(ti);
+                const double origStart = tgt.startTime;
+                tgt.startTime = markerTime;
+                const int64_t out = scheduleVoice(ti);
+                tgt.startTime = origStart;
+                result       = (out >= 0);
+                followFrames = result ? out : 0;
+            } else if (tgt.type == CueType::Group && tgt.groupData &&
+                       tgt.groupData->mode == GroupData::Mode::Sync) {
+                if (isSyncGroupBroken(ti)) break;
+                const int64_t now = m_engine.enginePlayheadFrames();
+                m_cueFireFrame[static_cast<size_t>(ti)]   = now;
+                m_cueFireArmBase[static_cast<size_t>(ti)] = markerTime;
+                fireSyncGroup(ti, markerTime, now);
+                const double total = syncGroupTotalSeconds(ti);
+                if (std::isfinite(total) && total > 0.0 && m_engine.sampleRate() > 0)
+                    followFrames = static_cast<int64_t>(total * m_engine.sampleRate());
+                result = true;
+            }
+            break;
+        }
     }
 
     if (result && cue.autoFollow) {
@@ -1347,6 +1491,84 @@ bool CueList::isCuePending(int index) const {
     int evtId;
     { std::lock_guard<std::mutex> lk(m_slotMutex); evtId = m_pendingEventId[index]; }
     return m_scheduler.isPending(evtId);
+}
+
+double CueList::cuePendingFraction(int index) const {
+    if (index < 0 || index >= cueCount()) return -1.0;
+    int evtId;
+    { std::lock_guard<std::mutex> lk(m_slotMutex); evtId = m_pendingEventId[index]; }
+    const int64_t fireFrame = m_scheduler.pendingEventTargetFrame(evtId);
+    if (fireFrame < 0) return -1.0;
+    const double preWait = m_cues[index].preWaitSeconds;
+    const int sr = m_engine.isInitialized() ? m_engine.sampleRate() : 48000;
+    if (sr <= 0 || preWait <= 0.0) return 1.0;
+    const int64_t preWaitFrames = static_cast<int64_t>(preWait * sr);
+    const int64_t goFrame = fireFrame - preWaitFrames;
+    const int64_t now = m_engine.enginePlayheadFrames();
+    return std::max(0.0, std::min(1.0,
+        static_cast<double>(now - goFrame) / static_cast<double>(preWaitFrames)));
+}
+
+double CueList::cueSliceProgress(int index, bool& isLooping) const {
+    isLooping = false;
+    if (index < 0 || index >= cueCount()) return -1.0;
+    const auto& cue = m_cues[index];
+
+    // SyncGroup: use syncPlaySlice + cueElapsedSeconds (monotone timeline position)
+    if (cue.type == CueType::Group && cue.groupData &&
+        cue.groupData->mode == GroupData::Mode::Sync) {
+        if (!isCuePlaying(index)) return -1.0;
+        const int slice   = cue.groupData->syncPlaySlice;
+        const double elap = cueElapsedSeconds(index);
+        const auto& marks = cue.markers;
+        const double sliceStart = (slice == 0) ? m_cueFireArmBase[static_cast<size_t>(index)]
+                                               : marks[slice - 1].time;
+        const double sliceEnd   = (slice < (int)marks.size()) ? marks[slice].time
+                                                               : syncGroupBaseDuration(index);
+        const double sliceDur   = sliceEnd - sliceStart;
+        if (sliceDur <= 0.0) return -1.0;
+        if (slice < (int)cue.sliceLoops.size())
+            isLooping = (cue.sliceLoops[slice] != 1);
+        const double pos = std::fmod(std::max(0.0, elap - sliceStart), sliceDur);
+        return pos / sliceDur;
+    }
+
+    // Audio cue
+    if (cue.type != CueType::Audio || !isCuePlaying(index)) return -1.0;
+    const double filePos = cuePlayheadFileSeconds(index);
+
+    const auto& marks = cue.markers;
+    double sliceStart = cue.startTime;
+    double sliceEnd;
+    int sliceIdx = 0;
+
+    const double fileDur = (cue.duration > 0.0) ? cue.duration
+                                                 : cue.audioFile.metadata().durationSeconds();
+    if (marks.empty()) {
+        sliceEnd = cue.startTime + fileDur;
+    } else {
+        sliceEnd = marks[0].time;
+        for (int i = 0; i < (int)marks.size(); ++i) {
+            if (filePos < marks[i].time) {
+                sliceStart = (i == 0) ? cue.startTime : marks[i - 1].time;
+                sliceEnd   = marks[i].time;
+                sliceIdx   = i;
+                break;
+            }
+            if (i == (int)marks.size() - 1) {
+                sliceStart = marks[i].time;
+                sliceEnd   = cue.startTime + fileDur;
+                sliceIdx   = i + 1;
+            }
+        }
+    }
+
+    const double sliceDur = sliceEnd - sliceStart;
+    if (sliceDur <= 0.0) return -1.0;
+    if (sliceIdx < (int)cue.sliceLoops.size())
+        isLooping = (cue.sliceLoops[sliceIdx] != 1);
+    // Audio file position naturally loops back to sliceStart on each iteration.
+    return std::max(0.0, std::min(1.0, (filePos - sliceStart) / sliceDur));
 }
 
 bool CueList::isFadeActive(int index) const {

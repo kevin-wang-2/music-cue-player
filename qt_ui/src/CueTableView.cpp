@@ -28,8 +28,53 @@
 static const QColor kColorPlaying {0x44, 0xcc, 0x55};
 static const QColor kColorPending {0xff, 0xaa, 0x00};
 static const QColor kColorArmed   {0xff, 0xee, 0x00};
-static const QColor kColorIdle    {0x55, 0x55, 0x55};
 static const QColor kColorBroken  {0xff, 0x44, 0x44};
+
+// status: 0=idle 1=playing 2=pending 3=armed 4=broken
+static QPixmap makeStatusPixmap(int status) {
+    const int S = 14;
+    QPixmap px(S, S);
+    px.fill(Qt::transparent);
+    if (status == 0) return px;
+    QPainter p(&px);
+    p.setRenderHint(QPainter::Antialiasing);
+    if (status == 1) {          // green right-pointing triangle
+        p.setBrush(kColorPlaying);
+        p.setPen(Qt::NoPen);
+        QPolygon tri;
+        tri << QPoint(2, 1) << QPoint(S - 1, S / 2) << QPoint(2, S - 2);
+        p.drawPolygon(tri);
+    } else if (status == 2) {   // orange small circle (pending)
+        p.setBrush(kColorPending);
+        p.setPen(Qt::NoPen);
+        p.drawEllipse(3, 3, S - 6, S - 6);
+    } else if (status == 3) {   // yellow circle (armed)
+        p.setBrush(kColorArmed);
+        p.setPen(Qt::NoPen);
+        p.drawEllipse(1, 1, S - 2, S - 2);
+    } else if (status == 4) {   // red X (broken)
+        p.setPen(QPen(kColorBroken, 2, Qt::SolidLine, Qt::RoundCap));
+        p.drawLine(2, 2, S - 2, S - 2);
+        p.drawLine(S - 2, 2, 2, S - 2);
+    }
+    return px;
+}
+
+struct TypeInfo { const char* glyph; QColor color; };
+static TypeInfo typeInfoFor(mcp::CueType t) {
+    switch (t) {
+        case mcp::CueType::Group:        return {"▤",  {0x99, 0x99, 0x99}};
+        case mcp::CueType::Audio:        return {"♫",  {0x44, 0x99, 0xff}};
+        case mcp::CueType::MusicContext: return {"♩",  {0xdd, 0x66, 0xbb}};
+        case mcp::CueType::Fade:        return {"〰", {0xaa, 0x77, 0xff}};
+        case mcp::CueType::Start:        return {"▷",  {0x44, 0xcc, 0x66}};
+        case mcp::CueType::Stop:         return {"□",  {0xff, 0x66, 0x44}};
+        case mcp::CueType::Arm:          return {"⊙",  {0xff, 0xbb, 0x44}};
+        case mcp::CueType::Devamp:       return {"⤴",  {0x44, 0xcc, 0xee}};
+        case mcp::CueType::Marker:       return {"◈",  {0x88, 0xcc, 0x88}};
+    }
+    return {"?", {0x88, 0x88, 0x88}};
+}
 
 // ── ctor ───────────────────────────────────────────────────────────────────
 
@@ -37,15 +82,19 @@ CueTableView::CueTableView(AppModel* model, QWidget* parent)
     : QTableWidget(parent), m_model(model)
 {
     setColumnCount(ColCount);
-    setHorizontalHeaderLabels({{"#"}, {"Type"}, {"Name"}, {"Target"}, {"Duration"}, {"Status"}});
+    setHorizontalHeaderLabels({{""},{""},{"#"},{"Name"},{"Target"},{"Pre-Wait"},{"Duration"},{"→"}});
 
+    horizontalHeader()->setSectionResizeMode(ColStatus,   QHeaderView::Fixed);
+    horizontalHeader()->setSectionResizeMode(ColType,     QHeaderView::Fixed);
     horizontalHeader()->setSectionResizeMode(ColNum,      QHeaderView::ResizeToContents);
-    horizontalHeader()->setSectionResizeMode(ColType,     QHeaderView::ResizeToContents);
     horizontalHeader()->setSectionResizeMode(ColName,     QHeaderView::Stretch);
     horizontalHeader()->setSectionResizeMode(ColTarget,   QHeaderView::ResizeToContents);
+    horizontalHeader()->setSectionResizeMode(ColPreWait,  QHeaderView::ResizeToContents);
     horizontalHeader()->setSectionResizeMode(ColDuration, QHeaderView::ResizeToContents);
-    horizontalHeader()->setSectionResizeMode(ColStatus,   QHeaderView::Fixed);
-    setColumnWidth(ColStatus, 90);
+    horizontalHeader()->setSectionResizeMode(ColFollow,   QHeaderView::Fixed);
+    setColumnWidth(ColStatus, 20);
+    setColumnWidth(ColType,   26);
+    setColumnWidth(ColFollow, 22);
 
     verticalHeader()->setDefaultSectionSize(22);
     verticalHeader()->hide();
@@ -120,7 +169,14 @@ void CueTableView::refresh() {
 
 void CueTableView::refreshStatus() {
     const int n = rowCount();
-    for (int i = 0; i < n; ++i) setRowStatus(i);
+    m_rowProgress.resize(n);
+    for (int i = 0; i < n; ++i) {
+        setRowStatus(i);
+        auto& rp       = m_rowProgress[i];
+        rp.preWaitFrac = m_model->cues.cuePendingFraction(i);
+        rp.sliceFrac   = m_model->cues.cueSliceProgress(i, rp.sliceIsLoop);
+    }
+    viewport()->update();
 }
 
 void CueTableView::syncEngineSelection(int engineIdx) {
@@ -164,17 +220,33 @@ void CueTableView::populateRow(int row) {
     else if (depth > 0)
         namePrefix += QStringLiteral("  ");   // align children to the same column as group text
 
-    setItem(row, ColNum,      mkEdit(QString::fromStdString(c->cueNumber)));
-    setItem(row, ColType,     mkRO  (typeLabel(c->type)));
-    setItem(row, ColName,     mkEdit(namePrefix + QString::fromStdString(c->name)));
+    // Status icon (filled in by setRowStatus below)
+    {
+        auto* it = mkRO({});
+        it->setTextAlignment(Qt::AlignCenter);
+        setItem(row, ColStatus, it);
+    }
+
+    // Type glyph — same icon as the toolbar "Add X cue" buttons
+    {
+        const auto ti = typeInfoFor(c->type);
+        auto* it = mkRO(QString::fromUtf8(ti.glyph));
+        it->setTextAlignment(Qt::AlignCenter);
+        it->setForeground(ti.color);
+        setItem(row, ColType, it);
+    }
+
+    setItem(row, ColNum,  mkEdit(QString::fromStdString(c->cueNumber)));
+    setItem(row, ColName, mkEdit(namePrefix + QString::fromStdString(c->name)));
 
     // Target cell: control cues get ItemIsDropEnabled so dragging a cue onto it
     // sets the target. Show "—" when no target is assigned yet.
-    const bool canTarget = (c->type == mcp::CueType::Fade  ||
-                            c->type == mcp::CueType::Start ||
-                            c->type == mcp::CueType::Stop  ||
-                            c->type == mcp::CueType::Devamp||
-                            c->type == mcp::CueType::Arm);
+    const bool canTarget = (c->type == mcp::CueType::Fade   ||
+                            c->type == mcp::CueType::Start  ||
+                            c->type == mcp::CueType::Stop   ||
+                            c->type == mcp::CueType::Devamp ||
+                            c->type == mcp::CueType::Arm    ||
+                            c->type == mcp::CueType::Marker);
     {
         QString tl = targetLabel(row);
         if (canTarget && tl.isEmpty()) tl = QStringLiteral("—");
@@ -187,8 +259,28 @@ void CueTableView::populateRow(int row) {
         setItem(row, ColTarget, tgtItem);
     }
 
+    // Pre-wait (read-only; edit in Inspector)
+    {
+        auto* it = mkRO(c->preWaitSeconds > 0.0
+            ? QString::fromStdString(ShowHelpers::fmtTime(c->preWaitSeconds))
+            : QString{});
+        it->setTextAlignment(Qt::AlignRight | Qt::AlignVCenter);
+        setItem(row, ColPreWait, it);
+    }
+
     setItem(row, ColDuration, isAudio ? mkEdit(durationLabel(row)) : mkRO(durationLabel(row)));
-    setItem(row, ColStatus,   mkRO  ({}));
+
+    // Follow mode: C = auto-continue, F = auto-follow
+    {
+        QString fl;
+        if (c->autoContinue && c->autoFollow) fl = "CF";
+        else if (c->autoContinue)             fl = "C";
+        else if (c->autoFollow)               fl = "F";
+        auto* it = mkRO(fl);
+        it->setTextAlignment(Qt::AlignCenter);
+        if (!fl.isEmpty()) it->setForeground(QColor(0x88, 0xcc, 0xff));
+        setItem(row, ColFollow, it);
+    }
 
     setRowStatus(row);
 }
@@ -196,31 +288,20 @@ void CueTableView::populateRow(int row) {
 void CueTableView::setRowStatus(int row) {
     QTableWidgetItem* it = item(row, ColStatus);
     if (!it) return;
-
     const mcp::Cue* c = m_model->cues.cueAt(row);
     if (!c) return;
 
+    int status = 0;
     if (!c->isLoaded()) {
-        it->setText("broken");
-        it->setForeground(kColorBroken);
-        return;
-    }
-    if (m_model->cues.isCuePlaying(row)) {
-        it->setText("playing");
-        it->setForeground(kColorPlaying);
-    } else if (m_model->cues.isFadeActive(row)) {
-        it->setText("fading");
-        it->setForeground(kColorPlaying);
+        status = 4;
+    } else if (m_model->cues.isCuePlaying(row) || m_model->cues.isFadeActive(row)) {
+        status = 1;
     } else if (m_model->cues.isCuePending(row)) {
-        it->setText("pending");
-        it->setForeground(kColorPending);
+        status = 2;
     } else if (m_model->cues.isArmed(row)) {
-        it->setText("armed");
-        it->setForeground(kColorArmed);
-    } else {
-        it->setText("idle");
-        it->setForeground(kColorIdle);
+        status = 3;
     }
+    it->setIcon(QIcon(makeStatusPixmap(status)));
 }
 
 QString CueTableView::typeLabel(mcp::CueType t) const {
@@ -233,6 +314,7 @@ QString CueTableView::typeLabel(mcp::CueType t) const {
         case mcp::CueType::Devamp:       return "Devamp";
         case mcp::CueType::Group:        return "Group";
         case mcp::CueType::MusicContext: return "MC";
+        case mcp::CueType::Marker:       return "Marker";
     }
     return "?";
 }
@@ -299,6 +381,7 @@ void CueTableView::mousePressEvent(QMouseEvent* ev) {
             if (ev->pos().x() >= toggleX && ev->pos().x() <= toggleX + 24) {
                 if (m_collapsed.count(row)) m_collapsed.erase(row);
                 else                         m_collapsed.insert(row);
+                if (m_selRow < 0) m_selRow = row;
                 refresh();
                 return;
             }
@@ -377,21 +460,96 @@ void CueTableView::paintEvent(QPaintEvent* ev) {
         p.setBrush(Qt::NoBrush);
         p.drawRect(r.adjusted(1, 1, -2, -2));
     } else if (m_dropInsertRow >= 0) {
-        // Draw a horizontal insertion line
+        // Draw a horizontal insertion line.
+        // For inside-group drops: indented line at group's child depth.
+        // For normal drops: full-width line.
         QPainter p(viewport());
+
         int y;
-        if (m_dropInsertRow >= rowCount() && rowCount() > 0)
+        if (m_dropInsideGroup && m_dropGroupRow >= 0) {
+            // Line appears after the last visible row inside the group.
+            int y_row = m_dropGroupRow;
+            const mcp::Cue* grp = m_model->cues.cueAt(m_dropGroupRow);
+            if (grp && grp->childCount > 0) {
+                const int lastChild = m_dropGroupRow + grp->childCount;
+                for (int r = lastChild; r > m_dropGroupRow; --r) {
+                    if (!isRowHidden(r)) { y_row = r; break; }
+                }
+            }
+            y = visualRect(model()->index(y_row, 0)).bottom();
+        } else if (m_dropInsertRow >= rowCount() && rowCount() > 0) {
             y = visualRect(model()->index(rowCount() - 1, 0)).bottom();
-        else if (m_dropInsertRow < rowCount())
+        } else if (m_dropInsertRow < rowCount()) {
             y = visualRect(model()->index(m_dropInsertRow, 0)).top();
-        else
+        } else {
             y = 0;
+        }
+
         const int x1 = viewport()->width();
+        int x0 = 0;
+        if (m_dropInsideGroup && m_dropGroupRow >= 0) {
+            const int gDepth = cueDepth(m_dropGroupRow);
+            x0 = (gDepth + 1) * 4 * fontMetrics().averageCharWidth();
+        }
+
         p.setPen(QPen(QColor(0x2a, 0x6a, 0xb8), 2));
-        p.drawLine(0, y, x1, y);
-        // Small arrow tips
-        p.drawLine(0, y - 4, 0, y + 4);
+        p.drawLine(x0, y, x1, y);
+        p.drawLine(x0, y - 4, x0, y + 4);
         p.drawLine(x1, y - 4, x1, y + 4);
+    }
+
+    // ── Progress overlays (pre-wait bar + slice progress bar/pie) ─────────────
+    if (!m_rowProgress.empty()) {
+        QPainter pp(viewport());
+        pp.setRenderHint(QPainter::Antialiasing);
+        pp.setPen(Qt::NoPen);
+
+        for (int row = 0; row < rowCount(); ++row) {
+            if (isRowHidden(row) || row >= (int)m_rowProgress.size()) continue;
+            const auto& rp = m_rowProgress[row];
+
+            // Pre-wait: fill bar in the PreWait cell
+            if (rp.preWaitFrac >= 0.0) {
+                const QRect cell = visualRect(model()->index(row, ColPreWait));
+                pp.setBrush(QColor(0xff, 0x88, 0x00, 40));
+                pp.drawRect(cell);
+                if (rp.preWaitFrac > 0.0) {
+                    QRect fill = cell;
+                    fill.setWidth(std::max(2, static_cast<int>(cell.width() * rp.preWaitFrac)));
+                    pp.setBrush(QColor(0xff, 0x88, 0x00, 170));
+                    pp.drawRect(fill);
+                }
+            }
+
+            // Slice progress in the Duration cell
+            if (rp.sliceFrac >= 0.0) {
+                const QRect cell = visualRect(model()->index(row, ColDuration));
+                if (rp.sliceIsLoop) {
+                    // Pie chart: one full revolution = one loop iteration
+                    const int S = std::min(cell.height() - 4, 14);
+                    const QRect pie(cell.left() + 3, cell.center().y() - S / 2, S, S);
+                    pp.setBrush(QColor(0x22, 0x22, 0x22));
+                    pp.drawEllipse(pie);
+                    pp.setBrush(kColorPlaying);
+                    pp.drawPie(pie, 90 * 16,
+                               -static_cast<int>(rp.sliceFrac * 360.0 * 16));
+                    pp.setPen(QPen(QColor(0x55, 0x55, 0x55), 1));
+                    pp.setBrush(Qt::NoBrush);
+                    pp.drawEllipse(pie);
+                    pp.setPen(Qt::NoPen);
+                } else {
+                    // Linear bar
+                    pp.setBrush(QColor(0x44, 0xcc, 0x55, 40));
+                    pp.drawRect(cell);
+                    if (rp.sliceFrac > 0.0) {
+                        QRect fill = cell;
+                        fill.setWidth(std::max(2, static_cast<int>(cell.width() * rp.sliceFrac)));
+                        pp.setBrush(QColor(0x44, 0xcc, 0x55, 170));
+                        pp.drawRect(fill);
+                    }
+                }
+            }
+        }
     }
 }
 
@@ -404,7 +562,7 @@ void CueTableView::keyPressEvent(QKeyEvent* ev) {
         return;
     }
 
-    if (ev->modifiers() == Qt::ControlModifier) {
+    if (ev->modifiers() & (Qt::ControlModifier | Qt::MetaModifier)) {
         if (ev->key() == Qt::Key_C) {
             m_model->clipboard.clear();
             for (const auto& idx : selectionModel()->selectedRows()) {
@@ -434,20 +592,14 @@ void CueTableView::keyPressEvent(QKeyEvent* ev) {
             return;
         }
         if (ev->key() == Qt::Key_D) {
-            if (m_selRow >= 0) {
-                const auto* cd = ShowHelpers::sfCueAt(m_model->sf, m_selRow);
-                if (cd) {
-                    m_model->pushUndo();
-                    auto copy = *cd;
-                    copy.cueNumber = ShowHelpers::nextCueNumber(m_model->sf);
-                    ShowHelpers::sfInsertBefore(m_model->sf, m_selRow + 1, std::move(copy));
-                    std::string err;
-                    ShowHelpers::rebuildCueList(*m_model, err);
-                    m_selRow = m_selRow + 1;
-                    emit rowSelected(m_selRow);
-                    emit cueListModified();
-                    refresh();
-                }
+            // Delete (clear) the cue number of all selected cues.
+            const auto selected = selectionModel()->selectedRows();
+            if (!selected.isEmpty()) {
+                m_model->pushUndo();
+                for (const auto& idx : selected)
+                    ShowHelpers::setCueNumberChecked(*m_model, idx.row(), "");
+                emit cueListModified();
+                refresh();
             }
             ev->accept();
             return;
@@ -486,15 +638,18 @@ void CueTableView::dragMoveEvent(QDragMoveEvent* ev) {
     bool isTargetDrop = false;
     if (idx.isValid() && idx.column() == ColTarget) {
         const mcp::Cue* c = m_model->cues.cueAt(idx.row());
-        isTargetDrop = c && (c->type == mcp::CueType::Fade  ||
-                             c->type == mcp::CueType::Start ||
-                             c->type == mcp::CueType::Stop  ||
-                             c->type == mcp::CueType::Devamp||
-                             c->type == mcp::CueType::Arm);
+        isTargetDrop = c && (c->type == mcp::CueType::Fade   ||
+                             c->type == mcp::CueType::Start  ||
+                             c->type == mcp::CueType::Stop   ||
+                             c->type == mcp::CueType::Devamp ||
+                             c->type == mcp::CueType::Arm    ||
+                             c->type == mcp::CueType::Marker);
     }
 
-    int newTargetRow = -1;
-    int newInsertRow = -1;
+    int newTargetRow    = -1;
+    int newInsertRow    = -1;
+    bool newInsideGroup = false;
+    int  newGroupRow    = -1;
 
     if (isTargetDrop) {
         newTargetRow = idx.row();
@@ -508,26 +663,61 @@ void CueTableView::dragMoveEvent(QDragMoveEvent* ev) {
             if (pt.y() >= r.center().y()) newInsertRow = idx.row() + 1;
         }
         ev->accept();
+
+        // Check if this insert position is at the "end of" a group, offering
+        // inside-group (default) vs after-group (cursor left) semantics.
+        if (newInsertRow > 0) {
+            const mcp::Cue* prevCue = m_model->cues.cueAt(newInsertRow - 1);
+            if (prevCue) {
+                int candidateGroup = -1;
+                if (prevCue->type == mcp::CueType::Group && prevCue->childCount == 0) {
+                    // Empty group: bottom half of the group row itself
+                    candidateGroup = newInsertRow - 1;
+                } else if (prevCue->parentIndex >= 0) {
+                    const mcp::Cue* par = m_model->cues.cueAt(prevCue->parentIndex);
+                    // prevCue is the last descendant of par when its flat index equals
+                    // par's flat index + par's total childCount.
+                    if (par && prevCue->parentIndex + par->childCount == newInsertRow - 1)
+                        candidateGroup = prevCue->parentIndex;
+                }
+                if (candidateGroup >= 0) {
+                    // Default = inside; cursor to the left of the group's own left edge = outside.
+                    const int gDepth   = cueDepth(candidateGroup);
+                    const int threshold = gDepth * 4 * fontMetrics().averageCharWidth() + 24;
+                    if (pt.x() > threshold) {
+                        newInsideGroup = true;
+                        newGroupRow    = candidateGroup;
+                    }
+                }
+            }
+        }
     }
 
-    if (newTargetRow != m_dropTargetRow || newInsertRow != m_dropInsertRow) {
-        m_dropTargetRow = newTargetRow;
-        m_dropInsertRow = newInsertRow;
+    if (newTargetRow != m_dropTargetRow || newInsertRow != m_dropInsertRow
+        || newInsideGroup != m_dropInsideGroup || newGroupRow != m_dropGroupRow) {
+        m_dropTargetRow   = newTargetRow;
+        m_dropInsertRow   = newInsertRow;
+        m_dropInsideGroup = newInsideGroup;
+        m_dropGroupRow    = newGroupRow;
         viewport()->update();
     }
 }
 
 void CueTableView::dragLeaveEvent(QDragLeaveEvent* ev) {
-    m_dropTargetRow = -1;
-    m_dropInsertRow = -1;
+    m_dropTargetRow   = -1;
+    m_dropInsertRow   = -1;
+    m_dropInsideGroup = false;
+    m_dropGroupRow    = -1;
     viewport()->update();
     QTableWidget::dragLeaveEvent(ev);
 }
 
 void CueTableView::dropEvent(QDropEvent* ev) {
     // Always clear drag indicators on drop.
-    m_dropTargetRow = -1;
-    m_dropInsertRow = -1;
+    m_dropTargetRow   = -1;
+    m_dropInsertRow   = -1;
+    m_dropInsideGroup = false;
+    m_dropGroupRow    = -1;
     setDropIndicatorShown(true);
 
     if (ev->mimeData()->hasUrls()) {
@@ -566,11 +756,12 @@ void CueTableView::dropEvent(QDropEvent* ev) {
     if (dropIdx.isValid() && dropIdx.column() == ColTarget) {
         const mcp::Cue* dstCue = m_model->cues.cueAt(dropIdx.row());
         const bool canTarget = dstCue &&
-            (dstCue->type == mcp::CueType::Fade  ||
-             dstCue->type == mcp::CueType::Start ||
-             dstCue->type == mcp::CueType::Stop  ||
-             dstCue->type == mcp::CueType::Devamp||
-             dstCue->type == mcp::CueType::Arm);
+            (dstCue->type == mcp::CueType::Fade   ||
+             dstCue->type == mcp::CueType::Start  ||
+             dstCue->type == mcp::CueType::Stop   ||
+             dstCue->type == mcp::CueType::Devamp ||
+             dstCue->type == mcp::CueType::Arm    ||
+             dstCue->type == mcp::CueType::Marker);
         if (canTarget && srcRow != dropIdx.row()) {
             m_model->pushUndo();
             m_model->cues.setCueTarget(dropIdx.row(), srcRow);
@@ -582,6 +773,56 @@ void CueTableView::dropEvent(QDropEvent* ev) {
             emit cueListModified();
             refresh();
             return;
+        }
+    }
+
+    // ── Inside-group drop (append as last child of a group) ─────────────────
+    // Re-detect the inside-group state using cursor position (indicator state was cleared).
+    {
+        const int newInsertRow = [&]() -> int {
+            if (!dropIdx.isValid()) return rowCount();
+            const QRect r = visualRect(dropIdx);
+            return dropIdx.row() + (pt.y() >= r.center().y() ? 1 : 0);
+        }();
+
+        if (newInsertRow > 0) {
+            const mcp::Cue* prevCue = m_model->cues.cueAt(newInsertRow - 1);
+            if (prevCue) {
+                int candidateGroup = -1;
+                if (prevCue->type == mcp::CueType::Group && prevCue->childCount == 0) {
+                    candidateGroup = newInsertRow - 1;
+                } else if (prevCue->parentIndex >= 0) {
+                    const mcp::Cue* par = m_model->cues.cueAt(prevCue->parentIndex);
+                    if (par && prevCue->parentIndex + par->childCount == newInsertRow - 1)
+                        candidateGroup = prevCue->parentIndex;
+                }
+                if (candidateGroup >= 0 && candidateGroup != srcRow) {
+                    const int gDepth   = cueDepth(candidateGroup);
+                    const int threshold = gDepth * 4 * fontMetrics().averageCharWidth() + 24;
+                    if (pt.x() > threshold) {
+                        // Drop inside the group.
+                        const mcp::Cue* srcCueEng = m_model->cues.cueAt(srcRow);
+                        const int blocksRm = (srcCueEng && srcCueEng->type == mcp::CueType::Group)
+                                             ? (1 + srcCueEng->childCount) : 1;
+                        m_model->pushUndo();
+                        auto cd = ShowHelpers::sfRemoveAt(m_model->sf, srcRow);
+                        if (cd.type.empty()) { ev->ignore(); return; }
+                        int adjGroup = candidateGroup;
+                        if (srcRow < candidateGroup) adjGroup -= blocksRm;
+                        ShowHelpers::sfAppendToGroup(m_model->sf, adjGroup, std::move(cd));
+                        std::string err;
+                        ShowHelpers::rebuildCueList(*m_model, err);
+                        const mcp::Cue* grp = m_model->cues.cueAt(adjGroup);
+                        m_selRow = grp ? (adjGroup + grp->childCount) : adjGroup;
+                        ev->setDropAction(Qt::IgnoreAction);
+                        ev->accept();
+                        emit rowSelected(m_selRow);
+                        emit cueListModified();
+                        refresh();
+                        return;
+                    }
+                }
+            }
         }
     }
 
@@ -733,13 +974,44 @@ void CueTableView::contextMenuEvent(QContextMenuEvent* ev) {
     }
 
     // Add cue submenu — insert after currently selected cue (not right-click row).
-    const int insertAt  = (m_selRow >= 0) ? m_selRow + 1 : rowCount();
+    // Insert after the selected cue's entire subtree (skip Group children).
+    int insertAt = (m_selRow >= 0) ? m_selRow + 1 : rowCount();
+    if (m_selRow >= 0) {
+        const auto* sc = m_model->cues.cueAt(m_selRow);
+        if (sc && sc->type == mcp::CueType::Group)
+            insertAt = m_selRow + 1 + sc->childCount;
+    }
     // Auto-target: if exactly one cue is selected, pre-assign it as target for
     // cue types that reference a target.
     const bool singleSel = (m_selRow >= 0 && selectionModel()->selectedRows().size() == 1);
     const int  autoTarget = singleSel ? m_selRow : -1;
     auto* addMenu = menu.addMenu("Add Cue");
-    for (const char* type : {"Audio", "Start", "Stop", "Fade", "Arm", "Devamp", "Group"}) {
+    // Group: Group
+    for (const char* type : {"Group"}) {
+        auto* act = addMenu->addAction(type);
+        connect(act, &QAction::triggered, this, [this, type, insertAt, autoTarget]() {
+            addCueOfType(type, insertAt, autoTarget);
+        });
+    }
+    addMenu->addSeparator();
+    // Media / context
+    for (const char* type : {"Audio", "MC"}) {
+        auto* act = addMenu->addAction(type);
+        connect(act, &QAction::triggered, this, [this, type, insertAt, autoTarget]() {
+            addCueOfType(type, insertAt, autoTarget);
+        });
+    }
+    addMenu->addSeparator();
+    // Mix control
+    for (const char* type : {"Fade"}) {
+        auto* act = addMenu->addAction(type);
+        connect(act, &QAction::triggered, this, [this, type, insertAt, autoTarget]() {
+            addCueOfType(type, insertAt, autoTarget);
+        });
+    }
+    addMenu->addSeparator();
+    // Transport control
+    for (const char* type : {"Start", "Stop", "Arm", "Devamp", "Marker"}) {
         auto* act = addMenu->addAction(type);
         connect(act, &QAction::triggered, this, [this, type, insertAt, autoTarget]() {
             addCueOfType(type, insertAt, autoTarget);
@@ -860,6 +1132,7 @@ void CueTableView::addCueOfType(const QString& type, int beforeRow, int autoTarg
     std::string err;
     ShowHelpers::rebuildCueList(*m_model, err);
     m_selRow = beforeRow;
+    m_model->cues.setSelectedIndex(beforeRow);
     emit rowSelected(m_selRow);
     emit cueListModified();
     refresh();
@@ -872,8 +1145,10 @@ void CueTableView::deleteRows(const std::vector<int>& rows) {
     // Sort descending so earlier removals don't shift indices of later ones.
     auto sorted = rows;
     std::sort(sorted.rbegin(), sorted.rend());
-    for (int r : sorted)
+    for (int r : sorted) {
         ShowHelpers::sfRemoveAt(m_model->sf, r);
+        ShowHelpers::sfFixTargetsAfterRemoval(m_model->sf, r);
+    }
 
     std::string err;
     ShowHelpers::rebuildCueList(*m_model, err);

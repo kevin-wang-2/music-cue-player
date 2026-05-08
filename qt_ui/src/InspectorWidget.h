@@ -67,6 +67,7 @@ private:
     void buildModeTab();
     void buildTimelineTab();
     void buildMCTab();
+    void buildMarkerTab();
 
     void loadBasic();
     void loadLevels();
@@ -78,6 +79,9 @@ private:
     void loadMCPropPanel();
 
     void rebuildLevelsForCue();   // re-creates fader layout on cue change
+    void refreshMarkerTargetCombo();   // repopulate m_comboMarkerTarget
+    void refreshMarkerMkIdxCombo();    // repopulate m_comboMarkerMkIdx (after target change)
+    void refreshMarkerAnchorCombo();   // repopulate m_comboMarkerAnchor for current marker
 
     AppModel*    m_model{nullptr};
     int          m_cueIdx{-1};
@@ -93,6 +97,7 @@ private:
     QWidget*     m_modePage{nullptr};
     QWidget*     m_timelinePage{nullptr};
     QWidget*     m_mcPage{nullptr};
+    QWidget*     m_markerPage{nullptr};
 
     // Basic tab controls
     QLineEdit*    m_editNum{nullptr};
@@ -109,6 +114,9 @@ private:
     // Arm-specific
     QWidget*      m_armGroup{nullptr};
     QDoubleSpinBox* m_spinArmStart{nullptr};
+    // Marker-cue-specific (lives in Marker tab)
+    QComboBox*  m_comboMarkerTarget{nullptr};
+    QComboBox*  m_comboMarkerMkIdx{nullptr};
 
     // Levels tab
     QScrollArea*  m_levelsScroll{nullptr};
@@ -139,6 +147,7 @@ private:
     QLabel*         m_markerLabel{nullptr};
     QDoubleSpinBox* m_markerTimeSpin{nullptr};
     QLineEdit*      m_markerNameEdit{nullptr};
+    QComboBox*      m_comboMarkerAnchor{nullptr};  // anchor Marker cue selection
     int             m_selMarker{-1};
 
     // Curve tab

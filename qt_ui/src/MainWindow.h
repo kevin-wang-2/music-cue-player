@@ -42,6 +42,7 @@ private slots:
     void onRowSelected(int idx);
     void onUndo();
     void onRedo();
+    void onRenumberCues();
 
 private:
     void buildMenuBar();
