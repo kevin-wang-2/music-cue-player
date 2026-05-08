@@ -76,6 +76,9 @@ struct ShowFile {
         int         devampMode{0};        // 0=NextSlice, 1=go()+StopCurrent, 2=go()+KeepCurrent
         bool        devampPreVamp{false}; // skip subsequent looping slices after devamp
 
+        // Scriptlet cues
+        std::string scriptletCode;      // Python source code to execute
+
         // Network cues
         std::string networkPatchName;   // name of the target NetworkSetup patch
         std::string networkCommand;     // command string (OSC or plain text)

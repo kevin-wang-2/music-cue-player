@@ -77,6 +77,7 @@ static TypeInfo typeInfoFor(mcp::CueType t) {
         case mcp::CueType::Timecode:     return {"TC", {0x44, 0xcc, 0xdd}};
         case mcp::CueType::Goto:         return {"→",  {0x44, 0xdd, 0x88}};
         case mcp::CueType::Memo:         return {"✎",  {0x88, 0x88, 0x88}};
+        case mcp::CueType::Scriptlet:    return {"λ",  {0xff, 0xaa, 0x44}};
     }
     return {"?", {0x88, 0x88, 0x88}};
 }
@@ -326,6 +327,7 @@ QString CueTableView::typeLabel(mcp::CueType t) const {
         case mcp::CueType::Timecode:     return "Timecode";
         case mcp::CueType::Goto:         return "Goto";
         case mcp::CueType::Memo:         return "Memo";
+        case mcp::CueType::Scriptlet:    return "Script";
     }
     return "?";
 }
@@ -1032,7 +1034,7 @@ void CueTableView::contextMenuEvent(QContextMenuEvent* ev) {
     }
     addMenu->addSeparator();
     // Transport control
-    for (const char* type : {"Start", "Stop", "Goto", "Arm", "Devamp", "Marker", "Memo"}) {
+    for (const char* type : {"Start", "Stop", "Goto", "Arm", "Devamp", "Marker", "Memo", "Scriptlet"}) {
         auto* act = addMenu->addAction(type);
         connect(act, &QAction::triggered, this, [this, type, insertAt, autoTarget]() {
             addCueOfType(type, insertAt, autoTarget);

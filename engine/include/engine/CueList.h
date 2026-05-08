@@ -124,6 +124,16 @@ public:
     // Append a Memo cue.  When fired, does nothing (useful as a label/divider).
     bool addMemoCue(const std::string& name = "", double preWait = 0.0);
 
+    // Append a Scriptlet cue.  When fired, queues code for execution by the UI layer.
+    bool addScriptletCue(const std::string& name = "", double preWait = 0.0);
+
+    // Set the Python source code for a Scriptlet cue.
+    void setCueScriptletCode(int index, const std::string& code);
+
+    // Drain and return any scriptlet codes queued since the last call.
+    // Thread-safe: may be called from any thread.
+    std::vector<std::string> drainScriptlets();
+
     // Append a Network cue.  When fired, sends the stored command to the
     // network patch identified by networkPatchIdx.
     bool addNetworkCue(const std::string& name = "", double preWait = 0.0);
@@ -436,6 +446,11 @@ private:
     // Downcast to StreamReader* via slotStreamReader() when StreamReader-specific
     // features (devamp, segMarkers) are needed.
     std::array<std::shared_ptr<IAudioSource>, AudioEngine::kMaxVoices> m_slotStream;
+
+    // Pending scriptlet codes queued by fire() (possibly scheduler thread);
+    // drained on the main thread by AppModel::tick() via drainScriptlets().
+    mutable std::mutex       m_scriptletMutex;
+    std::vector<std::string> m_pendingScriptlets;
 
     // Active MTC generators keyed by cue index.  Protected by m_slotMutex.
     // Stored so stop() / panic() can terminate a running generator immediately.

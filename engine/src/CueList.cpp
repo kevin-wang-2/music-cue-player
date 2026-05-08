@@ -250,6 +250,34 @@ bool CueList::addMemoCue(const std::string& name, double preWait) {
     return true;
 }
 
+bool CueList::addScriptletCue(const std::string& name, double preWait) {
+    Cue cue;
+    cue.type           = CueType::Scriptlet;
+    cue.preWaitSeconds = preWait;
+    cue.name           = name.empty() ? "Scriptlet" : name;
+    m_cues.push_back(std::move(cue));
+    std::lock_guard<std::mutex> lk(m_slotMutex);
+    m_lastSlot.push_back(-1);
+    m_pendingEventId.push_back(-1);
+    m_cueFireFrame.push_back(-1);
+    m_cueFireArmBase.push_back(0.0);
+    m_lastFilePosSec.push_back(-1.0);
+    return true;
+}
+
+void CueList::setCueScriptletCode(int index, const std::string& code) {
+    if (index >= 0 && index < (int)m_cues.size() &&
+        m_cues[static_cast<size_t>(index)].type == CueType::Scriptlet)
+        m_cues[static_cast<size_t>(index)].scriptletCode = code;
+}
+
+std::vector<std::string> CueList::drainScriptlets() {
+    std::lock_guard<std::mutex> lk(m_scriptletMutex);
+    std::vector<std::string> out;
+    out.swap(m_pendingScriptlets);
+    return out;
+}
+
 bool CueList::addNetworkCue(const std::string& name, double preWait) {
     Cue cue;
     cue.type           = CueType::Network;
@@ -1607,6 +1635,16 @@ bool CueList::fire(int idx) {
         }
 
         case CueType::Memo: {
+            result = true;
+            followFrames = 0;
+            break;
+        }
+
+        case CueType::Scriptlet: {
+            {
+                std::lock_guard<std::mutex> lk(m_scriptletMutex);
+                m_pendingScriptlets.push_back(cue.scriptletCode);
+            }
             result = true;
             followFrames = 0;
             break;

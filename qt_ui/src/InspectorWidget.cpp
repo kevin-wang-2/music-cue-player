@@ -86,6 +86,7 @@ InspectorWidget::InspectorWidget(AppModel* model, QWidget* parent)
     buildModeTab();
     buildTimeTab();
     buildTimelineTab();
+    buildScriptTab();
     buildNetworkTab();
     buildMidiTab();
     buildTimecodeTab();
@@ -821,6 +822,8 @@ void InspectorWidget::setCueIndex(int idx) {
     const bool isNetworkCue  = c && c->type == mcp::CueType::Network;
     const bool isMidiCue     = c && c->type == mcp::CueType::Midi;
     const bool isTimecodeCue = c && c->type == mcp::CueType::Timecode;
+    const bool isScriptlet   = c && c->type == mcp::CueType::Scriptlet;
+    m_tabs->setTabVisible(m_tabs->indexOf(m_scriptPage),    isScriptlet);
     m_tabs->setTabVisible(m_tabs->indexOf(m_markerPage),    isMarkerCue);
     m_tabs->setTabVisible(m_tabs->indexOf(m_networkPage),   isNetworkCue);
     m_tabs->setTabVisible(m_tabs->indexOf(m_midiPage),      isMidiCue);
@@ -870,6 +873,7 @@ void InspectorWidget::setCueIndex(int idx) {
         loadMode();
         if (isTimeline) m_timelineView->setGroupCueIndex(idx);
     }
+    if (isScriptlet)   loadScript();
     if (isNetworkCue)  loadNetwork();
     if (isMidiCue)     loadMidi();
     if (isTimecodeCue) loadTimecode();
@@ -1514,6 +1518,44 @@ void InspectorWidget::onFadeOutTargetChanged(int outCh, float dB) {
 }
 
 // ── Network tab ────────────────────────────────────────────────────────────
+
+// ── Script tab ─────────────────────────────────────────────────────────────
+
+void InspectorWidget::buildScriptTab() {
+    m_scriptPage = new QWidget;
+    auto* lay = new QVBoxLayout(m_scriptPage);
+    lay->setContentsMargins(8, 8, 8, 8);
+    lay->setSpacing(4);
+
+    auto* hint = new QLabel("import mcp   →   mcp.go()  /  mcp.select(\"5\")  /  mcp.alert(\"hello\")");
+    hint->setStyleSheet("color:#888; font-size:11px;");
+    lay->addWidget(hint);
+
+    m_editScript = new QPlainTextEdit;
+    m_editScript->setPlaceholderText("import mcp\n\nmcp.go()");
+    m_editScript->setStyleSheet(
+        "QPlainTextEdit { background:#1a1a2e; color:#e0e0ff;"
+        "  border:1px solid #444; border-radius:3px;"
+        "  font-family:monospace; font-size:12px; }");
+    lay->addWidget(m_editScript);
+
+    m_tabs->addTab(m_scriptPage, "Script");
+
+    connect(m_editScript, &QPlainTextEdit::textChanged, this, [this]() {
+        if (m_loading || m_cueIdx < 0) return;
+        m_model->cues.setCueScriptletCode(m_cueIdx, m_editScript->toPlainText().toStdString());
+        ShowHelpers::syncSfFromCues(*m_model);
+        emit cueEdited();
+    });
+}
+
+void InspectorWidget::loadScript() {
+    const mcp::Cue* c = (m_cueIdx >= 0) ? m_model->cues.cueAt(m_cueIdx) : nullptr;
+    if (!c) return;
+    m_editScript->blockSignals(true);
+    m_editScript->setPlainText(QString::fromStdString(c->scriptletCode));
+    m_editScript->blockSignals(false);
+}
 
 void InspectorWidget::buildNetworkTab() {
     m_networkPage = new QWidget;

@@ -255,6 +255,8 @@ bool rebuildCueList(AppModel& m, std::string& /*err*/) {
                     m.cues.addGotoCue(target, cd.name, cd.preWait);
                 } else if (cd.type == "memo") {
                     m.cues.addMemoCue(cd.name, cd.preWait);
+                } else if (cd.type == "scriptlet") {
+                    m.cues.addScriptletCue(cd.name, cd.preWait);
                 } else if (cd.type == "network") {
                     m.cues.addNetworkCue(cd.name, cd.preWait);
                 } else if (cd.type == "midi") {
@@ -282,6 +284,8 @@ bool rebuildCueList(AppModel& m, std::string& /*err*/) {
                 }
                 if (cd.type == "marker")
                     m.cues.setCueMarkerIndex(myIdx, cd.markerIndex);
+                if (cd.type == "scriptlet")
+                    m.cues.setCueScriptletCode(myIdx, cd.scriptletCode);
                 if (cd.type == "network") {
                     // Resolve patch name → index
                     int patchIdx = -1;
@@ -613,6 +617,12 @@ void syncSfFromCues(AppModel& m) {
 
                 case mcp::CueType::Memo:
                     cd.type = "memo";
+                    ++i;
+                    break;
+
+                case mcp::CueType::Scriptlet:
+                    cd.type           = "scriptlet";
+                    cd.scriptletCode  = c->scriptletCode;
                     ++i;
                     break;
             }

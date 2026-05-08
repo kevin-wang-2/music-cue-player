@@ -5,6 +5,14 @@ set(CMAKE_AUTOMOC ON)
 set(CMAKE_AUTOUIC ON)
 set(CMAKE_AUTORCC ON)
 
+# Python 3 for Scriptlet cue support
+if(APPLE AND NOT Python3_ROOT_DIR)
+    # Prefer Homebrew Python over the macOS system stub
+    set(Python3_ROOT_DIR "/opt/homebrew/opt/python@3.13")
+endif()
+find_package(Python3 COMPONENTS Development REQUIRED)
+message(STATUS "Found Python3 ${Python3_VERSION} — ${Python3_EXECUTABLE}")
+
 # Prefer Qt6; fall back to Qt5 if not found
 find_package(Qt6 QUIET COMPONENTS Core Widgets Network)
 if(Qt6_FOUND)
@@ -56,6 +64,8 @@ set(QT_UI_SOURCES
     src/OscServer.cpp
     src/ControlsDialog.h
     src/ControlsDialog.cpp
+    src/ScriptletEngine.h
+    src/ScriptletEngine.cpp
 )
 
 if(APPLE)
@@ -67,12 +77,14 @@ add_executable(mcp_qt_ui ${QT_UI_SOURCES})
 target_include_directories(mcp_qt_ui PRIVATE
     ${CMAKE_CURRENT_SOURCE_DIR}/src
     ${CMAKE_SOURCE_DIR}/engine/include
+    ${Python3_INCLUDE_DIRS}
 )
 
 target_link_libraries(mcp_qt_ui PRIVATE
     mcp_engine
     ${QT_TARGET}
     ${QT_NETWORK_TARGET}
+    Python3::Python
 )
 if(APPLE)
     target_link_libraries(mcp_qt_ui PRIVATE "-framework Cocoa"

@@ -102,6 +102,9 @@ static ShowFile::CueData parseCue(const json& j) {
         }
     }
 
+    // Scriptlet cue
+    c.scriptletCode = jget<std::string>(j, "scriptletCode", "");
+
     // Network cue parameters
     c.networkPatchName = jget<std::string>(j, "networkPatchName", "");
     c.networkCommand   = jget<std::string>(j, "networkCommand",   "");
@@ -287,6 +290,10 @@ static json cueToJson(const ShowFile::CueData& c) {
             }
             j["fadeXpEntries"] = arr;
         }
+    }
+
+    if (c.type == "scriptlet") {
+        if (!c.scriptletCode.empty()) j["scriptletCode"] = c.scriptletCode;
     }
 
     if (c.type == "network") {

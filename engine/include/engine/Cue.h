@@ -12,7 +12,7 @@
 
 namespace mcp {
 
-enum class CueType { Audio, Start, Stop, Fade, Arm, Devamp, Group, MusicContext, Marker, Network, Midi, Timecode, Goto, Memo };
+enum class CueType { Audio, Start, Stop, Fade, Arm, Devamp, Group, MusicContext, Marker, Network, Midi, Timecode, Goto, Memo, Scriptlet };
 
 // Per-audio-cue channel routing.
 // outLevelDb[o]  — per-output-channel level in dB (0.0 = unity).
@@ -91,6 +91,9 @@ struct Cue {
     std::vector<TimeMarker> markers;
     std::vector<int>        sliceLoops;
 
+    // Scriptlet cues
+    std::string scriptletCode;        // Python source code to execute
+
     // Network cues
     int         networkPatchIdx{-1};  // index into CueList's network patch list
     std::string networkCommand;       // OSC address+args, or plain text
@@ -154,7 +157,7 @@ struct Cue {
         if (type == CueType::Midi)         return midiPatchIdx >= 0;
         if (type == CueType::Timecode)     return tcStartTC < tcEndTC;
         if (type == CueType::Goto) return targetIndex >= 0;
-        return true;   // Group, Start, Stop, Arm, Memo always "loaded"
+        return true;   // Group, Start, Stop, Arm, Memo, Scriptlet always "loaded"
     }
 };
 

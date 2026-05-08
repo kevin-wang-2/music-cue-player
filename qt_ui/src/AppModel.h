@@ -6,6 +6,8 @@
 #include "engine/ShowFile.h"
 #include "MidiInputManager.h"
 #include "OscServer.h"
+#include "ScriptletEngine.h"
+#include <memory>
 
 #include <QObject>
 #include <QString>
@@ -29,6 +31,9 @@ public:
     // External trigger infrastructure
     MidiInputManager midiIn;
     OscServer        oscServer;
+
+    // Python scriptlet engine (owns the embedded interpreter).
+    std::unique_ptr<ScriptletEngine> scriptlet;
 
     // Show data
     mcp::ShowFile sf;
@@ -87,6 +92,7 @@ public:
 
 signals:
     void cueListChanged();
+    void scriptletError(const QString& msg);
     void selectionChanged(int index);
     void playbackStateChanged();    // voices started/stopped
     void dirtyChanged(bool dirty);

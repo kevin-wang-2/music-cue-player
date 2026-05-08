@@ -14,6 +14,7 @@
 #include <QAction>
 #include <QApplication>
 #include <QCloseEvent>
+#include <QMessageBox>
 #include <QDoubleSpinBox>
 #include <QKeyEvent>
 #include <QLineEdit>
@@ -142,6 +143,9 @@ MainWindow::MainWindow(AppModel* model, QWidget* parent)
     connect(m_model, &AppModel::engineStatusChanged, this, [this]() {
         if (!m_model->engineOk)
             showToast("Engine error: " + QString::fromStdString(m_model->engineError));
+    });
+    connect(m_model, &AppModel::scriptletError, this, [this](const QString& msg) {
+        QMessageBox::warning(this, "Scriptlet Error", msg);
     });
 
     connect(m_cueTable,  &CueTableView::rowSelected,    this, &MainWindow::onRowSelected);
@@ -319,7 +323,8 @@ void MainWindow::buildIconBar() {
         { "⊙",  "Add Arm cue",            "arm"    },
         { "⤴",  "Add Devamp cue",         "devamp"   },
         { "◈",  "Add Marker cue",         "marker"   },
-        { "✎",  "Add Memo cue",           "memo"   },
+        { "✎",  "Add Memo cue",           "memo"      },
+        { "λ",  "Add Scriptlet cue",     "scriptlet" },
         { nullptr, nullptr, nullptr },
         { "⊹",  "Add Network cue",        "network"  },
         { "♪",  "Add MIDI cue",           "midi"     },
@@ -853,6 +858,7 @@ void MainWindow::updateCueInfo() {
             case mcp::CueType::Timecode:     detail += "Timecode"; break;
             case mcp::CueType::Goto:         detail += "Goto";     break;
             case mcp::CueType::Memo:         detail += "Memo";     break;
+            case mcp::CueType::Scriptlet:    detail += "Script";   break;
             case mcp::CueType::Group:  break;  // handled above
         }
     }

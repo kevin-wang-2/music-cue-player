@@ -70,6 +70,8 @@ private:
     void buildModeTab();
     void buildTimelineTab();
     void buildMCTab();
+    void buildScriptTab();
+    void loadScript();
     void buildNetworkTab();
     void loadNetwork();
     void buildMidiTab();
@@ -174,6 +176,10 @@ private:
 
     // Timeline tab (Timeline group cues)
     TimelineGroupView* m_timelineView{nullptr};
+
+    // Script tab (Scriptlet cues)
+    QWidget*        m_scriptPage{nullptr};
+    QPlainTextEdit* m_editScript{nullptr};
 
     // Network tab
     QWidget*       m_networkPage{nullptr};

@@ -1,5 +1,6 @@
 #include "AppModel.h"
 
+#include <QMessageBox>
 #include <QVariant>
 
 AppModel::AppModel(QObject* parent)
@@ -8,11 +9,27 @@ AppModel::AppModel(QObject* parent)
     , cues(engine, scheduler)
     , midiIn(this)
     , oscServer(this)
+    , scriptlet(std::make_unique<ScriptletEngine>())
 {
     connect(&midiIn,   &MidiInputManager::midiReceived,
             this, &AppModel::routeMidi);
     connect(&oscServer, &OscServer::messageReceived,
             this, &AppModel::routeOsc);
+
+    scriptlet->setGoCallback([this]() {
+        cues.go();
+        emit selectionChanged(cues.selectedIndex());
+    });
+    scriptlet->setSelectCallback([this](const std::string& num) {
+        const int idx = cues.findByCueNumber(num);
+        if (idx >= 0) {
+            cues.setSelectedIndex(idx);
+            emit selectionChanged(idx);
+        }
+    });
+    scriptlet->setAlertCallback([](const std::string& msg) {
+        QMessageBox::information(nullptr, "Script", QString::fromStdString(msg));
+    });
 }
 
 AppModel::~AppModel() {
@@ -33,6 +50,13 @@ void AppModel::tick() {
     const bool isActive  = engine.activeVoiceCount() > 0;
     if (wasActive != isActive)
         emit playbackStateChanged();
+
+    // Run any scriptlets queued since last tick (on main thread for Qt safety).
+    for (const auto& code : cues.drainScriptlets()) {
+        const std::string err = scriptlet->run(code);
+        if (!err.empty())
+            emit scriptletError(QString::fromStdString(err));
+    }
 }
 
 void AppModel::applyOscSettings() {
