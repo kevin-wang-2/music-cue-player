@@ -1,6 +1,7 @@
 #include "SettingsDialog.h"
 #include "AppModel.h"
 #include "FaderWidget.h"
+#include "MidiInputManager.h"
 #include "engine/MidiOut.h"
 
 #if defined(_WIN32)
@@ -28,11 +29,13 @@
 #include <QGroupBox>
 #include <QHBoxLayout>
 #include <QHeaderView>
+#include <QInputDialog>
 #include <QLabel>
 #include <QLineEdit>
 #include <QListWidget>
 #include <QPushButton>
 #include <QScrollArea>
+#include <QSpinBox>
 #include <QSplitter>
 #include <QStackedWidget>
 #include <QTabWidget>
@@ -191,10 +194,12 @@ SettingsDialog::SettingsDialog(AppModel* model, QWidget* parent)
     setMinimumSize(900, 520);
     setStyleSheet(kDialogStyle);
 
-    m_numPhys      = model->engineOk ? model->engine.channels() : 2;
-    m_audioSetup   = model->sf.audioSetup;
-    m_networkSetup = model->sf.networkSetup;
-    m_midiSetup    = model->sf.midiSetup;
+    m_numPhys        = model->engineOk ? model->engine.channels() : 2;
+    m_audioSetup     = model->sf.audioSetup;
+    m_networkSetup   = model->sf.networkSetup;
+    m_midiSetup      = model->sf.midiSetup;
+    m_oscSettings    = model->sf.oscServer;
+    m_systemControls = model->sf.systemControls;
 
     if (m_audioSetup.channels.empty()) {
         for (int i = 0; i < m_numPhys; ++i) {
@@ -218,6 +223,7 @@ SettingsDialog::SettingsDialog(AppModel* model, QWidget* parent)
     m_sidebar->addItem("Audio");
     m_sidebar->addItem("Network");
     m_sidebar->addItem("MIDI");
+    m_sidebar->addItem("Controls");
     m_sidebar->setCurrentRow(0);
     body->addWidget(m_sidebar);
 
@@ -237,6 +243,7 @@ SettingsDialog::SettingsDialog(AppModel* model, QWidget* parent)
     buildAudioPage();
     buildNetworkPage();
     buildMidiPage();
+    buildControlsPage();
 
     connect(m_sidebar, &QListWidget::currentRowChanged, m_stack, &QStackedWidget::setCurrentIndex);
     connect(btnBox, &QDialogButtonBox::accepted, this, [this]() {
@@ -244,6 +251,8 @@ SettingsDialog::SettingsDialog(AppModel* model, QWidget* parent)
         syncXpFromGrid();
         syncNetworkFromTable();
         syncMidiFromTable();
+        syncOscFromUI();
+        saveControls();
         accept();
     });
     connect(btnBox, &QDialogButtonBox::rejected, this, &QDialog::reject);
@@ -539,6 +548,7 @@ void SettingsDialog::buildNetworkPage() {
     vlay->addWidget(m_networkTabs, 1);
 
     buildNetworkOutputTab();
+    buildOscServerTab();
 
     m_stack->addWidget(page);
 }
@@ -777,5 +787,253 @@ void SettingsDialog::syncMidiFromTable() {
         if (auto* w = qobject_cast<QComboBox*>(m_midiPatchTable->cellWidget(i, 1)))
             p.destination = w->currentData().toString().toStdString();
         m_midiSetup.patches.push_back(p);
+    }
+}
+
+// ── OSC Server tab (inside Network section) ────────────────────────────────
+
+void SettingsDialog::buildOscServerTab() {
+    auto* page = new QWidget;
+    auto* vlay = new QVBoxLayout(page);
+    vlay->setContentsMargins(8, 8, 8, 8);
+    vlay->setSpacing(12);
+
+    // Enable + port row
+    auto* topRow = new QHBoxLayout;
+    m_chkOscEnabled = new QCheckBox("Enable OSC Server");
+    m_chkOscEnabled->setChecked(m_oscSettings.enabled);
+    topRow->addWidget(m_chkOscEnabled);
+    topRow->addSpacing(20);
+    topRow->addWidget(new QLabel("Listen Port:"));
+    m_spinOscPort = new QSpinBox;
+    m_spinOscPort->setRange(1024, 65535);
+    m_spinOscPort->setValue(m_oscSettings.listenPort);
+    m_spinOscPort->setFixedWidth(80);
+    topRow->addWidget(m_spinOscPort);
+    topRow->addStretch();
+    vlay->addLayout(topRow);
+
+    // Access control group
+    auto* grp = new QGroupBox("Access Control");
+    auto* grpLay = new QVBoxLayout(grp);
+    grpLay->setSpacing(6);
+
+    auto* infoLbl = new QLabel(
+        "Add an \"Open\" entry to allow unauthenticated access.\n"
+        "Add a \"Password\" entry to require a matching string as the first OSC argument.");
+    infoLbl->setStyleSheet("color:#777;font-size:11px;");
+    infoLbl->setWordWrap(true);
+    grpLay->addWidget(infoLbl);
+
+    m_oscAccessList = new QListWidget;
+    m_oscAccessList->setFixedHeight(160);
+    grpLay->addWidget(m_oscAccessList);
+
+    auto* btnRow = new QHBoxLayout;
+    m_btnOscAddOpen = new QPushButton("+ Add Open");
+    m_btnOscAddPw   = new QPushButton("+ Add Password…");
+    m_btnOscRemove  = new QPushButton("− Remove");
+    btnRow->addWidget(m_btnOscAddOpen);
+    btnRow->addWidget(m_btnOscAddPw);
+    btnRow->addWidget(m_btnOscRemove);
+    btnRow->addStretch();
+    grpLay->addLayout(btnRow);
+
+    vlay->addWidget(grp);
+    vlay->addStretch();
+
+    rebuildAccessList();
+
+    connect(m_btnOscAddOpen, &QPushButton::clicked, this, [this]() {
+        m_oscSettings.accessList.push_back({""});
+        rebuildAccessList();
+    });
+    connect(m_btnOscAddPw, &QPushButton::clicked, this, [this]() {
+        bool ok = false;
+        const QString pw = QInputDialog::getText(this, "Add Password Entry",
+            "Password:", QLineEdit::Normal, "", &ok);
+        if (!ok || pw.isEmpty()) return;
+        m_oscSettings.accessList.push_back({pw.toStdString()});
+        rebuildAccessList();
+    });
+    connect(m_btnOscRemove, &QPushButton::clicked, this, [this]() {
+        const int row = m_oscAccessList->currentRow();
+        if (row < 0 || row >= (int)m_oscSettings.accessList.size()) return;
+        m_oscSettings.accessList.erase(m_oscSettings.accessList.begin() + row);
+        rebuildAccessList();
+    });
+
+    m_networkTabs->addTab(page, "OSC Server");
+}
+
+void SettingsDialog::rebuildAccessList() {
+    m_oscAccessList->clear();
+    for (const auto& entry : m_oscSettings.accessList) {
+        if (entry.password.empty())
+            m_oscAccessList->addItem("Open Access (no password required)");
+        else
+            m_oscAccessList->addItem(
+                QString("Password: %1").arg(QString::fromStdString(entry.password)));
+    }
+}
+
+void SettingsDialog::syncOscFromUI() {
+    m_oscSettings.enabled    = m_chkOscEnabled->isChecked();
+    m_oscSettings.listenPort = m_spinOscPort->value();
+    // accessList already up to date — modified in-place via Add/Remove buttons
+}
+
+// ── Controls section ───────────────────────────────────────────────────────
+
+static const struct { mcp::ControlAction action; const char* label; } kCtrlActions[] = {
+    { mcp::ControlAction::Go,            "GO"               },
+    { mcp::ControlAction::Arm,           "Arm"              },
+    { mcp::ControlAction::PanicSelected, "Panic Selected"   },
+    { mcp::ControlAction::SelectionUp,   "Selection Up"     },
+    { mcp::ControlAction::SelectionDown, "Selection Down"   },
+    { mcp::ControlAction::PanicAll,      "Panic All"        },
+};
+
+void SettingsDialog::buildControlsPage() {
+    // Build one ActionRow per action (shared between both tabs)
+    for (const auto& a : kCtrlActions) {
+        ActionRow r;
+        r.action = a.action;
+        r.label  = a.label;
+        m_actionRows.push_back(r);
+    }
+
+    auto* page = new QWidget;
+    auto* vlay = new QVBoxLayout(page);
+    vlay->setContentsMargins(8, 8, 8, 8);
+    vlay->setSpacing(0);
+
+    m_controlsTabs = new QTabWidget(page);
+    vlay->addWidget(m_controlsTabs, 1);
+
+    buildControlsMidiTab();
+    buildControlsOscTab();
+    loadControls();
+
+    m_stack->addWidget(page);
+}
+
+void SettingsDialog::buildControlsMidiTab() {
+    auto* page = new QWidget;
+    auto* lay  = new QVBoxLayout(page);
+    lay->setSpacing(4);
+
+    auto* grid = new QGridLayout;
+    grid->setSpacing(4);
+    grid->addWidget(new QLabel("Action"), 0, 0);
+    grid->addWidget(new QLabel("Enable"), 0, 1);
+    grid->addWidget(new QLabel("Type"),   0, 2);
+    grid->addWidget(new QLabel("Ch"),     0, 3);
+    grid->addWidget(new QLabel("D1"),     0, 4);
+    grid->addWidget(new QLabel("D2"),     0, 5);
+    grid->addWidget(new QLabel(""),       0, 6);
+
+    for (int i = 0; i < (int)m_actionRows.size(); ++i) {
+        auto& r = m_actionRows[i];
+        const int row = i + 1;
+        grid->addWidget(new QLabel(r.label), row, 0);
+
+        r.midiEnable = new QCheckBox;
+        r.midiType   = new QComboBox;
+        for (const char* s : {"Note On","Note Off","Control Change","Program Change","Pitch Bend"})
+            r.midiType->addItem(s);
+        r.midiCh = new QSpinBox; r.midiCh->setRange(0, 16); r.midiCh->setSpecialValueText("Any");
+        r.midiD1 = new QSpinBox; r.midiD1->setRange(0, 127);
+        r.midiD2 = new QSpinBox; r.midiD2->setRange(-1, 127); r.midiD2->setSpecialValueText("Any");
+        r.midiCapture = new QPushButton("Capture");
+        r.midiCapture->setFixedWidth(70);
+
+        grid->addWidget(r.midiEnable,  row, 1, Qt::AlignHCenter);
+        grid->addWidget(r.midiType,    row, 2);
+        grid->addWidget(r.midiCh,      row, 3);
+        grid->addWidget(r.midiD1,      row, 4);
+        grid->addWidget(r.midiD2,      row, 5);
+        grid->addWidget(r.midiCapture, row, 6);
+
+        auto* capture = r.midiCapture;
+        auto& rowRef  = r;
+        connect(capture, &QPushButton::clicked, this, [this, capture, &rowRef]() {
+            capture->setText("…");
+            capture->setEnabled(false);
+            m_model->midiIn.armCapture([this, capture, &rowRef](
+                    mcp::MidiMsgType t, int ch, int d1, int d2) {
+                rowRef.midiEnable->setChecked(true);
+                rowRef.midiType->setCurrentIndex(static_cast<int>(t));
+                rowRef.midiCh->setValue(ch);
+                rowRef.midiD1->setValue(d1);
+                const int d2save = (t == mcp::MidiMsgType::NoteOn || t == mcp::MidiMsgType::NoteOff)
+                                   ? -1 : d2;
+                rowRef.midiD2->setValue(d2save);
+                capture->setText("Capture");
+                capture->setEnabled(true);
+            });
+        });
+    }
+
+    lay->addLayout(grid);
+    lay->addStretch();
+    m_controlsTabs->addTab(page, "MIDI Learn");
+}
+
+void SettingsDialog::buildControlsOscTab() {
+    auto* page = new QWidget;
+    auto* lay  = new QVBoxLayout(page);
+    lay->setSpacing(4);
+
+    auto* grid = new QGridLayout;
+    grid->setSpacing(4);
+    grid->addWidget(new QLabel("Action"),   0, 0);
+    grid->addWidget(new QLabel("Enable"),   0, 1);
+    grid->addWidget(new QLabel("OSC Path"), 0, 2);
+
+    for (int i = 0; i < (int)m_actionRows.size(); ++i) {
+        auto& r = m_actionRows[i];
+        const int row = i + 1;
+        grid->addWidget(new QLabel(r.label), row, 0);
+        r.oscEnable = new QCheckBox;
+        r.oscPath   = new QLineEdit;
+        r.oscPath->setPlaceholderText("/my/go");
+        grid->addWidget(r.oscEnable, row, 1, Qt::AlignHCenter);
+        grid->addWidget(r.oscPath,   row, 2);
+    }
+
+    lay->addLayout(grid);
+    lay->addWidget(new QLabel(
+        "Note: these paths may conflict with the system vocabulary (/go, /start, /stop, …)\n"
+        "but will still work — system vocabulary always takes priority."));
+    lay->addStretch();
+    m_controlsTabs->addTab(page, "OSC");
+}
+
+void SettingsDialog::loadControls() {
+    for (auto& r : m_actionRows) {
+        const auto* e = m_systemControls.find(r.action);
+        if (e) {
+            r.midiEnable->setChecked(e->midi.enabled);
+            r.midiType->setCurrentIndex(static_cast<int>(e->midi.type));
+            r.midiCh->setValue(e->midi.channel);
+            r.midiD1->setValue(e->midi.data1);
+            r.midiD2->setValue(e->midi.data2);
+            r.oscEnable->setChecked(e->osc.enabled);
+            r.oscPath->setText(QString::fromStdString(e->osc.path));
+        }
+    }
+}
+
+void SettingsDialog::saveControls() {
+    for (const auto& r : m_actionRows) {
+        auto& entry = m_systemControls.get(r.action);
+        entry.midi.enabled = r.midiEnable->isChecked();
+        entry.midi.type    = static_cast<mcp::MidiMsgType>(r.midiType->currentIndex());
+        entry.midi.channel = r.midiCh->value();
+        entry.midi.data1   = r.midiD1->value();
+        entry.midi.data2   = r.midiD2->value();
+        entry.osc.enabled  = r.oscEnable->isChecked();
+        entry.osc.path     = r.oscPath->text().toStdString();
     }
 }

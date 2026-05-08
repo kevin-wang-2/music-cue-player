@@ -283,9 +283,15 @@ public:
     // calls so that co-temporal cues share identical prewait deadlines.
     // Use -1 (default) to snapshot the playhead inside the call.
     bool go(int64_t originFrame = -1);
+    bool prev();             // move cursor to the previous cue (no fire)
     bool start(int index, int64_t originFrame = -1);
     void stop(int index);    // stop all voices tagged with index, immediate
     void panic();            // cancel pending fires + stop all voices
+
+    // Toggle arm state: arm if not armed, disarm if armed.
+    void toggleArm(int index);
+    // Find a cue by its cueNumber string; returns index or -1.
+    int  findByCueNumber(const std::string& num) const;
 
     // Fade all active voices to silence over durationSeconds, then stop them.
     // Like panic(), also cancels all pending prewait events.

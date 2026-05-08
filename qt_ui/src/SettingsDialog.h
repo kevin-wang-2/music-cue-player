@@ -14,26 +14,31 @@ class QLineEdit;
 class QListWidget;
 class QPushButton;
 class QScrollArea;
+class QSpinBox;
 class QStackedWidget;
 class QTabWidget;
 class QTableWidget;
 class QWidget;
 
-// Multi-section settings dialog replacing AudioSetupDialog.
+// Multi-section settings dialog.
 //
 // Left sidebar (QListWidget) switches between sections:
-//   Audio   — Channels tab + Crosspoint tab (same as former AudioSetupDialog)
-//   Network — Network Output tab (list of OSC/text patches)
+//   Audio    — Channels tab + Crosspoint tab
+//   Network  — Network Output tab + OSC Server tab
+//   MIDI     — MIDI Output tab
+//   Controls — MIDI Learn tab + OSC tab (system action bindings)
 //
-// On Accept the caller reads audioResult() / networkResult() to update ShowFile.
+// On Accept the caller reads the result accessors to update ShowFile.
 class SettingsDialog : public QDialog {
     Q_OBJECT
 public:
     explicit SettingsDialog(AppModel* model, QWidget* parent = nullptr);
 
-    mcp::ShowFile::AudioSetup   audioResult()   const { return m_audioSetup; }
-    mcp::ShowFile::NetworkSetup networkResult() const { return m_networkSetup; }
-    mcp::ShowFile::MidiSetup    midiResult()    const { return m_midiSetup; }
+    mcp::ShowFile::AudioSetup      audioResult()    const { return m_audioSetup; }
+    mcp::ShowFile::NetworkSetup    networkResult()  const { return m_networkSetup; }
+    mcp::ShowFile::MidiSetup       midiResult()     const { return m_midiSetup; }
+    mcp::OscServerSettings         oscResult()      const { return m_oscSettings; }
+    mcp::SystemControlBindings     controlsResult() const { return m_systemControls; }
 
 private slots:
     // Audio section
@@ -59,7 +64,10 @@ private:
     // ── Network tab helpers ────────────────────────────────────────────────
     void buildNetworkPage();
     void buildNetworkOutputTab();
+    void buildOscServerTab();       // OSC server tab inside Network section
     void syncNetworkFromTable();
+    void syncOscFromUI();
+    void rebuildAccessList();
 
     // ── MIDI tab helpers ───────────────────────────────────────────────────
     void buildMidiPage();
@@ -67,12 +75,21 @@ private:
     void syncMidiFromTable();
     void populateMidiDestCombo(QComboBox* cb, const QString& current);
 
+    // ── Controls tab helpers ───────────────────────────────────────────────
+    void buildControlsPage();
+    void buildControlsMidiTab();
+    void buildControlsOscTab();
+    void loadControls();
+    void saveControls();
+
     AppModel* m_model{nullptr};
     int       m_numPhys{2};
 
-    mcp::ShowFile::AudioSetup   m_audioSetup;
-    mcp::ShowFile::NetworkSetup m_networkSetup;
-    mcp::ShowFile::MidiSetup    m_midiSetup;
+    mcp::ShowFile::AudioSetup      m_audioSetup;
+    mcp::ShowFile::NetworkSetup    m_networkSetup;
+    mcp::ShowFile::MidiSetup       m_midiSetup;
+    mcp::OscServerSettings         m_oscSettings;
+    mcp::SystemControlBindings     m_systemControls;
 
     // Sidebar + stacked pages
     QListWidget*    m_sidebar{nullptr};
@@ -94,9 +111,33 @@ private:
     QPushButton*  m_btnAddPatch{nullptr};
     QPushButton*  m_btnRemovePatch{nullptr};
 
+    // OSC server (tab inside Network)
+    QCheckBox*    m_chkOscEnabled{nullptr};
+    QSpinBox*     m_spinOscPort{nullptr};
+    QListWidget*  m_oscAccessList{nullptr};
+    QPushButton*  m_btnOscAddOpen{nullptr};
+    QPushButton*  m_btnOscAddPw{nullptr};
+    QPushButton*  m_btnOscRemove{nullptr};
+
     // MIDI section
     QTabWidget*   m_midiTabs{nullptr};
     QTableWidget* m_midiPatchTable{nullptr};
     QPushButton*  m_btnAddMidiPatch{nullptr};
     QPushButton*  m_btnRemoveMidiPatch{nullptr};
+
+    // Controls section
+    struct ActionRow {
+        mcp::ControlAction action;
+        QString            label;
+        QCheckBox*   midiEnable{nullptr};
+        QComboBox*   midiType{nullptr};
+        QSpinBox*    midiCh{nullptr};
+        QSpinBox*    midiD1{nullptr};
+        QSpinBox*    midiD2{nullptr};
+        QPushButton* midiCapture{nullptr};
+        QCheckBox*   oscEnable{nullptr};
+        QLineEdit*   oscPath{nullptr};
+    };
+    std::vector<ActionRow> m_actionRows;
+    QTabWidget*            m_controlsTabs{nullptr};
 };

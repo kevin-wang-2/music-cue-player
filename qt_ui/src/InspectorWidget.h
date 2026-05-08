@@ -1,5 +1,6 @@
 #pragma once
 
+#include "engine/TriggerData.h"
 #include <QTabWidget>
 #include <QWidget>
 #include <vector>
@@ -37,6 +38,7 @@ class InspectorWidget : public QWidget {
     Q_OBJECT
 public:
     explicit InspectorWidget(AppModel* model, QWidget* parent = nullptr);
+    bool eventFilter(QObject* obj, QEvent* ev) override;
 
     // Call when selection changes (rebuilds the whole inspector).
     void setCueIndex(int idx);
@@ -77,6 +79,9 @@ private:
     void loadTimecode();
     void updateTimecodeFields();  // show/hide LTC/MTC rows based on type
     void buildMarkerTab();
+    void buildTriggersTab();
+    void loadTriggers();
+    void saveTriggers();       // writes edited values back to ShowFile + CueList
 
     void loadBasic();
     void loadLevels();
@@ -217,5 +222,23 @@ private:
     QLabel*            m_lblPtPos{nullptr};
     int                m_selMCPt{-1};
 
+    // Triggers tab
+    QWidget*    m_triggersPage{nullptr};
+    // Hotkey
+    QCheckBox*  m_chkHotkeyEnable{nullptr};
+    QLineEdit*  m_editHotkey{nullptr};
+    QPushButton* m_btnHotkeyClear{nullptr};
+    // MIDI trigger
+    QCheckBox*  m_chkMidiTrigEnable{nullptr};
+    QComboBox*  m_comboMidiTrigType{nullptr};
+    QSpinBox*   m_spinMidiTrigCh{nullptr};
+    QSpinBox*   m_spinMidiTrigD1{nullptr};
+    QSpinBox*   m_spinMidiTrigD2{nullptr};
+    QPushButton* m_btnMidiCapture{nullptr};
+    // OSC trigger
+    QCheckBox*  m_chkOscTrigEnable{nullptr};
+    QLineEdit*  m_editOscPath{nullptr};
+
     bool m_loading{false};   // guard re-entrant signals during load
+    bool m_hotkeyCapturing{false};
 };

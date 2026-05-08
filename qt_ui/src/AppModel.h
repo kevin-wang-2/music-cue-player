@@ -4,6 +4,8 @@
 #include "engine/CueList.h"
 #include "engine/Scheduler.h"
 #include "engine/ShowFile.h"
+#include "MidiInputManager.h"
+#include "OscServer.h"
 
 #include <QObject>
 #include <QString>
@@ -23,6 +25,10 @@ public:
     mcp::AudioEngine engine;
     mcp::Scheduler   scheduler;
     mcp::CueList     cues;
+
+    // External trigger infrastructure
+    MidiInputManager midiIn;
+    OscServer        oscServer;
 
     // Show data
     mcp::ShowFile sf;
@@ -68,10 +74,23 @@ public:
         return QString("Ch %1").arg(ch + 1);
     }
 
+    // Apply OscServerSettings from sf and (re)start the OSC server.
+    void applyOscSettings();
+    // Apply MIDI input: open all ports.
+    void applyMidiInput();
+
+    // Route an incoming MIDI message to matching cue triggers + system controls.
+    // Called internally; also exposed for testing.
+    void routeMidi(mcp::MidiMsgType type, int channel, int data1, int data2);
+    // Route an OSC message from OscServer to cue triggers + system controls.
+    void routeOsc(const QString& path, const QVariantList& args);
+
 signals:
     void cueListChanged();
     void selectionChanged(int index);
     void playbackStateChanged();    // voices started/stopped
     void dirtyChanged(bool dirty);
     void engineStatusChanged();
+    // Emitted when an external trigger fires a cue (for UI highlight feedback)
+    void externalTriggerFired(int cueIndex);
 };

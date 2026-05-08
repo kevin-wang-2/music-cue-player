@@ -121,6 +121,30 @@ static ShowFile::CueData parseCue(const json& j) {
     c.tcLtcChannel   = jget<int>        (j, "tcLtcChannel",   0);
     c.tcMidiPatchName= jget<std::string>(j, "tcMidiPatchName","");
 
+    // Trigger data
+    if (j.contains("triggers") && j["triggers"].is_object()) {
+        const auto& tr = j["triggers"];
+        if (tr.contains("hotkey") && tr["hotkey"].is_object()) {
+            const auto& hk = tr["hotkey"];
+            c.triggers.hotkey.enabled   = jget<bool>       (hk, "enabled",   false);
+            c.triggers.hotkey.keyString = jget<std::string>(hk, "keyString", "");
+        }
+        if (tr.contains("midi") && tr["midi"].is_object()) {
+            const auto& m = tr["midi"];
+            c.triggers.midi.enabled = jget<bool>(m, "enabled", false);
+            MidiMsgType mt; const std::string mts = jget<std::string>(m, "type", "note_on");
+            midiMsgTypeFromString(mts, mt); c.triggers.midi.type = mt;
+            c.triggers.midi.channel = jget<int>(m, "channel", 0);
+            c.triggers.midi.data1   = jget<int>(m, "data1",   60);
+            c.triggers.midi.data2   = jget<int>(m, "data2",   -1);
+        }
+        if (tr.contains("osc") && tr["osc"].is_object()) {
+            const auto& o = tr["osc"];
+            c.triggers.osc.enabled = jget<bool>       (o, "enabled", false);
+            c.triggers.osc.path    = jget<std::string>(o, "path",    "");
+        }
+    }
+
     // Devamp cue parameters
     c.devampMode    = jget<int> (j, "devampMode",    0);
     c.devampPreVamp = jget<bool>(j, "devampPreVamp", false);
@@ -322,6 +346,30 @@ static json cueToJson(const ShowFile::CueData& c) {
 
     if (c.autoContinue) j["autoContinue"] = true;
     if (c.autoFollow)   j["autoFollow"]   = true;
+
+    // Triggers — only write if at least one is enabled
+    const auto& tr = c.triggers;
+    if (tr.hotkey.enabled || tr.midi.enabled || tr.osc.enabled) {
+        json tj;
+        if (tr.hotkey.enabled || !tr.hotkey.keyString.empty()) {
+            json hk; hk["enabled"] = tr.hotkey.enabled; hk["keyString"] = tr.hotkey.keyString;
+            tj["hotkey"] = hk;
+        }
+        if (tr.midi.enabled) {
+            json m;
+            m["enabled"] = tr.midi.enabled;
+            m["type"]    = midiMsgTypeToString(tr.midi.type);
+            m["channel"] = tr.midi.channel;
+            m["data1"]   = tr.midi.data1;
+            m["data2"]   = tr.midi.data2;
+            tj["midi"] = m;
+        }
+        if (tr.osc.enabled || !tr.osc.path.empty()) {
+            json o; o["enabled"] = tr.osc.enabled; o["path"] = tr.osc.path;
+            tj["osc"] = o;
+        }
+        j["triggers"] = tj;
+    }
     return j;
 }
 
@@ -410,6 +458,45 @@ bool ShowFile::load(const std::filesystem::path& path, std::string& error) {
         }
     }
 
+    // System control bindings
+    systemControls = {};
+    if (root.contains("systemControls") && root["systemControls"].is_array()) {
+        for (const auto& ej : root["systemControls"]) {
+            const std::string astr = jget<std::string>(ej, "action", "");
+            ControlAction a; if (!controlActionFromString(astr, a)) continue;
+            auto& entry = systemControls.get(a);
+            if (ej.contains("midi") && ej["midi"].is_object()) {
+                const auto& m = ej["midi"];
+                entry.midi.enabled = jget<bool>(m, "enabled", false);
+                MidiMsgType mt; const std::string mts = jget<std::string>(m, "type", "note_on");
+                midiMsgTypeFromString(mts, mt); entry.midi.type = mt;
+                entry.midi.channel = jget<int>(m, "channel", 0);
+                entry.midi.data1   = jget<int>(m, "data1",   0);
+                entry.midi.data2   = jget<int>(m, "data2",   -1);
+            }
+            if (ej.contains("osc") && ej["osc"].is_object()) {
+                const auto& o = ej["osc"];
+                entry.osc.enabled = jget<bool>       (o, "enabled", false);
+                entry.osc.path    = jget<std::string>(o, "path",    "");
+            }
+        }
+    }
+
+    // OSC server settings
+    oscServer = {};
+    if (root.contains("oscServer") && root["oscServer"].is_object()) {
+        const auto& os = root["oscServer"];
+        oscServer.enabled    = jget<bool>(os, "enabled",    false);
+        oscServer.listenPort = jget<int> (os, "listenPort", 14521);
+        if (os.contains("accessList") && os["accessList"].is_array()) {
+            for (const auto& ae : os["accessList"]) {
+                OscAccessEntry e;
+                e.password = jget<std::string>(ae, "password", "");
+                oscServer.accessList.push_back(e);
+            }
+        }
+    }
+
     cueLists.clear();
     if (root.contains("cueLists") && root["cueLists"].is_array()) {
         for (const auto& cl : root["cueLists"]) {
@@ -482,6 +569,45 @@ bool ShowFile::save(const std::filesystem::path& path, std::string& error) const
             pArr.push_back(pj);
         }
         root["midiSetup"]["patches"] = pArr;
+    }
+
+    // System control bindings
+    if (!systemControls.entries.empty()) {
+        json scArr = json::array();
+        for (const auto& e : systemControls.entries) {
+            json ej;
+            ej["action"] = controlActionToString(e.action);
+            if (e.midi.enabled) {
+                json m;
+                m["enabled"] = e.midi.enabled;
+                m["type"]    = midiMsgTypeToString(e.midi.type);
+                m["channel"] = e.midi.channel;
+                m["data1"]   = e.midi.data1;
+                m["data2"]   = e.midi.data2;
+                ej["midi"] = m;
+            }
+            if (e.osc.enabled || !e.osc.path.empty()) {
+                json o; o["enabled"] = e.osc.enabled; o["path"] = e.osc.path;
+                ej["osc"] = o;
+            }
+            scArr.push_back(ej);
+        }
+        root["systemControls"] = scArr;
+    }
+
+    // OSC server settings
+    if (oscServer.enabled || oscServer.listenPort != 14521 || !oscServer.accessList.empty()) {
+        json os;
+        os["enabled"]    = oscServer.enabled;
+        os["listenPort"] = oscServer.listenPort;
+        if (!oscServer.accessList.empty()) {
+            json alArr = json::array();
+            for (const auto& ae : oscServer.accessList) {
+                json aej; aej["password"] = ae.password; alArr.push_back(aej);
+            }
+            os["accessList"] = alArr;
+        }
+        root["oscServer"] = os;
     }
 
     json clArr = json::array();

@@ -14,6 +14,12 @@
 #include <QAction>
 #include <QApplication>
 #include <QCloseEvent>
+#include <QDoubleSpinBox>
+#include <QKeyEvent>
+#include <QLineEdit>
+#include <QPlainTextEdit>
+#include <QSpinBox>
+#include <QTextEdit>
 #include <QDragEnterEvent>
 #include <QDropEvent>
 #include <QFileDialog>
@@ -144,6 +150,13 @@ MainWindow::MainWindow(AppModel* model, QWidget* parent)
 
     updateTitle();
     m_cueTable->refresh();
+
+    // Start external trigger infrastructure
+    m_model->applyMidiInput();
+    m_model->applyOscSettings();
+
+    // App-level event filter for per-cue hotkey triggers
+    qApp->installEventFilter(this);
 }
 
 // ── GoBar ──────────────────────────────────────────────────────────────────
@@ -550,9 +563,12 @@ void MainWindow::onSaveShowAs() {
 void MainWindow::onOpenSettings() {
     SettingsDialog dlg(m_model, this);
     if (dlg.exec() != QDialog::Accepted) return;
-    m_model->sf.audioSetup   = dlg.audioResult();
-    m_model->sf.networkSetup = dlg.networkResult();
-    m_model->sf.midiSetup    = dlg.midiResult();
+    m_model->sf.audioSetup      = dlg.audioResult();
+    m_model->sf.networkSetup    = dlg.networkResult();
+    m_model->sf.midiSetup       = dlg.midiResult();
+    m_model->sf.oscServer       = dlg.oscResult();
+    m_model->sf.systemControls  = dlg.controlsResult();
+    m_model->applyOscSettings();
     m_model->dirty = true;
     emit m_model->dirtyChanged(true);
     std::string err;
@@ -722,6 +738,42 @@ void MainWindow::resizeEvent(QResizeEvent* ev) {
     }
 }
 
+bool MainWindow::eventFilter(QObject* obj, QEvent* ev) {
+    if (ev->type() != QEvent::KeyPress)
+        return QMainWindow::eventFilter(obj, ev);
+
+    // Don't intercept keys typed into text-input widgets
+    QWidget* fw = QApplication::focusWidget();
+    if (qobject_cast<QLineEdit*>(fw)      || qobject_cast<QTextEdit*>(fw) ||
+        qobject_cast<QPlainTextEdit*>(fw) || qobject_cast<QSpinBox*>(fw)  ||
+        qobject_cast<QDoubleSpinBox*>(fw))
+        return QMainWindow::eventFilter(obj, ev);
+
+    auto* ke = static_cast<QKeyEvent*>(ev);
+    const int k = ke->key();
+    // Ignore bare modifier presses
+    if (k == Qt::Key_Control || k == Qt::Key_Shift ||
+        k == Qt::Key_Alt     || k == Qt::Key_Meta)
+        return QMainWindow::eventFilter(obj, ev);
+
+    const QKeySequence ks(ke->modifiers() | k);
+    const std::string ksStr = ks.toString(QKeySequence::PortableText).toStdString();
+
+    if (!m_model->sf.cueLists.empty()) {
+        const auto& cueDatas = m_model->sf.cueLists[0].cues;
+        for (int i = 0; i < (int)cueDatas.size(); ++i) {
+            const auto& ht = cueDatas[i].triggers.hotkey;
+            if (ht.enabled && !ht.keyString.empty() && ht.keyString == ksStr) {
+                m_model->cues.start(i);
+                emit m_model->externalTriggerFired(i);
+                emit m_model->playbackStateChanged();
+                return true;
+            }
+        }
+    }
+    return QMainWindow::eventFilter(obj, ev);
+}
+
 // ── helpers ────────────────────────────────────────────────────────────────
 
 bool MainWindow::confirmDirty() {
@@ -742,6 +794,7 @@ void MainWindow::loadShowFile(const QString& path) {
     m_model->showPath = path.toStdString();
     m_model->baseDir  = std::filesystem::path(m_model->showPath).parent_path().string();
     m_model->dirty    = false;
+    m_model->applyOscSettings();
     ShowHelpers::rebuildCueList(*m_model, err);
     m_cueTable->refresh();
     m_inspector->setCueIndex(-1);

@@ -1705,6 +1705,33 @@ bool CueList::start(int index, int64_t originFrame) {
     return fire(index);
 }
 
+bool CueList::prev() {
+    const int n = cueCount();
+    if (n == 0) return false;
+    // Move cursor backwards, skipping group children.
+    int cur = m_selectedIndex;
+    if (cur <= 0) return false;
+    cur -= 1;
+    // Skip over group children (they shouldn't be the direct selection target
+    // when navigating backwards — stop at the first non-child cue).
+    while (cur > 0 && m_cues[cur].parentIndex >= 0)
+        cur -= 1;
+    m_selectedIndex = cur;
+    return true;
+}
+
+void CueList::toggleArm(int index) {
+    if (index < 0 || index >= cueCount()) return;
+    if (isArmed(index)) disarm(index);
+    else                arm(index);
+}
+
+int CueList::findByCueNumber(const std::string& num) const {
+    for (int i = 0; i < cueCount(); ++i)
+        if (m_cues[i].cueNumber == num) return i;
+    return -1;
+}
+
 void CueList::stop(int index) {
     if (index < 0 || index >= cueCount()) return;
     // Cancel any pending prewait for this cue before clearing voices.

@@ -30,6 +30,7 @@ protected:
     void dragEnterEvent(QDragEnterEvent*) override;
     void dropEvent(QDropEvent*) override;
     void resizeEvent(QResizeEvent*) override;
+    bool eventFilter(QObject* obj, QEvent* ev) override;
 
 private slots:
     void onTick();

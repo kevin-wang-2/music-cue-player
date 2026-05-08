@@ -1,5 +1,6 @@
 #include "InspectorWidget.h"
 #include "AppModel.h"
+#include "MidiInputManager.h"
 #include "FaderWidget.h"
 #include "MCImport.h"
 #include "MusicContextView.h"
@@ -19,6 +20,8 @@
 #include <optional>
 #include <QCheckBox>
 #include <QComboBox>
+#include <QEvent>
+#include <QKeyEvent>
 #include <QPlainTextEdit>
 #include <QDoubleSpinBox>
 #include <QFileDialog>
@@ -76,6 +79,7 @@ InspectorWidget::InspectorWidget(AppModel* model, QWidget* parent)
     buildBasicTab();
     buildMarkerTab();
     buildMCTab();
+    buildTriggersTab();
     buildLevelsTab();
     buildTrimTab();
     buildCurveTab();
@@ -821,6 +825,7 @@ void InspectorWidget::setCueIndex(int idx) {
     m_tabs->setTabVisible(m_tabs->indexOf(m_networkPage),   isNetworkCue);
     m_tabs->setTabVisible(m_tabs->indexOf(m_midiPage),      isMidiCue);
     m_tabs->setTabVisible(m_tabs->indexOf(m_timecodePage),  isTimecodeCue);
+    m_tabs->setTabVisible(m_tabs->indexOf(m_triggersPage),  c != nullptr);
     m_spinDurationBasic->setVisible(true);
     m_devampGroup->setVisible(isDevamp);
     m_armGroup->setVisible(isArm);
@@ -868,6 +873,7 @@ void InspectorWidget::setCueIndex(int idx) {
     if (isNetworkCue)  loadNetwork();
     if (isMidiCue)     loadMidi();
     if (isTimecodeCue) loadTimecode();
+    if (c)             loadTriggers();
 
     // Pass MC to timeline views for bar/beat ruler
     {
@@ -1928,4 +1934,205 @@ void InspectorWidget::loadTimecode() {
 
     m_loading = false;
     updateTimecodeFields();
+}
+
+// ── Triggers tab ──────────────────────────────────────────────────────────
+
+void InspectorWidget::buildTriggersTab() {
+    // m_triggersPage is the direct child of QTabWidget (needed for indexOf).
+    // All visible content lives inside a QScrollArea so the tab scrolls instead
+    // of compressing when the inspector panel is shorter than the content.
+    m_triggersPage = new QWidget;
+    auto* pageLayout = new QVBoxLayout(m_triggersPage);
+    pageLayout->setContentsMargins(0, 0, 0, 0);
+
+    auto* scroll = new QScrollArea(m_triggersPage);
+    scroll->setWidgetResizable(true);
+    scroll->setFrameShape(QFrame::NoFrame);
+    pageLayout->addWidget(scroll);
+
+    auto* inner = new QWidget;
+    auto* outer = new QVBoxLayout(inner);
+    outer->setContentsMargins(8, 8, 8, 8);
+    outer->setSpacing(12);
+
+    // ---- Hotkey ----
+    auto* hkBox = new QGroupBox("Hotkey Trigger");
+    auto* hkLay = new QHBoxLayout(hkBox);
+    m_chkHotkeyEnable = new QCheckBox;
+    m_editHotkey = new QLineEdit;
+    m_editHotkey->setPlaceholderText("Click to capture key…");
+    m_editHotkey->setReadOnly(true);
+    m_editHotkey->setMinimumWidth(160);
+    m_btnHotkeyClear = new QPushButton("✕");
+    m_btnHotkeyClear->setFixedWidth(28);
+    hkLay->addWidget(m_chkHotkeyEnable);
+    hkLay->addWidget(m_editHotkey, 1);
+    hkLay->addWidget(m_btnHotkeyClear);
+    outer->addWidget(hkBox);
+
+    m_editHotkey->installEventFilter(this);  // FocusIn/Out sets capture mode, KeyPress captures
+
+    connect(m_btnHotkeyClear, &QPushButton::clicked, this, [this]() {
+        m_editHotkey->clear();
+        m_hotkeyCapturing = false;
+        saveTriggers();
+    });
+    connect(m_chkHotkeyEnable, &QCheckBox::toggled, this, [this](bool) {
+        if (!m_loading) saveTriggers();
+    });
+
+    // ---- MIDI Trigger ----
+    auto* midiBox = new QGroupBox("MIDI Trigger");
+    auto* midiGrid = new QGridLayout(midiBox);
+    midiGrid->setSpacing(4);
+    m_chkMidiTrigEnable = new QCheckBox;
+    m_comboMidiTrigType = new QComboBox;
+    for (const char* s : {"Note On","Note Off","Control Change","Program Change","Pitch Bend"})
+        m_comboMidiTrigType->addItem(s);
+    m_spinMidiTrigCh = new QSpinBox; m_spinMidiTrigCh->setRange(0,16);
+    m_spinMidiTrigCh->setSpecialValueText("Any");
+    m_spinMidiTrigD1 = new QSpinBox; m_spinMidiTrigD1->setRange(0,127);
+    m_spinMidiTrigD2 = new QSpinBox; m_spinMidiTrigD2->setRange(-1,127);
+    m_spinMidiTrigD2->setSpecialValueText("Any");
+    m_btnMidiCapture = new QPushButton("Capture");
+
+    midiGrid->addWidget(m_chkMidiTrigEnable, 0, 0);
+    midiGrid->addWidget(m_comboMidiTrigType, 0, 1);
+    midiGrid->addWidget(new QLabel("Ch:"), 0, 2);
+    midiGrid->addWidget(m_spinMidiTrigCh,   0, 3);
+    midiGrid->addWidget(new QLabel("D1:"),  0, 4);
+    midiGrid->addWidget(m_spinMidiTrigD1,   0, 5);
+    midiGrid->addWidget(new QLabel("D2:"),  0, 6);
+    midiGrid->addWidget(m_spinMidiTrigD2,   0, 7);
+    midiGrid->addWidget(m_btnMidiCapture,   0, 8);
+    outer->addWidget(midiBox);
+
+    connect(m_chkMidiTrigEnable, &QCheckBox::toggled, this, [this](bool) { if (!m_loading) saveTriggers(); });
+    connect(m_comboMidiTrigType, QOverload<int>::of(&QComboBox::currentIndexChanged), this, [this](int) { if (!m_loading) saveTriggers(); });
+    connect(m_spinMidiTrigCh, QOverload<int>::of(&QSpinBox::valueChanged), this, [this](int) { if (!m_loading) saveTriggers(); });
+    connect(m_spinMidiTrigD1, QOverload<int>::of(&QSpinBox::valueChanged), this, [this](int) { if (!m_loading) saveTriggers(); });
+    connect(m_spinMidiTrigD2, QOverload<int>::of(&QSpinBox::valueChanged), this, [this](int) { if (!m_loading) saveTriggers(); });
+
+    connect(m_btnMidiCapture, &QPushButton::clicked, this, [this]() {
+        m_btnMidiCapture->setText("Listening…");
+        m_btnMidiCapture->setEnabled(false);
+        m_model->midiIn.armCapture([this](mcp::MidiMsgType t, int ch, int d1, int d2) {
+            m_loading = true;
+            m_chkMidiTrigEnable->setChecked(true);
+            m_comboMidiTrigType->setCurrentIndex(static_cast<int>(t));
+            m_spinMidiTrigCh->setValue(ch);
+            m_spinMidiTrigD1->setValue(d1);
+            // NoteOn/Off: ignore velocity (use Any = -1) so any velocity triggers
+            const int d2save = (t == mcp::MidiMsgType::NoteOn || t == mcp::MidiMsgType::NoteOff)
+                               ? -1 : d2;
+            m_spinMidiTrigD2->setValue(d2save);
+            m_loading = false;
+            m_btnMidiCapture->setText("Capture");
+            m_btnMidiCapture->setEnabled(true);
+            saveTriggers();
+        });
+    });
+
+    // ---- OSC Trigger ----
+    auto* oscBox = new QGroupBox("OSC Trigger");
+    auto* oscLay = new QHBoxLayout(oscBox);
+    m_chkOscTrigEnable = new QCheckBox;
+    m_editOscPath = new QLineEdit;
+    m_editOscPath->setPlaceholderText("/my/custom/path");
+    oscLay->addWidget(m_chkOscTrigEnable);
+    oscLay->addWidget(m_editOscPath, 1);
+    outer->addWidget(oscBox);
+
+    connect(m_chkOscTrigEnable, &QCheckBox::toggled, this, [this](bool) { if (!m_loading) saveTriggers(); });
+    connect(m_editOscPath, &QLineEdit::editingFinished, this, [this]() { if (!m_loading) saveTriggers(); });
+
+    outer->addStretch();
+    scroll->setWidget(inner);
+    m_tabs->addTab(m_triggersPage, "Triggers");
+}
+
+void InspectorWidget::loadTriggers() {
+    if (m_cueIdx < 0 || !m_model) return;
+    if (m_model->sf.cueLists.empty()) return;
+    const auto& cueDatas = m_model->sf.cueLists[0].cues;
+    if (m_cueIdx >= (int)cueDatas.size()) return;
+    const auto& tr = cueDatas[m_cueIdx].triggers;
+
+    m_loading = true;
+    m_chkHotkeyEnable->setChecked(tr.hotkey.enabled);
+    m_editHotkey->setText(QString::fromStdString(tr.hotkey.keyString));
+
+    m_chkMidiTrigEnable->setChecked(tr.midi.enabled);
+    m_comboMidiTrigType->setCurrentIndex(static_cast<int>(tr.midi.type));
+    m_spinMidiTrigCh->setValue(tr.midi.channel);
+    m_spinMidiTrigD1->setValue(tr.midi.data1);
+    m_spinMidiTrigD2->setValue(tr.midi.data2);
+
+    m_chkOscTrigEnable->setChecked(tr.osc.enabled);
+    m_editOscPath->setText(QString::fromStdString(tr.osc.path));
+    m_loading = false;
+}
+
+void InspectorWidget::saveTriggers() {
+    if (m_cueIdx < 0 || !m_model) return;
+    if (m_model->sf.cueLists.empty()) return;
+    auto& cueDatas = m_model->sf.cueLists[0].cues;
+    if (m_cueIdx >= (int)cueDatas.size()) return;
+
+    auto& tr = cueDatas[m_cueIdx].triggers;
+
+    tr.hotkey.enabled   = m_chkHotkeyEnable->isChecked();
+    tr.hotkey.keyString = m_editHotkey->text().toStdString();
+
+    tr.midi.enabled = m_chkMidiTrigEnable->isChecked();
+    tr.midi.type    = static_cast<mcp::MidiMsgType>(m_comboMidiTrigType->currentIndex());
+    tr.midi.channel = m_spinMidiTrigCh->value();
+    tr.midi.data1   = m_spinMidiTrigD1->value();
+    tr.midi.data2   = m_spinMidiTrigD2->value();
+
+    const std::string oscPath = m_editOscPath->text().toStdString();
+    // Reject system vocabulary paths
+    if (!oscPath.empty() && mcp::isSystemOscPath(oscPath)) {
+        m_editOscPath->setStyleSheet("QLineEdit { border: 1px solid #cc3333; }");
+        return;
+    }
+    m_editOscPath->setStyleSheet("");
+    tr.osc.enabled = m_chkOscTrigEnable->isChecked();
+    tr.osc.path    = oscPath;
+
+    m_model->dirty = true;
+    emit m_model->dirtyChanged(true);
+}
+
+// Hotkey capture: FocusIn enters capture mode, KeyPress records the key.
+bool InspectorWidget::eventFilter(QObject* obj, QEvent* ev) {
+    if (obj != m_editHotkey)
+        return QWidget::eventFilter(obj, ev);
+
+    if (ev->type() == QEvent::FocusIn) {
+        m_hotkeyCapturing = true;
+        m_editHotkey->setPlaceholderText("Press any key…");
+        return QWidget::eventFilter(obj, ev);
+    }
+    if (ev->type() == QEvent::FocusOut) {
+        if (m_hotkeyCapturing) {
+            m_hotkeyCapturing = false;
+            m_editHotkey->setPlaceholderText("Click to capture key…");
+        }
+        return QWidget::eventFilter(obj, ev);
+    }
+    if (ev->type() == QEvent::KeyPress && m_hotkeyCapturing) {
+        auto* ke = static_cast<QKeyEvent*>(ev);
+        if (ke->key() == Qt::Key_Shift || ke->key() == Qt::Key_Control ||
+            ke->key() == Qt::Key_Alt   || ke->key() == Qt::Key_Meta)
+            return QWidget::eventFilter(obj, ev);
+        const QKeySequence ks(ke->keyCombination());
+        m_editHotkey->setText(ks.toString());
+        m_hotkeyCapturing = false;
+        m_editHotkey->setPlaceholderText("Click to capture key…");
+        saveTriggers();
+        return true;
+    }
+    return QWidget::eventFilter(obj, ev);
 }

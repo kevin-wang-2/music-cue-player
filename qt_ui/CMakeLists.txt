@@ -6,13 +6,15 @@ set(CMAKE_AUTOUIC ON)
 set(CMAKE_AUTORCC ON)
 
 # Prefer Qt6; fall back to Qt5 if not found
-find_package(Qt6 QUIET COMPONENTS Core Widgets)
+find_package(Qt6 QUIET COMPONENTS Core Widgets Network)
 if(Qt6_FOUND)
     set(QT_TARGET Qt6::Widgets)
+    set(QT_NETWORK_TARGET Qt6::Network)
     message(STATUS "Found Qt6 ${Qt6_VERSION}")
 else()
-    find_package(Qt5 REQUIRED COMPONENTS Core Widgets)
+    find_package(Qt5 REQUIRED COMPONENTS Core Widgets Network)
     set(QT_TARGET Qt5::Widgets)
+    set(QT_NETWORK_TARGET Qt5::Network)
     message(STATUS "Found Qt5 ${Qt5_VERSION}")
 endif()
 
@@ -48,6 +50,12 @@ set(QT_UI_SOURCES
     src/MCImport.cpp
     src/RenumberDialog.h
     src/RenumberDialog.cpp
+    src/MidiInputManager.h
+    src/MidiInputManager.cpp
+    src/OscServer.h
+    src/OscServer.cpp
+    src/ControlsDialog.h
+    src/ControlsDialog.cpp
 )
 
 if(APPLE)
@@ -64,6 +72,7 @@ target_include_directories(mcp_qt_ui PRIVATE
 target_link_libraries(mcp_qt_ui PRIVATE
     mcp_engine
     ${QT_TARGET}
+    ${QT_NETWORK_TARGET}
 )
 if(APPLE)
     target_link_libraries(mcp_qt_ui PRIVATE "-framework Cocoa"

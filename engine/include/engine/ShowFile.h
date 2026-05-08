@@ -1,5 +1,6 @@
 #pragma once
 
+#include "TriggerData.h"
 #include <filesystem>
 #include <string>
 #include <vector>
@@ -134,6 +135,9 @@ struct ShowFile {
             bool               applyBeforeStart{true};
         };
         MCData musicContext;
+
+        // External triggers (hotkey / MIDI / OSC)
+        CueTriggers triggers;
     };
 
     // ---- Cue list ----------------------------------------------------------
@@ -205,6 +209,8 @@ struct ShowFile {
     AudioSetup               audioSetup;
     NetworkSetup             networkSetup;
     MidiSetup                midiSetup;
+    SystemControlBindings    systemControls;
+    OscServerSettings        oscServer;
     std::vector<CueListData> cueLists;
 
     // ---- I/O ---------------------------------------------------------------
