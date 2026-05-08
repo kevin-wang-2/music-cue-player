@@ -12,7 +12,7 @@
 
 namespace mcp {
 
-enum class CueType { Audio, Start, Stop, Fade, Arm, Devamp, Group, MusicContext, Marker, Network, Midi, Timecode };
+enum class CueType { Audio, Start, Stop, Fade, Arm, Devamp, Group, MusicContext, Marker, Network, Midi, Timecode, Goto, Memo };
 
 // Per-audio-cue channel routing.
 // outLevelDb[o]  — per-output-channel level in dB (0.0 = unity).
@@ -153,7 +153,8 @@ struct Cue {
         if (type == CueType::Network)      return networkPatchIdx >= 0;
         if (type == CueType::Midi)         return midiPatchIdx >= 0;
         if (type == CueType::Timecode)     return tcStartTC < tcEndTC;
-        return true;   // Group, Start, Stop, Arm always "loaded"
+        if (type == CueType::Goto) return targetIndex >= 0;
+        return true;   // Group, Start, Stop, Arm, Memo always "loaded"
     }
 };
 

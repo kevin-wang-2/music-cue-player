@@ -219,6 +219,37 @@ bool CueList::addMarkerCue(int targetIndex, int markerIndex,
     return true;
 }
 
+bool CueList::addGotoCue(int targetIndex, const std::string& name, double preWait) {
+    Cue cue;
+    cue.type           = CueType::Goto;
+    cue.targetIndex    = targetIndex;
+    cue.preWaitSeconds = preWait;
+    cue.name           = name.empty() ? "Goto" : name;
+    m_cues.push_back(std::move(cue));
+    std::lock_guard<std::mutex> lk(m_slotMutex);
+    m_lastSlot.push_back(-1);
+    m_pendingEventId.push_back(-1);
+    m_cueFireFrame.push_back(-1);
+    m_cueFireArmBase.push_back(0.0);
+    m_lastFilePosSec.push_back(-1.0);
+    return true;
+}
+
+bool CueList::addMemoCue(const std::string& name, double preWait) {
+    Cue cue;
+    cue.type           = CueType::Memo;
+    cue.preWaitSeconds = preWait;
+    cue.name           = name.empty() ? "Memo" : name;
+    m_cues.push_back(std::move(cue));
+    std::lock_guard<std::mutex> lk(m_slotMutex);
+    m_lastSlot.push_back(-1);
+    m_pendingEventId.push_back(-1);
+    m_cueFireFrame.push_back(-1);
+    m_cueFireArmBase.push_back(0.0);
+    m_lastFilePosSec.push_back(-1.0);
+    return true;
+}
+
 bool CueList::addNetworkCue(const std::string& name, double preWait) {
     Cue cue;
     cue.type           = CueType::Network;
@@ -1562,6 +1593,22 @@ bool CueList::fire(int idx) {
                         "mtc-cleanup[" + std::to_string(idx) + "]");
                 }
             }
+            break;
+        }
+
+        case CueType::Goto: {
+            const int ti = cue.targetIndex;
+            if (ti >= 0 && ti < cueCount()) {
+                m_selectedIndex = ti;
+                result = true;
+            }
+            followFrames = 0;
+            break;
+        }
+
+        case CueType::Memo: {
+            result = true;
+            followFrames = 0;
             break;
         }
     }

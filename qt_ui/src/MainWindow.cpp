@@ -315,9 +315,11 @@ void MainWindow::buildIconBar() {
         { nullptr, nullptr, nullptr },
         { "▷",  "Add Start cue",          "start"  },
         { "□",  "Add Stop cue",           "stop"   },
+        { "→",  "Add Goto cue",           "goto"   },
         { "⊙",  "Add Arm cue",            "arm"    },
         { "⤴",  "Add Devamp cue",         "devamp"   },
         { "◈",  "Add Marker cue",         "marker"   },
+        { "✎",  "Add Memo cue",           "memo"   },
         { nullptr, nullptr, nullptr },
         { "⊹",  "Add Network cue",        "network"  },
         { "♪",  "Add MIDI cue",           "midi"     },
@@ -838,13 +840,19 @@ void MainWindow::updateCueInfo() {
         detail = cueNum;
         if (!detail.isEmpty()) detail += "  ·  ";
         switch (c->type) {
-            case mcp::CueType::Audio:        detail += "Audio";  break;
-            case mcp::CueType::Start:        detail += "Start";  break;
-            case mcp::CueType::Stop:         detail += "Stop";   break;
-            case mcp::CueType::Fade:         detail += "Fade";   break;
-            case mcp::CueType::Arm:          detail += "Arm";    break;
-            case mcp::CueType::Devamp:       detail += "Devamp"; break;
-            case mcp::CueType::MusicContext: detail += "MC";     break;
+            case mcp::CueType::Audio:        detail += "Audio";    break;
+            case mcp::CueType::Start:        detail += "Start";    break;
+            case mcp::CueType::Stop:         detail += "Stop";     break;
+            case mcp::CueType::Fade:         detail += "Fade";     break;
+            case mcp::CueType::Arm:          detail += "Arm";      break;
+            case mcp::CueType::Devamp:       detail += "Devamp";   break;
+            case mcp::CueType::MusicContext: detail += "MC";       break;
+            case mcp::CueType::Marker:       detail += "Marker";   break;
+            case mcp::CueType::Network:      detail += "Network";  break;
+            case mcp::CueType::Midi:         detail += "MIDI";     break;
+            case mcp::CueType::Timecode:     detail += "Timecode"; break;
+            case mcp::CueType::Goto:         detail += "Goto";     break;
+            case mcp::CueType::Memo:         detail += "Memo";     break;
             case mcp::CueType::Group:  break;  // handled above
         }
     }

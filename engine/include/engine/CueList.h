@@ -118,6 +118,12 @@ public:
     bool addMarkerCue(int targetIndex, int markerIndex,
                       const std::string& name = "", double preWait = 0.0);
 
+    // Append a Goto cue.  When fired, moves selectedIndex to targetIndex.
+    bool addGotoCue(int targetIndex, const std::string& name = "", double preWait = 0.0);
+
+    // Append a Memo cue.  When fired, does nothing (useful as a label/divider).
+    bool addMemoCue(const std::string& name = "", double preWait = 0.0);
+
     // Append a Network cue.  When fired, sends the stored command to the
     // network patch identified by networkPatchIdx.
     bool addNetworkCue(const std::string& name = "", double preWait = 0.0);

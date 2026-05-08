@@ -75,6 +75,8 @@ static TypeInfo typeInfoFor(mcp::CueType t) {
         case mcp::CueType::Network:      return {"⊹",  {0x44, 0xdd, 0xaa}};
         case mcp::CueType::Midi:         return {"♪",  {0xff, 0x99, 0x44}};
         case mcp::CueType::Timecode:     return {"TC", {0x44, 0xcc, 0xdd}};
+        case mcp::CueType::Goto:         return {"→",  {0x44, 0xdd, 0x88}};
+        case mcp::CueType::Memo:         return {"✎",  {0x88, 0x88, 0x88}};
     }
     return {"?", {0x88, 0x88, 0x88}};
 }
@@ -249,7 +251,8 @@ void CueTableView::populateRow(int row) {
                             c->type == mcp::CueType::Stop   ||
                             c->type == mcp::CueType::Devamp ||
                             c->type == mcp::CueType::Arm    ||
-                            c->type == mcp::CueType::Marker);
+                            c->type == mcp::CueType::Marker ||
+                            c->type == mcp::CueType::Goto);
     {
         QString tl = targetLabel(row);
         if (canTarget && tl.isEmpty()) tl = QStringLiteral("—");
@@ -321,6 +324,8 @@ QString CueTableView::typeLabel(mcp::CueType t) const {
         case mcp::CueType::Network:      return "Network";
         case mcp::CueType::Midi:         return "MIDI";
         case mcp::CueType::Timecode:     return "Timecode";
+        case mcp::CueType::Goto:         return "Goto";
+        case mcp::CueType::Memo:         return "Memo";
     }
     return "?";
 }
@@ -657,7 +662,8 @@ void CueTableView::dragMoveEvent(QDragMoveEvent* ev) {
                              c->type == mcp::CueType::Stop   ||
                              c->type == mcp::CueType::Devamp ||
                              c->type == mcp::CueType::Arm    ||
-                             c->type == mcp::CueType::Marker);
+                             c->type == mcp::CueType::Marker ||
+                             c->type == mcp::CueType::Goto);
     }
 
     int newTargetRow    = -1;
@@ -775,7 +781,8 @@ void CueTableView::dropEvent(QDropEvent* ev) {
              dstCue->type == mcp::CueType::Stop   ||
              dstCue->type == mcp::CueType::Devamp ||
              dstCue->type == mcp::CueType::Arm    ||
-             dstCue->type == mcp::CueType::Marker);
+             dstCue->type == mcp::CueType::Marker ||
+             dstCue->type == mcp::CueType::Goto);
         if (canTarget && srcRow != dropIdx.row()) {
             m_model->pushUndo();
             m_model->cues.setCueTarget(dropIdx.row(), srcRow);
@@ -1025,7 +1032,7 @@ void CueTableView::contextMenuEvent(QContextMenuEvent* ev) {
     }
     addMenu->addSeparator();
     // Transport control
-    for (const char* type : {"Start", "Stop", "Arm", "Devamp", "Marker"}) {
+    for (const char* type : {"Start", "Stop", "Goto", "Arm", "Devamp", "Marker", "Memo"}) {
         auto* act = addMenu->addAction(type);
         connect(act, &QAction::triggered, this, [this, type, insertAt, autoTarget]() {
             addCueOfType(type, insertAt, autoTarget);
@@ -1134,7 +1141,7 @@ void CueTableView::addCueOfType(const QString& type, int beforeRow, int autoTarg
     // Auto-assign target for cue types that reference another cue.
     if (autoTarget >= 0) {
         const std::string& t = cd.type;
-        if (t == "fade" || t == "start" || t == "stop" || t == "arm" || t == "devamp")
+        if (t == "fade" || t == "start" || t == "stop" || t == "arm" || t == "devamp" || t == "goto")
             cd.target = autoTarget;
     }
 

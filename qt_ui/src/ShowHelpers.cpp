@@ -251,6 +251,10 @@ bool rebuildCueList(AppModel& m, std::string& /*err*/) {
                     m.cues.addMCCue(cd.name, cd.preWait);
                 } else if (cd.type == "marker") {
                     m.cues.addMarkerCue(target, cd.markerIndex, cd.name, cd.preWait);
+                } else if (cd.type == "goto") {
+                    m.cues.addGotoCue(target, cd.name, cd.preWait);
+                } else if (cd.type == "memo") {
+                    m.cues.addMemoCue(cd.name, cd.preWait);
                 } else if (cd.type == "network") {
                     m.cues.addNetworkCue(cd.name, cd.preWait);
                 } else if (cd.type == "midi") {
@@ -597,6 +601,18 @@ void syncSfFromCues(AppModel& m) {
                     cd.tcEndTC         = mcp::tcToString(c->tcEndTC);
                     cd.tcLtcChannel    = c->tcLtcChannel;
                     cd.tcMidiPatchName = m.cues.midiPatchName(c->tcMidiPatchIdx);
+                    ++i;
+                    break;
+
+                case mcp::CueType::Goto:
+                    cd.type            = "goto";
+                    cd.target          = c->targetIndex;
+                    cd.targetCueNumber = cueNumAt(c->targetIndex);
+                    ++i;
+                    break;
+
+                case mcp::CueType::Memo:
+                    cd.type = "memo";
                     ++i;
                     break;
             }

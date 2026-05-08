@@ -246,6 +246,9 @@ static json cueToJson(const ShowFile::CueData& c) {
         j["target"]          = c.target;
         j["targetCueNumber"] = c.targetCueNumber;
         j["markerIndex"]     = c.markerIndex;
+    } else if (c.type == "goto") {
+        j["target"]          = c.target;
+        j["targetCueNumber"] = c.targetCueNumber;
     } else if (c.type == "start" || c.type == "stop" || c.type == "arm") {
         j["target"]          = c.target;
         j["targetCueNumber"] = c.targetCueNumber;
