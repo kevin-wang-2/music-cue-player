@@ -7,6 +7,7 @@
 class AppModel;
 class CueTableView;
 class InspectorWidget;
+class ProjectStatusDialog;
 class QSplitter;
 class QTimer;
 class QToolButton;
@@ -61,9 +62,10 @@ private:
     void updateCueInfo();     // refresh name/notes in GoBar
     void showToast(const QString& msg, int ms = 2500);
 
-    AppModel*        m_model{nullptr};
-    CueTableView*    m_cueTable{nullptr};
-    InspectorWidget* m_inspector{nullptr};
+    AppModel*             m_model{nullptr};
+    CueTableView*         m_cueTable{nullptr};
+    InspectorWidget*      m_inspector{nullptr};
+    ProjectStatusDialog*  m_statusDialog{nullptr};
     QSplitter*       m_splitter{nullptr};
     QTimer*          m_timer{nullptr};
 

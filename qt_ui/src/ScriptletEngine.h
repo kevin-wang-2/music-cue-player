@@ -14,6 +14,8 @@ public:
     void setGoCallback    (std::function<void()>                      cb);
     void setSelectCallback(std::function<void(const std::string&)>    cb);
     void setAlertCallback (std::function<void(const std::string&)>    cb);
+    // Called with any text written to stdout/stderr during script execution.
+    void setOutputCallback(std::function<void(const std::string&)>    cb);
 
     // Execute Python code synchronously.  Returns an empty string on success,
     // or a human-readable error / traceback string on failure.

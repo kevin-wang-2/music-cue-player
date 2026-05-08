@@ -93,6 +93,11 @@ public:
 signals:
     void cueListChanged();
     void scriptletError(const QString& msg);
+    // Emitted before routing so monitors (e.g. ProjectStatusDialog) can log.
+    void midiInputReceived(mcp::MidiMsgType type, int ch, int d1, int d2);
+    void oscInputReceived(const QString& path, const QVariantList& args);
+    // Scriptlet stdout/stderr output
+    void scriptletOutput(const QString& text);
     void selectionChanged(int index);
     void playbackStateChanged();    // voices started/stopped
     void dirtyChanged(bool dirty);

@@ -30,6 +30,9 @@ AppModel::AppModel(QObject* parent)
     scriptlet->setAlertCallback([](const std::string& msg) {
         QMessageBox::information(nullptr, "Script", QString::fromStdString(msg));
     });
+    scriptlet->setOutputCallback([this](const std::string& text) {
+        emit scriptletOutput(QString::fromStdString(text));
+    });
 }
 
 AppModel::~AppModel() {
@@ -89,6 +92,7 @@ static bool midiMatchesCtrl(const mcp::ControlMidiBinding& t,
 }
 
 void AppModel::routeMidi(mcp::MidiMsgType type, int channel, int data1, int data2) {
+    emit midiInputReceived(type, channel, data1, data2);
     // Per-cue triggers
     if (!sf.cueLists.empty()) {
         const auto& cueDatas = sf.cueLists[0].cues;
@@ -136,6 +140,7 @@ void AppModel::routeMidi(mcp::MidiMsgType type, int channel, int data1, int data
 }
 
 void AppModel::routeOsc(const QString& path, const QVariantList& args) {
+    emit oscInputReceived(path, args);
     const std::string p = path.toStdString();
 
     // Per-cue OSC triggers

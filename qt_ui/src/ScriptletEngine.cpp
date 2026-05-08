@@ -8,6 +8,7 @@
 static std::function<void()>                   s_goCb;
 static std::function<void(const std::string&)> s_selectCb;
 static std::function<void(const std::string&)> s_alertCb;
+static std::function<void(const std::string&)> s_outputCb;
 
 // ---------------------------------------------------------------------------
 // mcp Python module methods
@@ -65,9 +66,20 @@ ScriptletEngine::~ScriptletEngine() {
 void ScriptletEngine::setGoCallback    (std::function<void()> cb)                   { s_goCb     = std::move(cb); }
 void ScriptletEngine::setSelectCallback(std::function<void(const std::string&)> cb) { s_selectCb = std::move(cb); }
 void ScriptletEngine::setAlertCallback (std::function<void(const std::string&)> cb) { s_alertCb  = std::move(cb); }
+void ScriptletEngine::setOutputCallback(std::function<void(const std::string&)> cb) { s_outputCb = std::move(cb); }
 
 std::string ScriptletEngine::run(const std::string& code) {
     if (code.empty()) return {};
+
+    // Redirect sys.stdout and sys.stderr to StringIO for capture.
+    PyObject* sys       = PyImport_ImportModule("sys");
+    PyObject* ioMod     = PyImport_ImportModule("io");
+    PyObject* capOut    = PyObject_CallMethod(ioMod, "StringIO", nullptr);
+    PyObject* capErr    = PyObject_CallMethod(ioMod, "StringIO", nullptr);
+    PyObject* oldOut    = PyObject_GetAttrString(sys, "stdout");
+    PyObject* oldErr    = PyObject_GetAttrString(sys, "stderr");
+    PyObject_SetAttrString(sys, "stdout", capOut);
+    PyObject_SetAttrString(sys, "stderr", capErr);
 
     // Run in an isolated namespace (fresh dict with builtins injected).
     PyObject* builtins = PyImport_ImportModule("builtins");
@@ -77,6 +89,25 @@ std::string ScriptletEngine::run(const std::string& code) {
 
     PyObject* result = PyRun_String(code.c_str(), Py_file_input, globals, globals);
     Py_DECREF(globals);
+
+    // Restore stdout/stderr and extract captured output.
+    PyObject_SetAttrString(sys, "stdout", oldOut);
+    PyObject_SetAttrString(sys, "stderr", oldErr);
+    Py_DECREF(oldOut); Py_DECREF(oldErr);
+
+    auto extractStr = [](PyObject* sio) -> std::string {
+        PyObject* v = PyObject_CallMethod(sio, "getvalue", nullptr);
+        std::string s;
+        if (v) { if (const char* cs = PyUnicode_AsUTF8(v)) s = cs; Py_DECREF(v); }
+        return s;
+    };
+    const std::string capturedOut = extractStr(capOut);
+    const std::string capturedErr = extractStr(capErr);
+    Py_DECREF(capOut); Py_DECREF(capErr);
+    Py_DECREF(ioMod); Py_DECREF(sys);
+
+    if (s_outputCb && (!capturedOut.empty() || !capturedErr.empty()))
+        s_outputCb(capturedOut + capturedErr);
 
     if (result) {
         Py_DECREF(result);

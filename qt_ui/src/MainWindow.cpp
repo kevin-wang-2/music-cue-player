@@ -1,5 +1,6 @@
 #include "MainWindow.h"
 #include "AppModel.h"
+#include "ProjectStatusDialog.h"
 #include "SettingsDialog.h"
 #include "CueTableView.h"
 #include "DeviceDialog.h"
@@ -465,6 +466,14 @@ void MainWindow::buildMenuBar() {
     auto* showMenu = mb->addMenu("&Show");
     showMenu->addAction("&Settings…", this, &MainWindow::onOpenSettings);
     showMenu->addAction("Audio &Device…", this, &MainWindow::onOpenDeviceDialog);
+    showMenu->addAction("Project &Status…", this, [this]() {
+        if (!m_statusDialog)
+            m_statusDialog = new ProjectStatusDialog(m_model, this);
+        m_statusDialog->show();
+        m_statusDialog->raise();
+        m_statusDialog->activateWindow();
+        m_statusDialog->refreshWarnings();
+    });
     showMenu->addSeparator();
 
     auto* actPanic = showMenu->addAction("Panic", this, [this]() {
