@@ -20,7 +20,7 @@
         - 函数：stop - stop cue
         - 函数：disarm - disarm cue
     - [class]***Cue: 对应现在的cue类型的具体class（注意setter&getter）
-    - [function]list_cue: 返回[Cue]这样的列表
+    - [function]list_cues: 返回[Cue]这样的列表
     - [function]insert_cue(type, cuenumber="", cuename=""): 在列表最后插入一个cue，返回被插入的cue
     - [function]insert_cue_at(ref, type, cuenumber="", cuename=""): 在ref cue后面插入一个cue，返回被插入的cue
     - [function]move_cue_at(ref, cue, to_group=False): 把一个cue移到另一个cue之后（to_group仅当移动到group cue的最后一个子cue时有作用，如果to_group=True则移到group内，不然则移到group外）
