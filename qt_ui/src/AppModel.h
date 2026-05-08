@@ -55,6 +55,10 @@ public:
     // Full error/traceback string per cue index (parallel to scriptletErrorCues).
     std::map<int, std::string>            scriptletErrors;
 
+    // Show Information state — updated via cueFired / manualGo.
+    int         m_currentCueIdx{-1};   // flat index of last fired top-level cue
+    std::string m_currentMemo;         // text of last fired Memo cue; cleared on manual go
+
     // Music-event tracking — updated in tick().
     int    m_mcCueIdx{-1};         // flat index of active MC cue, -1 if none
     std::map<int, double> m_lastMusicBoundary;  // subdivision → last fired boundary (elapsed secs)
@@ -91,6 +95,10 @@ public:
         return QString("Ch %1").arg(ch + 1);
     }
 
+    // Perform a manual Go (fires manualGo signal before advancing the cue list).
+    // Use this instead of cues.go() for operator-initiated go actions.
+    void go();
+
     // Apply OscServerSettings from sf and (re)start the OSC server.
     void applyOscSettings();
     // Apply MIDI input: open all ports.
@@ -106,6 +114,10 @@ public:
 
 signals:
     void cueListChanged();
+    // Emitted when operator manually presses Go (not auto-continue / auto-follow).
+    void manualGo();
+    // Emitted when Show Information state (currentCue, nextCue, memo) changes.
+    void showInfoChanged();
     // Emitted before routing so monitors (e.g. ProjectStatusDialog) can log.
     void midiInputReceived(mcp::MidiMsgType type, int ch, int d1, int d2);
     void oscInputReceived(const QString& path, const QVariantList& args);

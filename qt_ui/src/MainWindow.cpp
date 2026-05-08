@@ -2,6 +2,7 @@
 #include "AppModel.h"
 #include "ProjectStatusDialog.h"
 #include "ScriptletLibraryDialog.h"
+#include "ShowInfoDialog.h"
 #include "SettingsDialog.h"
 #include "CueTableView.h"
 #include "DeviceDialog.h"
@@ -181,7 +182,7 @@ void MainWindow::buildGoBar() {
     m_goBtn->setFixedSize(110, 72);
     m_goBtn->setShortcut(Qt::Key_Space);
     connect(m_goBtn, &QPushButton::clicked, this, [this]() {
-        m_model->cues.go();
+        m_model->go();
         m_inspector->clearTimelineArm();
     });
     hlay->addWidget(m_goBtn);
@@ -354,7 +355,7 @@ void MainWindow::buildIconBar() {
         "QToolButton:hover{background:#1a4d1a;border-color:#2a7a2a;color:#5f5;}"
         "QToolButton:pressed{background:#0f2f0f;}");
     connect(btnGo, &QToolButton::clicked, this, [this]() {
-        m_model->cues.go();
+        m_model->go();
         m_inspector->clearTimelineArm();
     });
     hlay->addWidget(btnGo);
@@ -465,6 +466,13 @@ void MainWindow::buildMenuBar() {
     auto* showMenu = mb->addMenu("&Show");
     showMenu->addAction("&Settings…", this, &MainWindow::onOpenSettings);
     showMenu->addAction("Audio &Device…", this, &MainWindow::onOpenDeviceDialog);
+    showMenu->addAction("Show &Information…", this, [this]() {
+        if (!m_showInfoDialog)
+            m_showInfoDialog = new ShowInfoDialog(m_model, this);
+        m_showInfoDialog->show();
+        m_showInfoDialog->raise();
+        m_showInfoDialog->activateWindow();
+    });
     showMenu->addAction("Project &Status…", this, [this]() {
         if (!m_statusDialog)
             m_statusDialog = new ProjectStatusDialog(m_model, this);

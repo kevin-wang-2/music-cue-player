@@ -906,7 +906,7 @@ void CueTableView::contextMenuEvent(QContextMenuEvent* ev) {
 
         connect(actGo, &QAction::triggered, this, [this, row]() {
             m_model->cues.setSelectedIndex(row);
-            m_model->cues.go();
+            m_model->go();
         });
         connect(actStop, &QAction::triggered, this, [this, row]() {
             m_model->cues.stop(row);

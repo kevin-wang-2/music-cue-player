@@ -1,6 +1,7 @@
 #include "AppModel.h"
 #include "ShowHelpers.h"
 
+#include "engine/Cue.h"
 #include "engine/MusicContext.h"
 
 #include <QMessageBox>
@@ -275,6 +276,21 @@ AppModel::AppModel(QObject* parent)
         return state;
     });
 
+    // --- Show Information state ---
+
+    connect(this, &AppModel::cueFired, this, [this](int idx) {
+        const mcp::Cue* c = cues.cueAt(idx);
+        if (!c || c->parentIndex >= 0) return;  // ignore group children
+        m_currentCueIdx = idx;
+        if (c->type == mcp::CueType::Memo)
+            m_currentMemo = c->name;
+        emit showInfoChanged();
+    });
+    // selectionChanged already fires; showInfoChanged reuses it for Next Cue updates.
+    connect(this, &AppModel::selectionChanged, this, [this](int) {
+        emit showInfoChanged();
+    });
+
     // --- Route incoming events to scriptlet event system ---
 
     connect(this, &AppModel::selectionChanged, this, [this](int idx) {
@@ -292,6 +308,15 @@ AppModel::AppModel(QObject* parent)
 
 AppModel::~AppModel() {
     cues.panic();
+}
+
+void AppModel::go() {
+    // Clearing memo must happen before cueFired so that a Memo cue firing
+    // on this same go() will set the memo back via the cueFired handler.
+    m_currentMemo.clear();
+    emit manualGo();
+    cues.go();
+    emit playbackStateChanged();
 }
 
 void AppModel::pushUndo() {

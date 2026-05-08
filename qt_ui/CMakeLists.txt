@@ -74,6 +74,8 @@ set(QT_UI_SOURCES
     src/ScriptletLibraryDialog.cpp
     src/ProjectStatusDialog.h
     src/ProjectStatusDialog.cpp
+    src/ShowInfoDialog.h
+    src/ShowInfoDialog.cpp
 )
 
 if(APPLE)

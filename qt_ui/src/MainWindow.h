@@ -9,6 +9,7 @@ class CueTableView;
 class InspectorWidget;
 class ProjectStatusDialog;
 class ScriptletLibraryDialog;
+class ShowInfoDialog;
 class QSplitter;
 class QTimer;
 class QToolButton;
@@ -68,6 +69,7 @@ private:
     InspectorWidget*      m_inspector{nullptr};
     ProjectStatusDialog*    m_statusDialog{nullptr};
     ScriptletLibraryDialog* m_libraryDialog{nullptr};
+    ShowInfoDialog*         m_showInfoDialog{nullptr};
     QSplitter*       m_splitter{nullptr};
     QTimer*          m_timer{nullptr};
 
