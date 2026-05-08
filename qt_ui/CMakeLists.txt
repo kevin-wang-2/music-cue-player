@@ -24,6 +24,8 @@ set(QT_UI_SOURCES
     src/AppModel.cpp
     src/AudioSetupDialog.h
     src/AudioSetupDialog.cpp
+    src/SettingsDialog.h
+    src/SettingsDialog.cpp
     src/FaderWidget.h
     src/FaderWidget.cpp
     src/WaveformView.h
@@ -64,7 +66,11 @@ target_link_libraries(mcp_qt_ui PRIVATE
     ${QT_TARGET}
 )
 if(APPLE)
-    target_link_libraries(mcp_qt_ui PRIVATE "-framework Cocoa")
+    target_link_libraries(mcp_qt_ui PRIVATE "-framework Cocoa"
+                                            "-framework SystemConfiguration")
+endif()
+if(WIN32)
+    target_link_libraries(mcp_qt_ui PRIVATE iphlpapi)
 endif()
 
 target_compile_options(mcp_qt_ui PRIVATE

@@ -1,5 +1,5 @@
 #include "engine/AudioEngine.h"
-#include "engine/StreamReader.h"
+#include "engine/IAudioSource.h"
 #include <portaudio.h>
 #include <algorithm>
 #include <array>
@@ -12,8 +12,8 @@ namespace mcp {
 // ---------------------------------------------------------------------------
 struct VoiceSlot {
     struct Pending {
-        const float*  samples{nullptr};       // in-memory mode
-        StreamReader* streamReader{nullptr};  // streaming mode
+        const float*   samples{nullptr};       // in-memory mode
+        IAudioSource*  streamReader{nullptr};  // streaming mode
         bool          streaming{false};
         int64_t       totalFrames{0};
         int           channels{0};
@@ -29,8 +29,8 @@ struct VoiceSlot {
     std::atomic<float> gain{1.0f};
 
     // Written by audio thread at activation; readable by the main thread.
-    const float*  samples{nullptr};
-    StreamReader* streamReader{nullptr};
+    const float*   samples{nullptr};
+    IAudioSource*  streamReader{nullptr};
     bool          streaming{false};
     int64_t       totalFrames{0};
     int           channels{0};
@@ -279,7 +279,7 @@ int AudioEngine::scheduleVoice(const float* samples, int64_t totalFrames,
     return -1;
 }
 
-int AudioEngine::scheduleStreamingVoice(StreamReader* reader, int64_t totalFrames,
+int AudioEngine::scheduleStreamingVoice(IAudioSource* reader, int64_t totalFrames,
                                          int voiceChannels, int tag, float gain) {
     for (int i = 0; i < kMaxVoices; ++i) {
         auto& v = m_impl->voices[i];

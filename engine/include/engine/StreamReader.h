@@ -1,6 +1,7 @@
 #pragma once
 
 #include "AudioFile.h"
+#include "IAudioSource.h"
 #include <atomic>
 #include <cstdint>
 #include <string>
@@ -44,7 +45,7 @@ struct LoopSegment {
     int    loops{1};
 };
 
-class StreamReader {
+class StreamReader : public IAudioSource {
 public:
     static constexpr int64_t kRingFrames = 65536;  // ~1.36 s at 48 kHz
     static constexpr int64_t kArmFrames  = 8192;   // ~170 ms arm threshold
@@ -60,19 +61,19 @@ public:
                  int    targetSR, int targetCh,
                  double startTimeSecs  = 0.0,
                  double durationSecs   = 0.0);
-    ~StreamReader();
+    ~StreamReader() override;
     StreamReader(const StreamReader&) = delete;
     StreamReader& operator=(const StreamReader&) = delete;
 
     // Number of frames this reader will output at targetSR.
     // Returns 0 if the file length is unknown (use isDone() to detect end).
-    int64_t totalOutputFrames() const { return m_totalOutputFrames; }
+    int64_t totalOutputFrames() const override { return m_totalOutputFrames; }
 
     // True once >= kArmFrames frames are buffered and ready for glitch-free start.
-    bool isArmed() const;
+    bool isArmed() const override;
 
     // True when the file is fully consumed and the ring buffer is empty.
-    bool isDone() const;
+    bool isDone() const override;
 
     // True if opening / format validation failed.
     bool hasError() const { return !m_error.empty(); }
@@ -86,29 +87,29 @@ public:
     // Set the crosspoint routing matrix.  Call once before the voice starts.
     // xpGains[s * outCh + o] = linear gain from source channel s to output o.
     // NaN = no route.  outLevGains[o] = per-output-channel linear gain (1.0 = unity).
-    void setRouting(std::vector<float> xpGains, std::vector<float> outLevGains, int outCh);
+    void setRouting(std::vector<float> xpGains, std::vector<float> outLevGains, int outCh) override;
 
     // Safely update one output-channel level during playback (e.g. from a fade).
     // Plain float store — benign race; the audio callback reads it independently.
-    void setOutLevelGain(int outCh, float linGain);
+    void setOutLevelGain(int outCh, float linGain) override;
 
     // Safely update one crosspoint cell during playback.  NaN = disable route.
-    void setXpointGain(int srcCh, int outCh, float linGain);
+    void setXpointGain(int srcCh, int outCh, float linGain) override;
 
     // Read current live gains (NaN if not set / out of range).
-    float getXpointGain(int srcCh, int outCh) const;
-    float getOutLevelGain(int outCh) const;
+    float getXpointGain(int srcCh, int outCh) const override;
+    float getOutLevelGain(int outCh) const override;
 
     // Return output channel count set by setRouting(); 0 if routing not set.
-    int xpOutCh() const { return m_xpOutCh; }
+    int xpOutCh() const override { return m_xpOutCh; }
 
     // Called ONLY from the audio callback (wait-free on the consumer side).
     // Mixes up to `frames` interleaved frames into out[0..frames*outCh-1] with
     // `gain`.  Returns frames actually consumed.
-    int64_t read(float* out, int64_t frames, int outCh, float gain);
+    int64_t read(float* out, int64_t frames, int outCh, float gain) override;
 
     // Signal the I/O thread to stop.  Idempotent, safe from any thread.
-    void requestStop();
+    void requestStop() override;
 
     // Devamp: after the current loop iteration of the current segment finishes,
     // either advance to the next segment (stopAfter=false) or stop completely
@@ -141,7 +142,7 @@ public:
     // Frames consumed by the audio callback so far (monotonically increasing).
     // Directly reflects the ring-buffer read position — more accurate than the
     // engine's global playhead counter for determining file position.
-    int64_t   readPos() const { return m_readPos.load(std::memory_order_acquire); }
+    int64_t   readPos() const override { return m_readPos.load(std::memory_order_acquire); }
 
 private:
     void ioThread();

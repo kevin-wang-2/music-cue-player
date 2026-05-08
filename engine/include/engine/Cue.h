@@ -4,6 +4,7 @@
 #include "FadeData.h"
 #include "MusicContext.h"
 #include "StreamReader.h"
+#include "Timecode.h"
 #include <memory>
 #include <optional>
 #include <string>
@@ -11,7 +12,7 @@
 
 namespace mcp {
 
-enum class CueType { Audio, Start, Stop, Fade, Arm, Devamp, Group, MusicContext, Marker };
+enum class CueType { Audio, Start, Stop, Fade, Arm, Devamp, Group, MusicContext, Marker, Network, Midi, Timecode };
 
 // Per-audio-cue channel routing.
 // outLevelDb[o]  — per-output-channel level in dB (0.0 = unity).
@@ -90,6 +91,25 @@ struct Cue {
     std::vector<TimeMarker> markers;
     std::vector<int>        sliceLoops;
 
+    // Network cues
+    int         networkPatchIdx{-1};  // index into CueList's network patch list
+    std::string networkCommand;       // OSC address+args, or plain text
+
+    // MIDI cues
+    int         midiPatchIdx{-1};     // index into CueList's MIDI patch list
+    std::string midiMessageType;      // "note_on"|"note_off"|"program_change"|"control_change"|"pitchbend"
+    int         midiChannel{1};       // 1–16
+    int         midiData1{60};        // note/program/controller; pitchbend value (-8192..8191)
+    int         midiData2{64};        // velocity/value (unused for program_change and pitchbend)
+
+    // Timecode cues
+    std::string tcType{"ltc"};        // "ltc" | "mtc"
+    TcFps       tcFps{TcFps::Fps25};
+    TcPoint     tcStartTC;            // start timecode
+    TcPoint     tcEndTC;              // end timecode (exclusive)
+    int         tcLtcChannel{0};      // LTC: 0-based physical output channel
+    int         tcMidiPatchIdx{-1};   // MTC: index into CueList's MIDI patch list
+
     // Post-trigger behaviour (all types)
     bool autoContinue{false};
     bool autoFollow{false};
@@ -130,6 +150,9 @@ struct Cue {
         if (type == CueType::Devamp)       return targetIndex >= 0;
         if (type == CueType::MusicContext) return musicContext != nullptr;
         if (type == CueType::Marker)       return targetIndex >= 0 && markerIndex >= 0;
+        if (type == CueType::Network)      return networkPatchIdx >= 0;
+        if (type == CueType::Midi)         return midiPatchIdx >= 0;
+        if (type == CueType::Timecode)     return tcStartTC < tcEndTC;
         return true;   // Group, Start, Stop, Arm always "loaded"
     }
 };

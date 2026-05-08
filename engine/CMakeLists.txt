@@ -24,6 +24,17 @@ FetchContent_Declare(
 )
 FetchContent_MakeAvailable(nlohmann_json)
 
+# RtMidi — cross-platform MIDI I/O
+set(RTMIDI_BUILD_TESTING  OFF CACHE BOOL "" FORCE)
+set(RTMIDI_BUILD_EXAMPLES OFF CACHE BOOL "" FORCE)
+FetchContent_Declare(
+    rtmidi
+    GIT_REPOSITORY https://github.com/thestk/rtmidi.git
+    GIT_TAG        5.0.0
+    GIT_SHALLOW    TRUE
+)
+FetchContent_MakeAvailable(rtmidi)
+
 add_library(mcp_engine STATIC
     src/AudioDecoder.cpp
     src/AudioFile.cpp
@@ -34,6 +45,11 @@ add_library(mcp_engine STATIC
     src/FadeData.cpp
     src/StreamReader.cpp
     src/MusicContext.cpp
+    src/NetworkSender.cpp
+    src/MidiSender.cpp
+    src/Timecode.cpp
+    src/LtcStreamReader.cpp
+    src/MtcGenerator.cpp
 )
 
 target_include_directories(mcp_engine
@@ -68,7 +84,15 @@ target_link_libraries(mcp_engine
         $<$<BOOL:${MCP_HAVE_FFMPEG}>:${AVCODEC_LIBRARIES}>
         $<$<BOOL:${MCP_HAVE_FFMPEG}>:${AVUTIL_LIBRARIES}>
         nlohmann_json::nlohmann_json
+        rtmidi
 )
+
+if(APPLE)
+    target_link_libraries(mcp_engine PUBLIC "-framework CoreMIDI" "-framework CoreFoundation")
+endif()
+if(WIN32)
+    target_link_libraries(mcp_engine PUBLIC winmm)
+endif()
 
 if(MCP_HAVE_FFMPEG)
     target_compile_definitions(mcp_engine PRIVATE MCP_HAVE_FFMPEG)
@@ -76,10 +100,22 @@ endif()
 
 target_compile_options(mcp_engine PRIVATE -Wall -Wextra -Wpedantic)
 
+if(WIN32)
+    target_link_libraries(mcp_engine PUBLIC ws2_32)
+endif()
+
 add_executable(cue_runner   src/cue_runner.cpp)
 add_executable(show_editor  src/show_editor.cpp)
 target_link_libraries(cue_runner  PRIVATE mcp_engine)
 target_link_libraries(show_editor PRIVATE mcp_engine)
+
+# Standalone MTC diagnostic tool — no engine dependency, only RtMidi
+add_executable(mtc_diag src/mtc_diag.cpp)
+target_include_directories(mtc_diag PRIVATE ${CMAKE_CURRENT_SOURCE_DIR}/include)
+target_link_libraries(mtc_diag PRIVATE rtmidi)
+if(APPLE)
+    target_link_libraries(mtc_diag PRIVATE "-framework CoreMIDI" "-framework CoreFoundation")
+endif()
 
 enable_testing()
 add_subdirectory(tests)

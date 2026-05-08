@@ -13,11 +13,13 @@
 
 #include "engine/Cue.h"
 #include "engine/FadeData.h"
+#include "engine/Timecode.h"
 
 #include <algorithm>
 #include <optional>
 #include <QCheckBox>
 #include <QComboBox>
+#include <QPlainTextEdit>
 #include <QDoubleSpinBox>
 #include <QFileDialog>
 #include <QFormLayout>
@@ -80,6 +82,9 @@ InspectorWidget::InspectorWidget(AppModel* model, QWidget* parent)
     buildModeTab();
     buildTimeTab();
     buildTimelineTab();
+    buildNetworkTab();
+    buildMidiTab();
+    buildTimecodeTab();
 }
 
 // ── tab builders ───────────────────────────────────────────────────────────
@@ -808,8 +813,14 @@ void InspectorWidget::setCueIndex(int idx) {
     m_tabs->setTabVisible(m_tabs->indexOf(m_modePage),     isGroup);
     m_tabs->setTabVisible(m_tabs->indexOf(m_timelinePage), isTimeline);
 
-    const bool isMarkerCue = c && c->type == mcp::CueType::Marker;
-    m_tabs->setTabVisible(m_tabs->indexOf(m_markerPage), isMarkerCue);
+    const bool isMarkerCue   = c && c->type == mcp::CueType::Marker;
+    const bool isNetworkCue  = c && c->type == mcp::CueType::Network;
+    const bool isMidiCue     = c && c->type == mcp::CueType::Midi;
+    const bool isTimecodeCue = c && c->type == mcp::CueType::Timecode;
+    m_tabs->setTabVisible(m_tabs->indexOf(m_markerPage),    isMarkerCue);
+    m_tabs->setTabVisible(m_tabs->indexOf(m_networkPage),   isNetworkCue);
+    m_tabs->setTabVisible(m_tabs->indexOf(m_midiPage),      isMidiCue);
+    m_tabs->setTabVisible(m_tabs->indexOf(m_timecodePage),  isTimecodeCue);
     m_spinDurationBasic->setVisible(true);
     m_devampGroup->setVisible(isDevamp);
     m_armGroup->setVisible(isArm);
@@ -854,6 +865,9 @@ void InspectorWidget::setCueIndex(int idx) {
         loadMode();
         if (isTimeline) m_timelineView->setGroupCueIndex(idx);
     }
+    if (isNetworkCue)  loadNetwork();
+    if (isMidiCue)     loadMidi();
+    if (isTimecodeCue) loadTimecode();
 
     // Pass MC to timeline views for bar/beat ruler
     {
@@ -1491,4 +1505,427 @@ void InspectorWidget::onFadeOutTargetChanged(int outCh, float dB) {
     m_model->cues.setCueFadeOutTarget(m_cueIdx, outCh, en, dB);
     ShowHelpers::syncSfFromCues(*m_model);
     emit cueEdited();
+}
+
+// ── Network tab ────────────────────────────────────────────────────────────
+
+void InspectorWidget::buildNetworkTab() {
+    m_networkPage = new QWidget;
+    auto* form = new QFormLayout(m_networkPage);
+    form->setContentsMargins(8, 8, 8, 8);
+    form->setSpacing(6);
+
+    m_comboPatch = new QComboBox;
+    m_comboPatch->setToolTip("Network output patch to send to");
+    form->addRow("Destination:", m_comboPatch);
+
+    m_editNetCmd = new QPlainTextEdit;
+    m_editNetCmd->setPlaceholderText("OSC:  /address arg1 arg2\nText: any text");
+    m_editNetCmd->setMinimumHeight(80);
+    m_editNetCmd->setStyleSheet(
+        "QPlainTextEdit { background:#1e1e1e; color:#ddd; border:1px solid #444; "
+        "  border-radius:3px; font-family:monospace; font-size:12px; }");
+    form->addRow("Command:", m_editNetCmd);
+
+    m_tabs->addTab(m_networkPage, "Network");
+
+    connect(m_comboPatch, QOverload<int>::of(&QComboBox::currentIndexChanged),
+            this, [this](int idx) {
+        if (m_loading || m_cueIdx < 0) return;
+        m_model->cues.setCueNetworkPatch(m_cueIdx, idx - 1);  // -1 = "(none)" item
+        ShowHelpers::syncSfFromCues(*m_model);
+        emit cueEdited();
+    });
+    connect(m_editNetCmd, &QPlainTextEdit::textChanged, this, [this]() {
+        if (m_loading || m_cueIdx < 0) return;
+        m_model->cues.setCueNetworkCommand(m_cueIdx, m_editNetCmd->toPlainText().toStdString());
+        ShowHelpers::syncSfFromCues(*m_model);
+        emit cueEdited();
+    });
+}
+
+void InspectorWidget::loadNetwork() {
+    const mcp::Cue* c = (m_cueIdx >= 0) ? m_model->cues.cueAt(m_cueIdx) : nullptr;
+    if (!c) return;
+
+    // Rebuild patch combo from current network setup
+    m_comboPatch->blockSignals(true);
+    m_comboPatch->clear();
+    m_comboPatch->addItem("(none)");
+    const int numPatches = m_model->cues.networkPatchCount();
+    for (int i = 0; i < numPatches; ++i)
+        m_comboPatch->addItem(QString::fromStdString(m_model->cues.networkPatchName(i)));
+    // Select current patch (+1 because item 0 is "(none)")
+    const int patchIdx = c->networkPatchIdx;
+    m_comboPatch->setCurrentIndex(patchIdx + 1);
+    m_comboPatch->blockSignals(false);
+
+    m_editNetCmd->blockSignals(true);
+    m_editNetCmd->setPlainText(QString::fromStdString(c->networkCommand));
+    m_editNetCmd->blockSignals(false);
+}
+
+// ── MIDI tab ───────────────────────────────────────────────────────────────
+
+void InspectorWidget::buildMidiTab() {
+    m_midiPage = new QWidget;
+    auto* form = new QFormLayout(m_midiPage);
+    form->setContentsMargins(8, 8, 8, 8);
+    form->setSpacing(6);
+
+    // Patch
+    m_comboMidiPatch = new QComboBox;
+    form->addRow("Patch:", m_comboMidiPatch);
+
+    // Message type
+    m_comboMidiType = new QComboBox;
+    m_comboMidiType->addItem("Note On",         "note_on");
+    m_comboMidiType->addItem("Note Off",        "note_off");
+    m_comboMidiType->addItem("Program Change",  "program_change");
+    m_comboMidiType->addItem("Control Change",  "control_change");
+    m_comboMidiType->addItem("Pitchbend",       "pitchbend");
+    form->addRow("Type:", m_comboMidiType);
+
+    // Channel (always visible)
+    m_spinMidiCh = new QSpinBox;
+    m_spinMidiCh->setRange(1, 16);
+    form->addRow("Channel:", m_spinMidiCh);
+
+    // Note (Note On/Off)
+    m_spinMidiNote = new QSpinBox;
+    m_spinMidiNote->setRange(0, 127);
+    m_lblMidiNote = new QLabel("Note:");
+    form->addRow(m_lblMidiNote, m_spinMidiNote);
+
+    // Velocity (Note On/Off)
+    m_spinMidiVel = new QSpinBox;
+    m_spinMidiVel->setRange(0, 127);
+    m_lblMidiVel = new QLabel("Velocity:");
+    form->addRow(m_lblMidiVel, m_spinMidiVel);
+
+    // Program (Program Change)
+    m_spinMidiProg = new QSpinBox;
+    m_spinMidiProg->setRange(0, 127);
+    m_lblMidiProg = new QLabel("Program:");
+    form->addRow(m_lblMidiProg, m_spinMidiProg);
+
+    // Controller number (Control Change)
+    m_spinMidiCC = new QSpinBox;
+    m_spinMidiCC->setRange(0, 127);
+    m_lblMidiCC = new QLabel("Controller:");
+    form->addRow(m_lblMidiCC, m_spinMidiCC);
+
+    // Controller value (Control Change)
+    m_spinMidiCCVal = new QSpinBox;
+    m_spinMidiCCVal->setRange(0, 127);
+    m_lblMidiCCVal = new QLabel("Value:");
+    form->addRow(m_lblMidiCCVal, m_spinMidiCCVal);
+
+    // Pitchbend value
+    m_spinMidiBend = new QSpinBox;
+    m_spinMidiBend->setRange(-8192, 8191);
+    m_lblMidiBend = new QLabel("Bend:");
+    form->addRow(m_lblMidiBend, m_spinMidiBend);
+
+    m_tabs->addTab(m_midiPage, "MIDI");
+
+    // Save helpers
+    auto saveMidi = [this]() {
+        if (m_loading || m_cueIdx < 0) return;
+        const QString typeKey = m_comboMidiType->currentData().toString();
+        const int ch   = m_spinMidiCh->value();
+        int data1 = 0, data2 = 0;
+        if (typeKey == "note_on" || typeKey == "note_off") {
+            data1 = m_spinMidiNote->value();
+            data2 = m_spinMidiVel->value();
+        } else if (typeKey == "program_change") {
+            data1 = m_spinMidiProg->value();
+        } else if (typeKey == "control_change") {
+            data1 = m_spinMidiCC->value();
+            data2 = m_spinMidiCCVal->value();
+        } else if (typeKey == "pitchbend") {
+            data1 = m_spinMidiBend->value();
+        }
+        m_model->cues.setCueMidiMessage(m_cueIdx, typeKey.toStdString(), ch, data1, data2);
+        ShowHelpers::syncSfFromCues(*m_model);
+        emit cueEdited();
+    };
+
+    connect(m_comboMidiPatch, QOverload<int>::of(&QComboBox::currentIndexChanged),
+            this, [this](int idx) {
+        if (m_loading || m_cueIdx < 0) return;
+        m_model->cues.setCueMidiPatch(m_cueIdx, idx - 1);  // -1 = "(none)" item
+        ShowHelpers::syncSfFromCues(*m_model);
+        emit cueEdited();
+    });
+    connect(m_comboMidiType, QOverload<int>::of(&QComboBox::currentIndexChanged),
+            this, [this, saveMidi](int) {
+        updateMidiFields();
+        saveMidi();
+    });
+    connect(m_spinMidiCh,    QOverload<int>::of(&QSpinBox::valueChanged), this, saveMidi);
+    connect(m_spinMidiNote,  QOverload<int>::of(&QSpinBox::valueChanged), this, saveMidi);
+    connect(m_spinMidiVel,   QOverload<int>::of(&QSpinBox::valueChanged), this, saveMidi);
+    connect(m_spinMidiProg,  QOverload<int>::of(&QSpinBox::valueChanged), this, saveMidi);
+    connect(m_spinMidiCC,    QOverload<int>::of(&QSpinBox::valueChanged), this, saveMidi);
+    connect(m_spinMidiCCVal, QOverload<int>::of(&QSpinBox::valueChanged), this, saveMidi);
+    connect(m_spinMidiBend,  QOverload<int>::of(&QSpinBox::valueChanged), this, saveMidi);
+}
+
+void InspectorWidget::updateMidiFields() {
+    const QString t = m_comboMidiType->currentData().toString();
+    const bool isNote = (t == "note_on" || t == "note_off");
+    const bool isProg = (t == "program_change");
+    const bool isCC   = (t == "control_change");
+    const bool isBend = (t == "pitchbend");
+
+    m_lblMidiNote->setVisible(isNote);  m_spinMidiNote->setVisible(isNote);
+    m_lblMidiVel->setVisible(isNote);   m_spinMidiVel->setVisible(isNote);
+    m_lblMidiProg->setVisible(isProg);  m_spinMidiProg->setVisible(isProg);
+    m_lblMidiCC->setVisible(isCC);      m_spinMidiCC->setVisible(isCC);
+    m_lblMidiCCVal->setVisible(isCC);   m_spinMidiCCVal->setVisible(isCC);
+    m_lblMidiBend->setVisible(isBend);  m_spinMidiBend->setVisible(isBend);
+}
+
+void InspectorWidget::loadMidi() {
+    const mcp::Cue* c = (m_cueIdx >= 0) ? m_model->cues.cueAt(m_cueIdx) : nullptr;
+    if (!c) return;
+
+    m_loading = true;
+
+    // Rebuild patch combo
+    m_comboMidiPatch->blockSignals(true);
+    m_comboMidiPatch->clear();
+    m_comboMidiPatch->addItem("(none)");
+    const int numPatches = m_model->cues.midiPatchCount();
+    for (int i = 0; i < numPatches; ++i)
+        m_comboMidiPatch->addItem(QString::fromStdString(m_model->cues.midiPatchName(i)));
+    m_comboMidiPatch->setCurrentIndex(c->midiPatchIdx + 1);
+    m_comboMidiPatch->blockSignals(false);
+
+    // Message type
+    m_comboMidiType->blockSignals(true);
+    {
+        const QString key = QString::fromStdString(c->midiMessageType.empty()
+                                                    ? "note_on" : c->midiMessageType);
+        for (int i = 0; i < m_comboMidiType->count(); ++i) {
+            if (m_comboMidiType->itemData(i).toString() == key) {
+                m_comboMidiType->setCurrentIndex(i);
+                break;
+            }
+        }
+    }
+    m_comboMidiType->blockSignals(false);
+
+    m_spinMidiCh->setValue(c->midiChannel);
+
+    // Data fields
+    const QString t = m_comboMidiType->currentData().toString();
+    if (t == "note_on" || t == "note_off") {
+        m_spinMidiNote->setValue(c->midiData1);
+        m_spinMidiVel->setValue(c->midiData2);
+    } else if (t == "program_change") {
+        m_spinMidiProg->setValue(c->midiData1);
+    } else if (t == "control_change") {
+        m_spinMidiCC->setValue(c->midiData1);
+        m_spinMidiCCVal->setValue(c->midiData2);
+    } else if (t == "pitchbend") {
+        m_spinMidiBend->setValue(c->midiData1);
+    }
+
+    m_loading = false;
+    updateMidiFields();
+}
+
+// ── Timecode tab ───────────────────────────────────────────────────────────
+
+void InspectorWidget::buildTimecodeTab() {
+    m_timecodePage = new QWidget;
+    auto* form = new QFormLayout(m_timecodePage);
+    form->setContentsMargins(8, 8, 8, 8);
+    form->setSpacing(6);
+
+    // TC type (LTC / MTC)
+    m_comboTcType = new QComboBox;
+    m_comboTcType->addItem("LTC (Linear Timecode — audio output)", "ltc");
+    m_comboTcType->addItem("MTC (MIDI Timecode — MIDI output)",    "mtc");
+    form->addRow("Type:", m_comboTcType);
+
+    // FPS
+    m_comboTcFps = new QComboBox;
+    m_comboTcFps->addItem("24 fps",           "24fps");
+    m_comboTcFps->addItem("25 fps",           "25fps");
+    m_comboTcFps->addItem("30 fps non-drop",  "30fps_nd");
+    m_comboTcFps->addItem("30 fps drop",      "30fps_df");
+    m_comboTcFps->addItem("23.976 fps",       "23.976fps");
+    m_comboTcFps->addItem("24.975 fps",       "24.975fps");
+    m_comboTcFps->addItem("29.97 fps ND",     "29.97fps_nd");
+    m_comboTcFps->addItem("29.97 fps DF",     "29.97fps_df");
+    form->addRow("FPS:", m_comboTcFps);
+
+    // Start TC
+    m_editTcStart = new QLineEdit;
+    m_editTcStart->setPlaceholderText("hh:mm:ss:ff");
+    form->addRow("Start TC:", m_editTcStart);
+
+    // End TC
+    m_editTcEnd = new QLineEdit;
+    m_editTcEnd->setPlaceholderText("hh:mm:ss:ff");
+    form->addRow("End TC:", m_editTcEnd);
+
+    // Duration (read-only display)
+    m_lblTcDuration = new QLabel("—");
+    form->addRow("Duration:", m_lblTcDuration);
+
+    // LTC output channel row
+    {
+        m_ltcRow = new QWidget;
+        auto* hlay = new QHBoxLayout(m_ltcRow);
+        hlay->setContentsMargins(0, 0, 0, 0);
+        m_lblLtcCh = new QLabel("Output Channel:");
+        m_spinLtcCh = new QSpinBox;
+        m_spinLtcCh->setRange(0, 63);
+        m_spinLtcCh->setToolTip("0-based physical output channel for the LTC signal");
+        hlay->addWidget(m_lblLtcCh);
+        hlay->addWidget(m_spinLtcCh);
+        hlay->addStretch();
+        form->addRow(m_ltcRow);
+    }
+
+    // MTC MIDI patch row
+    {
+        m_mtcRow = new QWidget;
+        auto* hlay = new QHBoxLayout(m_mtcRow);
+        hlay->setContentsMargins(0, 0, 0, 0);
+        m_lblMtcPatch = new QLabel("MIDI Patch:");
+        m_comboMtcPatch = new QComboBox;
+        hlay->addWidget(m_lblMtcPatch);
+        hlay->addWidget(m_comboMtcPatch, 1);
+        form->addRow(m_mtcRow);
+    }
+
+    m_tabs->addTab(m_timecodePage, "Timecode");
+
+    // Save helper
+    auto saveTimecode = [this]() {
+        if (m_loading || m_cueIdx < 0) return;
+        const QString tcTypeKey = m_comboTcType->currentData().toString();
+        const QString tcFpsKey  = m_comboTcFps->currentData().toString();
+
+        mcp::TcFps fps = mcp::TcFps::Fps25;
+        mcp::tcFpsFromString(tcFpsKey.toStdString(), fps);
+
+        mcp::TcPoint startTC, endTC;
+        mcp::tcFromString(m_editTcStart->text().toStdString(), startTC);
+        mcp::tcFromString(m_editTcEnd->text().toStdString(),   endTC);
+
+        m_model->cues.setCueTcType (m_cueIdx, tcTypeKey.toStdString());
+        m_model->cues.setCueTcFps  (m_cueIdx, fps);
+        m_model->cues.setCueTcStart(m_cueIdx, startTC);
+        m_model->cues.setCueTcEnd  (m_cueIdx, endTC);
+        m_model->cues.setCueTcLtcChannel(m_cueIdx, m_spinLtcCh->value());
+        // MTC patch: combo index 0 = "(none)" → -1
+        m_model->cues.setCueTcMidiPatch(m_cueIdx, m_comboMtcPatch->currentIndex() - 1);
+
+        // Update duration display
+        if (startTC < endTC) {
+            const int64_t dFrames = mcp::tcToFrames(endTC, fps) - mcp::tcToFrames(startTC, fps);
+            const mcp::TcRate r = mcp::tcRateFor(fps);
+            const double secs = static_cast<double>(dFrames) * r.rateDen / (r.nomFPS * r.rateNum);
+            const int hh = static_cast<int>(secs / 3600);
+            const int mm = static_cast<int>(secs / 60) % 60;
+            const int ss = static_cast<int>(secs) % 60;
+            m_lblTcDuration->setText(QString("%1h %2m %3s")
+                .arg(hh).arg(mm, 2, 10, QChar('0')).arg(ss, 2, 10, QChar('0')));
+        } else {
+            m_lblTcDuration->setText("—");
+        }
+
+        updateTimecodeFields();
+        ShowHelpers::syncSfFromCues(*m_model);
+        emit cueEdited();
+    };
+
+    connect(m_comboTcType, QOverload<int>::of(&QComboBox::currentIndexChanged),
+            this, [this, saveTimecode](int) { saveTimecode(); });
+    connect(m_comboTcFps,  QOverload<int>::of(&QComboBox::currentIndexChanged),
+            this, [this, saveTimecode](int) { saveTimecode(); });
+    connect(m_editTcStart, &QLineEdit::editingFinished, this, saveTimecode);
+    connect(m_editTcEnd,   &QLineEdit::editingFinished, this, saveTimecode);
+    connect(m_spinLtcCh,   QOverload<int>::of(&QSpinBox::valueChanged),
+            this, [this, saveTimecode](int) { saveTimecode(); });
+    connect(m_comboMtcPatch, QOverload<int>::of(&QComboBox::currentIndexChanged),
+            this, [this, saveTimecode](int) { saveTimecode(); });
+}
+
+void InspectorWidget::updateTimecodeFields() {
+    const bool isLtc = (m_comboTcType->currentData().toString() == "ltc");
+    m_ltcRow->setVisible(isLtc);
+    m_mtcRow->setVisible(!isLtc);
+}
+
+void InspectorWidget::loadTimecode() {
+    const mcp::Cue* c = (m_cueIdx >= 0) ? m_model->cues.cueAt(m_cueIdx) : nullptr;
+    if (!c) return;
+
+    m_loading = true;
+
+    // Type
+    m_comboTcType->blockSignals(true);
+    {
+        const QString key = QString::fromStdString(c->tcType.empty() ? "ltc" : c->tcType);
+        for (int i = 0; i < m_comboTcType->count(); ++i) {
+            if (m_comboTcType->itemData(i).toString() == key) {
+                m_comboTcType->setCurrentIndex(i); break;
+            }
+        }
+    }
+    m_comboTcType->blockSignals(false);
+
+    // FPS
+    m_comboTcFps->blockSignals(true);
+    {
+        const QString key = QString::fromStdString(mcp::tcFpsToString(c->tcFps));
+        for (int i = 0; i < m_comboTcFps->count(); ++i) {
+            if (m_comboTcFps->itemData(i).toString() == key) {
+                m_comboTcFps->setCurrentIndex(i); break;
+            }
+        }
+    }
+    m_comboTcFps->blockSignals(false);
+
+    // TC points
+    m_editTcStart->setText(QString::fromStdString(mcp::tcToString(c->tcStartTC)));
+    m_editTcEnd->setText  (QString::fromStdString(mcp::tcToString(c->tcEndTC)));
+
+    // Duration display
+    if (c->tcStartTC < c->tcEndTC) {
+        const int64_t dFrames = mcp::tcToFrames(c->tcEndTC, c->tcFps)
+                              - mcp::tcToFrames(c->tcStartTC, c->tcFps);
+        const mcp::TcRate r = mcp::tcRateFor(c->tcFps);
+        const double secs = static_cast<double>(dFrames) * r.rateDen / (r.nomFPS * r.rateNum);
+        const int hh = static_cast<int>(secs / 3600);
+        const int mm = static_cast<int>(secs / 60) % 60;
+        const int ss = static_cast<int>(secs) % 60;
+        m_lblTcDuration->setText(QString("%1h %2m %3s")
+            .arg(hh).arg(mm, 2, 10, QChar('0')).arg(ss, 2, 10, QChar('0')));
+    } else {
+        m_lblTcDuration->setText("—");
+    }
+
+    // LTC channel
+    m_spinLtcCh->setValue(c->tcLtcChannel);
+
+    // MTC MIDI patch combo
+    m_comboMtcPatch->blockSignals(true);
+    m_comboMtcPatch->clear();
+    m_comboMtcPatch->addItem("(none)");
+    const int numPatches = m_model->cues.midiPatchCount();
+    for (int i = 0; i < numPatches; ++i)
+        m_comboMtcPatch->addItem(QString::fromStdString(m_model->cues.midiPatchName(i)));
+    m_comboMtcPatch->setCurrentIndex(c->tcMidiPatchIdx + 1);
+    m_comboMtcPatch->blockSignals(false);
+
+    m_loading = false;
+    updateTimecodeFields();
 }

@@ -19,6 +19,7 @@ class QGridLayout;
 class QGroupBox;
 class QLabel;
 class QLineEdit;
+class QPlainTextEdit;
 class QPushButton;
 class QScrollArea;
 class QSpinBox;
@@ -67,6 +68,14 @@ private:
     void buildModeTab();
     void buildTimelineTab();
     void buildMCTab();
+    void buildNetworkTab();
+    void loadNetwork();
+    void buildMidiTab();
+    void loadMidi();
+    void updateMidiFields();   // show/hide rows based on message type
+    void buildTimecodeTab();
+    void loadTimecode();
+    void updateTimecodeFields();  // show/hide LTC/MTC rows based on type
     void buildMarkerTab();
 
     void loadBasic();
@@ -160,6 +169,39 @@ private:
 
     // Timeline tab (Timeline group cues)
     TimelineGroupView* m_timelineView{nullptr};
+
+    // Network tab
+    QWidget*       m_networkPage{nullptr};
+    QComboBox*     m_comboPatch{nullptr};
+    QPlainTextEdit* m_editNetCmd{nullptr};
+
+    // MIDI tab
+    QWidget*    m_midiPage{nullptr};
+    QComboBox*  m_comboMidiPatch{nullptr};
+    QComboBox*  m_comboMidiType{nullptr};
+    QSpinBox*   m_spinMidiCh{nullptr};
+    QLabel*     m_lblMidiNote{nullptr};   QSpinBox* m_spinMidiNote{nullptr};
+    QLabel*     m_lblMidiVel{nullptr};    QSpinBox* m_spinMidiVel{nullptr};
+    QLabel*     m_lblMidiProg{nullptr};   QSpinBox* m_spinMidiProg{nullptr};
+    QLabel*     m_lblMidiCC{nullptr};     QSpinBox* m_spinMidiCC{nullptr};
+    QLabel*     m_lblMidiCCVal{nullptr};  QSpinBox* m_spinMidiCCVal{nullptr};
+    QLabel*     m_lblMidiBend{nullptr};   QSpinBox* m_spinMidiBend{nullptr};
+
+    // Timecode tab
+    QWidget*    m_timecodePage{nullptr};
+    QComboBox*  m_comboTcType{nullptr};
+    QComboBox*  m_comboTcFps{nullptr};
+    QLineEdit*  m_editTcStart{nullptr};
+    QLineEdit*  m_editTcEnd{nullptr};
+    QLabel*     m_lblTcDuration{nullptr};
+    // LTC-specific
+    QWidget*    m_ltcRow{nullptr};
+    QLabel*     m_lblLtcCh{nullptr};
+    QSpinBox*   m_spinLtcCh{nullptr};
+    // MTC-specific
+    QWidget*    m_mtcRow{nullptr};
+    QLabel*     m_lblMtcPatch{nullptr};
+    QComboBox*  m_comboMtcPatch{nullptr};
 
     // Music Context tab
     QCheckBox*         m_chkAttachMC{nullptr};

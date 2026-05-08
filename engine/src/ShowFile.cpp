@@ -102,6 +102,25 @@ static ShowFile::CueData parseCue(const json& j) {
         }
     }
 
+    // Network cue parameters
+    c.networkPatchName = jget<std::string>(j, "networkPatchName", "");
+    c.networkCommand   = jget<std::string>(j, "networkCommand",   "");
+
+    // MIDI cue parameters
+    c.midiPatchName   = jget<std::string>(j, "midiPatchName",   "");
+    c.midiMessageType = jget<std::string>(j, "midiMessageType", "note_on");
+    c.midiChannel     = jget<int>        (j, "midiChannel",     1);
+    c.midiData1       = jget<int>        (j, "midiData1",       60);
+    c.midiData2       = jget<int>        (j, "midiData2",       64);
+
+    // Timecode cue parameters
+    c.tcType         = jget<std::string>(j, "tcType",         "ltc");
+    c.tcFps          = jget<std::string>(j, "tcFps",          "25fps");
+    c.tcStartTC      = jget<std::string>(j, "tcStartTC",      "00:00:00:00");
+    c.tcEndTC        = jget<std::string>(j, "tcEndTC",        "00:00:00:00");
+    c.tcLtcChannel   = jget<int>        (j, "tcLtcChannel",   0);
+    c.tcMidiPatchName= jget<std::string>(j, "tcMidiPatchName","");
+
     // Devamp cue parameters
     c.devampMode    = jget<int> (j, "devampMode",    0);
     c.devampPreVamp = jget<bool>(j, "devampPreVamp", false);
@@ -243,6 +262,28 @@ static json cueToJson(const ShowFile::CueData& c) {
         }
     }
 
+    if (c.type == "network") {
+        if (!c.networkPatchName.empty()) j["networkPatchName"] = c.networkPatchName;
+        if (!c.networkCommand.empty())   j["networkCommand"]   = c.networkCommand;
+    }
+
+    if (c.type == "midi") {
+        if (!c.midiPatchName.empty())   j["midiPatchName"]   = c.midiPatchName;
+        if (!c.midiMessageType.empty()) j["midiMessageType"] = c.midiMessageType;
+        j["midiChannel"] = c.midiChannel;
+        j["midiData1"]   = c.midiData1;
+        j["midiData2"]   = c.midiData2;
+    }
+
+    if (c.type == "timecode") {
+        j["tcType"]          = c.tcType;
+        j["tcFps"]           = c.tcFps;
+        j["tcStartTC"]       = c.tcStartTC;
+        j["tcEndTC"]         = c.tcEndTC;
+        j["tcLtcChannel"]    = c.tcLtcChannel;
+        if (!c.tcMidiPatchName.empty()) j["tcMidiPatchName"] = c.tcMidiPatchName;
+    }
+
     if (c.type == "group") {
         j["groupMode"] = c.groupMode;
         if (c.groupRandom) j["groupRandom"] = true;
@@ -330,6 +371,36 @@ bool ShowFile::load(const std::filesystem::path& path, std::string& error) {
             }
         }
     }
+    networkSetup = {};
+    if (root.contains("networkSetup") && root["networkSetup"].is_object()) {
+        const auto& ns = root["networkSetup"];
+        if (ns.contains("patches") && ns["patches"].is_array()) {
+            for (const auto& p : ns["patches"]) {
+                NetworkSetup::Patch patch;
+                patch.name        = jget<std::string>(p, "name",        "");
+                patch.type        = jget<std::string>(p, "type",        "osc");
+                patch.protocol    = jget<std::string>(p, "protocol",    "udp");
+                patch.iface       = jget<std::string>(p, "iface",       "any");
+                patch.destination = jget<std::string>(p, "destination", "");
+                patch.password    = jget<std::string>(p, "password",    "");
+                networkSetup.patches.push_back(patch);
+            }
+        }
+    }
+
+    midiSetup = {};
+    if (root.contains("midiSetup") && root["midiSetup"].is_object()) {
+        const auto& ms = root["midiSetup"];
+        if (ms.contains("patches") && ms["patches"].is_array()) {
+            for (const auto& p : ms["patches"]) {
+                MidiSetup::Patch patch;
+                patch.name        = jget<std::string>(p, "name",        "");
+                patch.destination = jget<std::string>(p, "destination", "");
+                midiSetup.patches.push_back(patch);
+            }
+        }
+    }
+
     // Migration: old files have no audioSetup → create one channel per engine output
     if (audioSetup.channels.empty() && engine.channels > 0) {
         for (int i = 0; i < engine.channels; ++i) {
@@ -385,6 +456,32 @@ bool ShowFile::save(const std::filesystem::path& path, std::string& error) const
             as["xpEntries"] = xpArr;
         }
         root["audioSetup"] = as;
+    }
+
+    if (!networkSetup.patches.empty()) {
+        json pArr = json::array();
+        for (const auto& p : networkSetup.patches) {
+            json pj;
+            pj["name"]        = p.name;
+            pj["type"]        = p.type;
+            pj["protocol"]    = p.protocol;
+            if (!p.iface.empty() && p.iface != "any") pj["iface"] = p.iface;
+            pj["destination"] = p.destination;
+            if (!p.password.empty()) pj["password"] = p.password;
+            pArr.push_back(pj);
+        }
+        root["networkSetup"]["patches"] = pArr;
+    }
+
+    if (!midiSetup.patches.empty()) {
+        json pArr = json::array();
+        for (const auto& p : midiSetup.patches) {
+            json pj;
+            pj["name"]        = p.name;
+            pj["destination"] = p.destination;
+            pArr.push_back(pj);
+        }
+        root["midiSetup"]["patches"] = pArr;
     }
 
     json clArr = json::array();

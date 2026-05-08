@@ -72,6 +72,9 @@ static TypeInfo typeInfoFor(mcp::CueType t) {
         case mcp::CueType::Arm:          return {"⊙",  {0xff, 0xbb, 0x44}};
         case mcp::CueType::Devamp:       return {"⤴",  {0x44, 0xcc, 0xee}};
         case mcp::CueType::Marker:       return {"◈",  {0x88, 0xcc, 0x88}};
+        case mcp::CueType::Network:      return {"⊹",  {0x44, 0xdd, 0xaa}};
+        case mcp::CueType::Midi:         return {"♪",  {0xff, 0x99, 0x44}};
+        case mcp::CueType::Timecode:     return {"TC", {0x44, 0xcc, 0xdd}};
     }
     return {"?", {0x88, 0x88, 0x88}};
 }
@@ -315,6 +318,9 @@ QString CueTableView::typeLabel(mcp::CueType t) const {
         case mcp::CueType::Group:        return "Group";
         case mcp::CueType::MusicContext: return "MC";
         case mcp::CueType::Marker:       return "Marker";
+        case mcp::CueType::Network:      return "Network";
+        case mcp::CueType::Midi:         return "MIDI";
+        case mcp::CueType::Timecode:     return "Timecode";
     }
     return "?";
 }
@@ -358,6 +364,14 @@ QString CueTableView::durationLabel(int cueIdx) const {
         const double d = m_model->cues.syncGroupTotalSeconds(cueIdx);
         if (std::isinf(d)) return QString::fromUtf8("\xe2\x88\x9e");  // ∞
         return QString::fromStdString(ShowHelpers::fmtDuration(d));
+    }
+    if (c->type == mcp::CueType::Timecode && c->tcStartTC < c->tcEndTC) {
+        const int64_t frames = mcp::tcToFrames(c->tcEndTC,   c->tcFps)
+                             - mcp::tcToFrames(c->tcStartTC, c->tcFps);
+        const mcp::TcRate r  = mcp::tcRateFor(c->tcFps);
+        const double secs    = static_cast<double>(frames) * r.rateDen
+                               / (static_cast<double>(r.nomFPS) * r.rateNum);
+        return QString::fromStdString(ShowHelpers::fmtDuration(secs));
     }
     if (c->type != mcp::CueType::Audio) return {};
     const double d = (c->duration > 0.0) ? c->duration

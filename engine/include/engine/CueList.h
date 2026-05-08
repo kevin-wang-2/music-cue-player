@@ -3,16 +3,21 @@
 #include "AudioEngine.h"
 #include "Cue.h"
 #include "FadeData.h"
+#include "IAudioSource.h"
 #include "Scheduler.h"
+#include "ShowFile.h"
 #include "StreamReader.h"
 #include <array>
 #include <memory>
 #include <mutex>
 #include <optional>
 #include <string>
+#include <unordered_map>
 #include <vector>
 
 namespace mcp {
+
+class MtcGenerator;  // forward declaration
 
 // Channel-to-physical-output routing fold matrix.
 // Built from ShowFile::AudioSetup and set on CueList before playback.
@@ -112,6 +117,47 @@ public:
     // of its markers[markerIndex].  markerIndex -1 means start of cue.
     bool addMarkerCue(int targetIndex, int markerIndex,
                       const std::string& name = "", double preWait = 0.0);
+
+    // Append a Network cue.  When fired, sends the stored command to the
+    // network patch identified by networkPatchIdx.
+    bool addNetworkCue(const std::string& name = "", double preWait = 0.0);
+
+    // Replace the network patch list.  Called after loading or editing NetworkSetup.
+    void setNetworkPatches(std::vector<ShowFile::NetworkSetup::Patch> patches);
+
+    // Network cue parameter setters.
+    void setCueNetworkPatch  (int index, int patchIdx);
+    void setCueNetworkCommand(int index, const std::string& command);
+    // Return patch name for a given index (-1 or out-of-range → "").
+    std::string networkPatchName(int patchIdx) const;
+    int         networkPatchCount() const;
+
+    // Append a MIDI cue.  When fired, sends a MIDI message to the patch port.
+    bool addMidiCue(const std::string& name = "", double preWait = 0.0);
+
+    // Append a Timecode cue.
+    // LTC cues stream BMC audio to an output channel.
+    // MTC cues send quarter-frame messages to a MIDI port.
+    bool addTimecodeCue(const std::string& name = "", double preWait = 0.0);
+
+    // Timecode cue parameter setters.
+    void setCueTcType        (int index, const std::string& type); // "ltc"|"mtc"
+    void setCueTcFps         (int index, TcFps fps);
+    void setCueTcStart       (int index, const TcPoint& tc);
+    void setCueTcEnd         (int index, const TcPoint& tc);
+    void setCueTcLtcChannel  (int index, int physOutCh);
+    void setCueTcMidiPatch   (int index, int patchIdx);
+
+    // Replace the MIDI patch list.  Called after loading or editing MidiSetup.
+    void setMidiPatches(std::vector<ShowFile::MidiSetup::Patch> patches);
+
+    // MIDI cue parameter setters.
+    void setCueMidiPatch  (int index, int patchIdx);
+    void setCueMidiMessage(int index, const std::string& type,
+                           int channel, int data1, int data2);
+    // Return patch name for a given index (-1 or out-of-range → "").
+    std::string midiPatchName (int patchIdx) const;
+    int         midiPatchCount() const;
 
     void clear();
     int  cueCount() const;
@@ -322,9 +368,9 @@ private:
     // baseOffset: seconds into the group timeline we are starting from.
     void armGroupDescendants(int groupIdx, double baseOffset);
 
-    // Build linear routing gains from cue.routing and set them on `reader`.
-    // srcCh = reader's native file channel count; outCh = engine.channels().
-    void applyRoutingToReader(const Cue& cue, StreamReader& reader,
+    // Build linear routing gains from cue.routing and set them on `source`.
+    // srcCh = source's native channel count; outCh = engine.channels().
+    void applyRoutingToSource(const Cue& cue, IAudioSource& source,
                                int srcCh, int outCh);
 
     // Update a live voice's per-output-channel gain (called from fade callbacks).
@@ -340,6 +386,8 @@ private:
     std::vector<Cue> m_cues;
     int m_selectedIndex{0};
     ChannelMap   m_channelMap;
+    std::vector<ShowFile::NetworkSetup::Patch> m_networkPatches;
+    std::vector<ShowFile::MidiSetup::Patch>    m_midiPatches;
 
     // Pending devamp follow-up actions: call go() when the trigger fires.
     // waitForStop=true → wait for voice to go inactive (mode 1);
@@ -371,9 +419,20 @@ private:
     // -1.0 = no active voice yet.  Main-thread only; no mutex needed.
     std::vector<double> m_lastFilePosSec;
 
-    // One StreamReader per engine voice slot — keeps the reader alive until
+    // One IAudioSource per engine voice slot — keeps the source alive until
     // the voice finishes.  Cleared by update() once isVoiceActive() is false.
-    std::array<std::shared_ptr<StreamReader>, AudioEngine::kMaxVoices> m_slotStream;
+    // Downcast to StreamReader* via slotStreamReader() when StreamReader-specific
+    // features (devamp, segMarkers) are needed.
+    std::array<std::shared_ptr<IAudioSource>, AudioEngine::kMaxVoices> m_slotStream;
+
+    // Active MTC generators keyed by cue index.  Protected by m_slotMutex.
+    // Stored so stop() / panic() can terminate a running generator immediately.
+    std::unordered_map<int, std::shared_ptr<MtcGenerator>> m_activeMtcGens;
+
+    // Returns the StreamReader for voice slot s, or nullptr for non-StreamReader sources.
+    StreamReader* slotStreamReader(size_t s) const {
+        return m_slotStream[s] ? dynamic_cast<StreamReader*>(m_slotStream[s].get()) : nullptr;
+    }
 };
 
 } // namespace mcp

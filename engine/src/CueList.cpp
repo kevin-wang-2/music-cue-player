@@ -1,6 +1,11 @@
 #include "engine/CueList.h"
 #include "engine/AudioMath.h"
+#include "engine/IAudioSource.h"
 #include "engine/StreamReader.h"
+#include "LtcStreamReader.h"
+#include "MtcGenerator.h"
+#include "MidiSender.h"
+#include "NetworkSender.h"
 #include <algorithm>
 #include <chrono>
 #include <cmath>
@@ -214,6 +219,135 @@ bool CueList::addMarkerCue(int targetIndex, int markerIndex,
     return true;
 }
 
+bool CueList::addNetworkCue(const std::string& name, double preWait) {
+    Cue cue;
+    cue.type           = CueType::Network;
+    cue.preWaitSeconds = preWait;
+    cue.name           = name.empty() ? "Network Cue" : name;
+    m_cues.push_back(std::move(cue));
+    std::lock_guard<std::mutex> lk(m_slotMutex);
+    m_lastSlot.push_back(-1);
+    m_pendingEventId.push_back(-1);
+    m_cueFireFrame.push_back(-1);
+    m_cueFireArmBase.push_back(0.0);
+    m_lastFilePosSec.push_back(-1.0);
+    return true;
+}
+
+void CueList::setNetworkPatches(std::vector<ShowFile::NetworkSetup::Patch> patches) {
+    m_networkPatches = std::move(patches);
+}
+
+void CueList::setCueNetworkPatch(int index, int patchIdx) {
+    if (index >= 0 && index < (int)m_cues.size() && m_cues[static_cast<size_t>(index)].type == CueType::Network)
+        m_cues[static_cast<size_t>(index)].networkPatchIdx = patchIdx;
+}
+
+void CueList::setCueNetworkCommand(int index, const std::string& command) {
+    if (index >= 0 && index < (int)m_cues.size() && m_cues[static_cast<size_t>(index)].type == CueType::Network)
+        m_cues[static_cast<size_t>(index)].networkCommand = command;
+}
+
+std::string CueList::networkPatchName(int patchIdx) const {
+    if (patchIdx >= 0 && patchIdx < (int)m_networkPatches.size())
+        return m_networkPatches[static_cast<size_t>(patchIdx)].name;
+    return {};
+}
+
+int CueList::networkPatchCount() const {
+    return static_cast<int>(m_networkPatches.size());
+}
+
+bool CueList::addMidiCue(const std::string& name, double preWait) {
+    Cue cue;
+    cue.type           = CueType::Midi;
+    cue.preWaitSeconds = preWait;
+    cue.name           = name.empty() ? "MIDI Cue" : name;
+    m_cues.push_back(std::move(cue));
+    std::lock_guard<std::mutex> lk(m_slotMutex);
+    m_lastSlot.push_back(-1);
+    m_pendingEventId.push_back(-1);
+    m_cueFireFrame.push_back(-1);
+    m_cueFireArmBase.push_back(0.0);
+    m_lastFilePosSec.push_back(-1.0);
+    return true;
+}
+
+void CueList::setMidiPatches(std::vector<ShowFile::MidiSetup::Patch> patches) {
+    m_midiPatches = std::move(patches);
+}
+
+void CueList::setCueMidiPatch(int index, int patchIdx) {
+    if (index >= 0 && index < (int)m_cues.size() && m_cues[static_cast<size_t>(index)].type == CueType::Midi)
+        m_cues[static_cast<size_t>(index)].midiPatchIdx = patchIdx;
+}
+
+void CueList::setCueMidiMessage(int index, const std::string& type,
+                                int channel, int data1, int data2) {
+    if (index >= 0 && index < (int)m_cues.size() && m_cues[static_cast<size_t>(index)].type == CueType::Midi) {
+        auto& c = m_cues[static_cast<size_t>(index)];
+        c.midiMessageType = type;
+        c.midiChannel     = channel;
+        c.midiData1       = data1;
+        c.midiData2       = data2;
+    }
+}
+
+std::string CueList::midiPatchName(int patchIdx) const {
+    if (patchIdx >= 0 && patchIdx < (int)m_midiPatches.size())
+        return m_midiPatches[static_cast<size_t>(patchIdx)].name;
+    return {};
+}
+
+int CueList::midiPatchCount() const {
+    return static_cast<int>(m_midiPatches.size());
+}
+
+bool CueList::addTimecodeCue(const std::string& name, double preWait) {
+    Cue cue;
+    cue.type           = CueType::Timecode;
+    cue.preWaitSeconds = preWait;
+    cue.name           = name.empty() ? "Timecode Cue" : name;
+    m_cues.push_back(std::move(cue));
+    std::lock_guard<std::mutex> lk(m_slotMutex);
+    m_lastSlot.push_back(-1);
+    m_pendingEventId.push_back(-1);
+    m_cueFireFrame.push_back(-1);
+    m_cueFireArmBase.push_back(0.0);
+    m_lastFilePosSec.push_back(-1.0);
+    return true;
+}
+
+void CueList::setCueTcType(int index, const std::string& type) {
+    if (index >= 0 && index < (int)m_cues.size() && m_cues[index].type == CueType::Timecode)
+        m_cues[index].tcType = type;
+}
+
+void CueList::setCueTcFps(int index, TcFps fps) {
+    if (index >= 0 && index < (int)m_cues.size() && m_cues[index].type == CueType::Timecode)
+        m_cues[index].tcFps = fps;
+}
+
+void CueList::setCueTcStart(int index, const TcPoint& tc) {
+    if (index >= 0 && index < (int)m_cues.size() && m_cues[index].type == CueType::Timecode)
+        m_cues[index].tcStartTC = tc;
+}
+
+void CueList::setCueTcEnd(int index, const TcPoint& tc) {
+    if (index >= 0 && index < (int)m_cues.size() && m_cues[index].type == CueType::Timecode)
+        m_cues[index].tcEndTC = tc;
+}
+
+void CueList::setCueTcLtcChannel(int index, int physOutCh) {
+    if (index >= 0 && index < (int)m_cues.size() && m_cues[index].type == CueType::Timecode)
+        m_cues[index].tcLtcChannel = physOutCh;
+}
+
+void CueList::setCueTcMidiPatch(int index, int patchIdx) {
+    if (index >= 0 && index < (int)m_cues.size() && m_cues[index].type == CueType::Timecode)
+        m_cues[index].tcMidiPatchIdx = patchIdx;
+}
+
 void CueList::clear() {
     panic();
     // Signal all active I/O threads to stop early.
@@ -352,8 +486,7 @@ void CueList::update() {
             {
                 std::lock_guard<std::mutex> lk(m_slotMutex);
                 const int slot = m_lastSlot[it->watchCueIdx];
-                if (slot >= 0 && m_slotStream[slot])
-                    raw = m_slotStream[slot].get();
+                if (slot >= 0) raw = slotStreamReader(static_cast<size_t>(slot));
             }
             if (raw && raw->wasDevampFired()) {
                 raw->clearDevampFired();
@@ -379,6 +512,11 @@ void CueList::update() {
             && !m_engine.isVoicePending(s)) {
             m_slotStream[s]->requestStop();
             m_slotStream[s].reset();
+            // Clear fire frame for Timecode LTC cues whose voice just ended.
+            for (int ci = 0; ci < cueCount(); ++ci) {
+                if (m_cues[ci].type == CueType::Timecode && m_lastSlot[ci] == s)
+                    m_cueFireFrame[static_cast<size_t>(ci)] = -1;
+            }
         }
     }
 
@@ -730,7 +868,7 @@ static float levelGain(double levelDB, double trimDB) {
     return (dB <= kFaderFloor) ? 0.0f : lut::dBToLinear(dB);
 }
 
-void CueList::applyRoutingToReader(const Cue& cue, StreamReader& reader,
+void CueList::applyRoutingToSource(const Cue& cue, IAudioSource& reader,
                                     int srcCh, int physOutCh) {
     const int numCh = (m_channelMap.numCh > 0) ? m_channelMap.numCh : physOutCh;
 
@@ -996,7 +1134,7 @@ int64_t CueList::scheduleVoice(int cueIndex) {
     const int   outCh = m_engine.channels();
     const int   srcCh = static_cast<int>(cue.audioFile.metadata().channels);
     if (srcCh > 0 && outCh > 0)
-        applyRoutingToReader(cue, *reader, srcCh, outCh);
+        applyRoutingToSource(cue, *reader, srcCh, outCh);
 
     const int slot = m_engine.scheduleStreamingVoice(
         reader.get(), totalFrames > 0 ? totalFrames : INT64_MAX / 2,
@@ -1079,8 +1217,7 @@ bool CueList::fire(int idx) {
             {
                 std::lock_guard<std::mutex> lk(m_slotMutex);
                 slot = m_lastSlot[ti];
-                if (slot >= 0 && m_slotStream[slot])
-                    raw = m_slotStream[slot].get();
+                if (slot >= 0) raw = slotStreamReader(static_cast<size_t>(slot));
             }
             if (!raw || !m_engine.isVoiceActive(slot)) break;
 
@@ -1122,7 +1259,7 @@ bool CueList::fire(int idx) {
             {
                 int tSlot;
                 { std::lock_guard<std::mutex> lk(m_slotMutex); tSlot = m_lastSlot[static_cast<size_t>(tIdx)]; }
-                const StreamReader* tsr = (tSlot >= 0 && m_engine.isVoiceActive(tSlot)
+                const IAudioSource* tsr = (tSlot >= 0 && m_engine.isVoiceActive(tSlot)
                                            && m_slotStream[static_cast<size_t>(tSlot)])
                     ? m_slotStream[static_cast<size_t>(tSlot)].get() : nullptr;
 
@@ -1334,6 +1471,99 @@ bool CueList::fire(int idx) {
             }
             break;
         }
+
+        case CueType::Network: {
+            if (cue.networkPatchIdx >= 0 && cue.networkPatchIdx < (int)m_networkPatches.size()) {
+                const auto& patch = m_networkPatches[static_cast<size_t>(cue.networkPatchIdx)];
+                std::string netErr;
+                sendNetworkMessage(patch, cue.networkCommand, netErr);
+                result = true;
+            }
+            followFrames = 0;
+            break;
+        }
+
+        case CueType::Midi: {
+            if (cue.midiPatchIdx >= 0 && cue.midiPatchIdx < (int)m_midiPatches.size()) {
+                const auto& patch = m_midiPatches[static_cast<size_t>(cue.midiPatchIdx)];
+                std::string midiErr;
+                sendMidiMessage(patch, cue.midiMessageType,
+                                cue.midiChannel, cue.midiData1, cue.midiData2, midiErr);
+                result = true;
+            }
+            followFrames = 0;
+            break;
+        }
+
+        case CueType::Timecode: {
+            if (!(cue.tcStartTC < cue.tcEndTC)) break;
+
+            if (cue.tcType == "ltc") {
+                auto reader = std::make_shared<LtcStreamReader>(
+                    cue.tcFps, cue.tcStartTC, cue.tcEndTC, m_engine.sampleRate());
+
+                const int outCh = m_engine.channels();
+                // Route mono LTC to the specified physical output channel.
+                std::vector<float> xpGains(static_cast<size_t>(outCh),
+                                            std::numeric_limits<float>::quiet_NaN());
+                if (cue.tcLtcChannel >= 0 && cue.tcLtcChannel < outCh)
+                    xpGains[static_cast<size_t>(cue.tcLtcChannel)] = 1.0f;
+                std::vector<float> outLev(static_cast<size_t>(outCh), 1.0f);
+                reader->setRouting(std::move(xpGains), std::move(outLev), outCh);
+
+                const int64_t totalFrames = reader->totalOutputFrames();
+                const int slot = m_engine.scheduleStreamingVoice(
+                    reader.get(), totalFrames > 0 ? totalFrames : INT64_MAX / 2,
+                    outCh, idx, 1.0f);
+                if (slot >= 0) {
+                    std::lock_guard<std::mutex> lk(m_slotMutex);
+                    m_lastSlot[idx] = slot;
+                    m_slotStream[static_cast<size_t>(slot)] = std::move(reader);
+                    result = true;
+                    followFrames = totalFrames;
+                    m_cueFireFrame[static_cast<size_t>(idx)] = m_engine.enginePlayheadFrames();
+                }
+            } else if (cue.tcType == "mtc") {
+                // MTC: find the MIDI patch by index and start the generator.
+                if (cue.tcMidiPatchIdx >= 0 &&
+                    cue.tcMidiPatchIdx < (int)m_midiPatches.size()) {
+                    const auto& patch = m_midiPatches[static_cast<size_t>(cue.tcMidiPatchIdx)];
+
+                    // Stop any generator already running for this cue (re-fire case).
+                    {
+                        std::lock_guard<std::mutex> lk(m_slotMutex);
+                        auto it = m_activeMtcGens.find(idx);
+                        if (it != m_activeMtcGens.end()) {
+                            it->second->stop();
+                            m_activeMtcGens.erase(it);
+                        }
+                    }
+
+                    auto gen = std::make_shared<MtcGenerator>(
+                        patch.destination, cue.tcFps,
+                        cue.tcStartTC, cue.tcEndTC, m_engine.sampleRate(), m_engine);
+                    gen->start();
+
+                    {
+                        std::lock_guard<std::mutex> lk(m_slotMutex);
+                        m_activeMtcGens[idx] = gen;
+                    }
+
+                    result = true;
+                    m_cueFireFrame[static_cast<size_t>(idx)] = m_engine.enginePlayheadFrames();
+                    followFrames = tcRangeSamples(cue.tcStartTC, cue.tcEndTC,
+                                                   cue.tcFps, m_engine.sampleRate());
+                    m_scheduler.scheduleAfterFrames(followFrames,
+                        [this, idx, gen]() {
+                            std::lock_guard<std::mutex> lk(m_slotMutex);
+                            m_activeMtcGens.erase(idx);
+                            m_cueFireFrame[static_cast<size_t>(idx)] = -1;
+                        },
+                        "mtc-cleanup[" + std::to_string(idx) + "]");
+                }
+            }
+            break;
+        }
     }
 
     if (result && cue.autoFollow) {
@@ -1485,9 +1715,23 @@ void CueList::stop(int index) {
     // Clear timeline arm position on group stop so next GO starts from 0.
     if (m_cues[index].type == CueType::Group)
         m_cues[index].timelineArmSec = 0.0;
-    // Clear fire frame for MC cues.
+    // Stop any running MTC generator for this cue.
+    if (m_cues[index].type == CueType::Timecode) {
+        std::shared_ptr<MtcGenerator> gen;
+        {
+            std::lock_guard<std::mutex> lk(m_slotMutex);
+            auto it = m_activeMtcGens.find(index);
+            if (it != m_activeMtcGens.end()) {
+                gen = std::move(it->second);
+                m_activeMtcGens.erase(it);
+            }
+        }
+        if (gen) gen->stop();
+    }
+    // Clear fire frame for MC and Timecode cues.
     if (index >= 0 && index < cueCount() &&
-        m_cues[index].type == CueType::MusicContext)
+        (m_cues[index].type == CueType::MusicContext ||
+         m_cues[index].type == CueType::Timecode))
         m_cueFireFrame[static_cast<size_t>(index)] = -1;
 }
 
@@ -1504,9 +1748,14 @@ void CueList::panic() {
         }
         if (cue.type == CueType::Group) cue.timelineArmSec = 0.0;
     }
-    // Reset fire frames for all MC cues.
+    // Stop all active MTC generators.
+    for (auto& kv : m_activeMtcGens)
+        kv.second->stop();
+    m_activeMtcGens.clear();
+    // Reset fire frames for all MC and Timecode cues.
     for (int i = 0; i < cueCount(); ++i)
-        if (m_cues[i].type == CueType::MusicContext)
+        if (m_cues[i].type == CueType::MusicContext ||
+            m_cues[i].type == CueType::Timecode)
             m_cueFireFrame[static_cast<size_t>(i)] = -1;
 }
 
@@ -1517,8 +1766,9 @@ bool CueList::isAnyCuePlaying() const { return m_engine.activeVoiceCount() > 0; 
 
 bool CueList::isCuePlaying(int index) const {
     if (index < 0 || index >= cueCount()) return false;
-    // MC cues: playing = fire frame is set (no voices)
-    if (m_cues[index].type == CueType::MusicContext)
+    // MC and Timecode cues: playing = fire frame is set (no audio voice for these types)
+    if (m_cues[index].type == CueType::MusicContext ||
+        m_cues[index].type == CueType::Timecode)
         return m_cueFireFrame[static_cast<size_t>(index)] >= 0;
     if (m_engine.anyVoiceActiveWithTag(index)) return true;
     const auto* cue = cueAt(index);
@@ -1684,10 +1934,9 @@ double CueList::cuePlayheadFileSeconds(int index) const {
     {
         std::lock_guard<std::mutex> lk(m_slotMutex);
         const int slot = m_lastSlot[static_cast<size_t>(index)];
-        if (slot < 0 || !m_slotStream[static_cast<size_t>(slot)]
-                     || !m_engine.isVoiceActive(slot))
-            return 0.0;
-        raw      = m_slotStream[static_cast<size_t>(slot)].get();
+        if (slot < 0 || !m_engine.isVoiceActive(slot)) return 0.0;
+        raw      = slotStreamReader(static_cast<size_t>(slot));
+        if (!raw) return 0.0;
         targetSR = raw->targetSampleRate();
         rp       = raw->readPos();
     }

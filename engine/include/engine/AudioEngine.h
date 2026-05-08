@@ -6,7 +6,7 @@
 #include <string>
 #include <vector>
 
-namespace mcp { class StreamReader; }  // forward-declare to avoid circular includes
+namespace mcp { class IAudioSource; }  // forward-declare to avoid circular includes
 
 namespace mcp {
 
@@ -74,10 +74,10 @@ public:
     int scheduleVoice(const float* samples, int64_t totalFrames,
                       int voiceChannels, int tag = -1, float gain = 1.0f);
 
-    // Schedule a streaming voice backed by a StreamReader.
+    // Schedule a streaming voice backed by any IAudioSource.
     // The raw pointer must remain valid (kept alive externally) until
     // isVoiceActive(slot) returns false.
-    int scheduleStreamingVoice(StreamReader* reader, int64_t totalFrames,
+    int scheduleStreamingVoice(IAudioSource* reader, int64_t totalFrames,
                                int voiceChannels, int tag = -1, float gain = 1.0f);
 
     // Update the gain of a running voice. Safe to call from the main thread

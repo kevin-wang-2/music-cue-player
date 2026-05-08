@@ -75,6 +75,25 @@ struct ShowFile {
         int         devampMode{0};        // 0=NextSlice, 1=go()+StopCurrent, 2=go()+KeepCurrent
         bool        devampPreVamp{false}; // skip subsequent looping slices after devamp
 
+        // Network cues
+        std::string networkPatchName;   // name of the target NetworkSetup patch
+        std::string networkCommand;     // command string (OSC or plain text)
+
+        // MIDI cues
+        std::string midiPatchName;      // name of the target MidiSetup patch
+        std::string midiMessageType;    // "note_on"|"note_off"|"program_change"|"control_change"|"pitchbend"
+        int         midiChannel{1};     // 1–16
+        int         midiData1{60};      // note/program/controller number; pitchbend value LSB
+        int         midiData2{64};      // velocity/value (unused for program_change and pitchbend)
+
+        // Timecode cues
+        std::string tcType;             // "ltc" | "mtc"
+        std::string tcFps;              // "24fps"|"25fps"|"30fps_nd"|"30fps_df"|"23.976fps"|"24.975fps"|"29.97fps_nd"|"29.97fps_df"
+        std::string tcStartTC;          // "hh:mm:ss:ff"
+        std::string tcEndTC;            // "hh:mm:ss:ff"
+        int         tcLtcChannel{0};    // LTC: 0-based physical output channel
+        std::string tcMidiPatchName;    // MTC: MIDI patch name
+
         // Fade cues
         std::string fadeCurve{"linear"};
         bool        fadeStopWhenDone{false};
@@ -136,6 +155,30 @@ struct ShowFile {
         std::string title{"Untitled Show"};
     };
 
+    // ---- MIDI patch setup --------------------------------------------------
+    // Defines named MIDI output patches used by MIDI cues.
+    struct MidiSetup {
+        struct Patch {
+            std::string name;
+            std::string destination;  // MIDI output port name
+        };
+        std::vector<Patch> patches;
+    };
+
+    // ---- Network patch setup -----------------------------------------------
+    // Defines named network output patches used by Network cues.
+    struct NetworkSetup {
+        struct Patch {
+            std::string name;
+            std::string type;         // "osc" | "plaintext"
+            std::string protocol;     // "udp" | "tcp"
+            std::string iface;        // network interface ("any", "eth0", …)
+            std::string destination;  // "host:port"
+            std::string password;     // optional (for OSC password auth)
+        };
+        std::vector<Patch> patches;
+    };
+
     // ---- Audio channel setup -----------------------------------------------
     // Defines named logical channels that sit between cue outputs and the
     // device's physical outputs.  Cue routing indices reference channel indices,
@@ -160,6 +203,8 @@ struct ShowFile {
     ShowMeta                 show;
     EngineHints              engine;
     AudioSetup               audioSetup;
+    NetworkSetup             networkSetup;
+    MidiSetup                midiSetup;
     std::vector<CueListData> cueLists;
 
     // ---- I/O ---------------------------------------------------------------

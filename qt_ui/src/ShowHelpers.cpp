@@ -3,6 +3,7 @@
 
 #include "engine/AudioMath.h"
 #include "engine/FadeData.h"
+#include "engine/Timecode.h"
 
 #include <algorithm>
 #include <cmath>
@@ -77,6 +78,10 @@ bool rebuildCueList(AppModel& m, std::string& /*err*/) {
     if (m.sf.cueLists.empty()) return true;
     const auto& topCues = m.sf.cueLists[0].cues;
     const auto  base    = std::filesystem::path(m.baseDir);
+
+    // Install network and MIDI patches so their cues can fire.
+    m.cues.setNetworkPatches(m.sf.networkSetup.patches);
+    m.cues.setMidiPatches(m.sf.midiSetup.patches);
 
     // Build and install the channel map so applyRoutingToReader folds correctly.
     {
@@ -246,6 +251,12 @@ bool rebuildCueList(AppModel& m, std::string& /*err*/) {
                     m.cues.addMCCue(cd.name, cd.preWait);
                 } else if (cd.type == "marker") {
                     m.cues.addMarkerCue(target, cd.markerIndex, cd.name, cd.preWait);
+                } else if (cd.type == "network") {
+                    m.cues.addNetworkCue(cd.name, cd.preWait);
+                } else if (cd.type == "midi") {
+                    m.cues.addMidiCue(cd.name, cd.preWait);
+                } else if (cd.type == "timecode") {
+                    m.cues.addTimecodeCue(cd.name, cd.preWait);
                 }
 
                 m.cues.setCueCueNumber   (myIdx, cd.cueNumber);
@@ -267,6 +278,52 @@ bool rebuildCueList(AppModel& m, std::string& /*err*/) {
                 }
                 if (cd.type == "marker")
                     m.cues.setCueMarkerIndex(myIdx, cd.markerIndex);
+                if (cd.type == "network") {
+                    // Resolve patch name → index
+                    int patchIdx = -1;
+                    for (int pi = 0; pi < (int)m.sf.networkSetup.patches.size(); ++pi) {
+                        if (m.sf.networkSetup.patches[static_cast<size_t>(pi)].name == cd.networkPatchName) {
+                            patchIdx = pi;
+                            break;
+                        }
+                    }
+                    m.cues.setCueNetworkPatch  (myIdx, patchIdx);
+                    m.cues.setCueNetworkCommand(myIdx, cd.networkCommand);
+                }
+                if (cd.type == "midi") {
+                    int patchIdx = -1;
+                    for (int pi = 0; pi < (int)m.sf.midiSetup.patches.size(); ++pi) {
+                        if (m.sf.midiSetup.patches[static_cast<size_t>(pi)].name == cd.midiPatchName) {
+                            patchIdx = pi;
+                            break;
+                        }
+                    }
+                    m.cues.setCueMidiPatch  (myIdx, patchIdx);
+                    m.cues.setCueMidiMessage(myIdx, cd.midiMessageType,
+                                             cd.midiChannel, cd.midiData1, cd.midiData2);
+                }
+                if (cd.type == "timecode") {
+                    mcp::TcFps fps = mcp::TcFps::Fps25;
+                    mcp::tcFpsFromString(cd.tcFps, fps);
+                    mcp::TcPoint startTC, endTC;
+                    mcp::tcFromString(cd.tcStartTC, startTC);
+                    mcp::tcFromString(cd.tcEndTC,   endTC);
+                    m.cues.setCueTcFps  (myIdx, fps);
+                    m.cues.setCueTcStart(myIdx, startTC);
+                    m.cues.setCueTcEnd  (myIdx, endTC);
+                    m.cues.setCueTcType (myIdx, cd.tcType);
+                    m.cues.setCueTcLtcChannel(myIdx, cd.tcLtcChannel);
+                    // Resolve MTC MIDI patch name → index
+                    int midiPatchIdx = -1;
+                    if (!cd.tcMidiPatchName.empty()) {
+                        for (int pi = 0; pi < (int)m.sf.midiSetup.patches.size(); ++pi) {
+                            if (m.sf.midiSetup.patches[static_cast<size_t>(pi)].name == cd.tcMidiPatchName) {
+                                midiPatchIdx = pi; break;
+                            }
+                        }
+                    }
+                    m.cues.setCueTcMidiPatch(myIdx, midiPatchIdx);
+                }
                 if (cd.type == "audio") {
                     std::vector<mcp::Cue::TimeMarker> marks;
                     for (const auto& mk : cd.markers) marks.push_back({mk.time, mk.name});
@@ -514,6 +571,32 @@ void syncSfFromCues(AppModel& m) {
                     cd.target          = c->targetIndex;
                     cd.targetCueNumber = cueNumAt(c->targetIndex);
                     cd.markerIndex     = c->markerIndex;
+                    ++i;
+                    break;
+
+                case mcp::CueType::Network:
+                    cd.type              = "network";
+                    cd.networkPatchName  = m.cues.networkPatchName(c->networkPatchIdx);
+                    cd.networkCommand    = c->networkCommand;
+                    ++i;
+                    break;
+
+                case mcp::CueType::Midi:
+                    cd.type            = "midi";
+                    cd.midiPatchName   = m.cues.midiPatchName(c->midiPatchIdx);
+                    cd.midiMessageType = c->midiMessageType;
+                    cd.midiChannel     = c->midiChannel;
+                    cd.midiData1       = c->midiData1;
+                    cd.midiData2       = c->midiData2;
+                    break;
+                case mcp::CueType::Timecode:
+                    cd.type            = "timecode";
+                    cd.tcType          = c->tcType;
+                    cd.tcFps           = mcp::tcFpsToString(c->tcFps);
+                    cd.tcStartTC       = mcp::tcToString(c->tcStartTC);
+                    cd.tcEndTC         = mcp::tcToString(c->tcEndTC);
+                    cd.tcLtcChannel    = c->tcLtcChannel;
+                    cd.tcMidiPatchName = m.cues.midiPatchName(c->tcMidiPatchIdx);
                     ++i;
                     break;
             }
