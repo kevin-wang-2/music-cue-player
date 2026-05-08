@@ -17,7 +17,7 @@ static const char* kMemoColor  = "#88ccff";
 static const char* kEmptyColor = "#444";
 
 ShowInfoDialog::ShowInfoDialog(AppModel* model, QWidget* parent)
-    : QDialog(parent, Qt::Window)
+    : QDialog(parent, Qt::Window | Qt::WindowStaysOnTopHint)
     , m_model(model)
 {
     setWindowTitle("Show Information");
