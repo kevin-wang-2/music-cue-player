@@ -691,21 +691,34 @@ void CueList::removeCueMarker(int i, int mi) {
 // ---------------------------------------------------------------------------
 // Live routing update (called from fade callbacks in the scheduler thread)
 // These do NOT modify the Cue struct — fades are live-voice-only multipliers.
+// ch parameter is a channel index; mapped to primaryPhys when a ChannelMap is set.
 
-void CueList::setCueOutLevelGain(int cueIdx, int outCh, float linGain) {
-    if (cueIdx < 0 || cueIdx >= cueCount() || outCh < 0) return;
-    int slot;
-    { std::lock_guard<std::mutex> lk(m_slotMutex); slot = m_lastSlot[static_cast<size_t>(cueIdx)]; }
-    if (slot >= 0 && m_slotStream[static_cast<size_t>(slot)])
-        m_slotStream[static_cast<size_t>(slot)]->setOutLevelGain(outCh, linGain);
+void CueList::setChannelMap(ChannelMap map) {
+    m_channelMap = std::move(map);
 }
 
-void CueList::setCueXpointGain(int cueIdx, int srcCh, int outCh, float linGain) {
-    if (cueIdx < 0 || cueIdx >= cueCount() || srcCh < 0 || outCh < 0) return;
+void CueList::setCueOutLevelGain(int cueIdx, int ch, float linGain) {
+    if (cueIdx < 0 || cueIdx >= cueCount() || ch < 0) return;
     int slot;
     { std::lock_guard<std::mutex> lk(m_slotMutex); slot = m_lastSlot[static_cast<size_t>(cueIdx)]; }
-    if (slot >= 0 && m_slotStream[static_cast<size_t>(slot)])
-        m_slotStream[static_cast<size_t>(slot)]->setXpointGain(srcCh, outCh, linGain);
+    if (slot < 0 || !m_slotStream[static_cast<size_t>(slot)]) return;
+    auto& r = m_slotStream[static_cast<size_t>(slot)];
+    if (m_channelMap.numCh > 0 && ch < m_channelMap.numCh)
+        r->setOutLevelGain(m_channelMap.primaryPhys[static_cast<size_t>(ch)], linGain);
+    else
+        r->setOutLevelGain(ch, linGain);
+}
+
+void CueList::setCueXpointGain(int cueIdx, int srcCh, int ch, float linGain) {
+    if (cueIdx < 0 || cueIdx >= cueCount() || srcCh < 0 || ch < 0) return;
+    int slot;
+    { std::lock_guard<std::mutex> lk(m_slotMutex); slot = m_lastSlot[static_cast<size_t>(cueIdx)]; }
+    if (slot < 0 || !m_slotStream[static_cast<size_t>(slot)]) return;
+    auto& r = m_slotStream[static_cast<size_t>(slot)];
+    if (m_channelMap.numCh > 0 && ch < m_channelMap.numCh)
+        r->setXpointGain(srcCh, m_channelMap.primaryPhys[static_cast<size_t>(ch)], linGain);
+    else
+        r->setXpointGain(srcCh, ch, linGain);
 }
 
 // ---------------------------------------------------------------------------
@@ -718,34 +731,64 @@ static float levelGain(double levelDB, double trimDB) {
 }
 
 void CueList::applyRoutingToReader(const Cue& cue, StreamReader& reader,
-                                    int srcCh, int outCh) {
-    std::vector<float> xpGains(static_cast<size_t>(srcCh * outCh),
-                                std::numeric_limits<float>::quiet_NaN());
-    std::vector<float> outLevGains(static_cast<size_t>(outCh), 1.0f);
+                                    int srcCh, int physOutCh) {
+    const int numCh = (m_channelMap.numCh > 0) ? m_channelMap.numCh : physOutCh;
 
-    // Per-output-channel levels
-    for (int o = 0; o < outCh; ++o)
-        if (o < (int)cue.routing.outLevelDb.size())
-            outLevGains[static_cast<size_t>(o)] = lut::dBToLinear(cue.routing.outLevelDb[static_cast<size_t>(o)]);
+    // Build per-channel linear level gains
+    std::vector<float> chanOutLev(static_cast<size_t>(numCh), 1.0f);
+    for (int ch = 0; ch < numCh && ch < (int)cue.routing.outLevelDb.size(); ++ch)
+        chanOutLev[static_cast<size_t>(ch)] = lut::dBToLinear(cue.routing.outLevelDb[static_cast<size_t>(ch)]);
 
-    // Crosspoint matrix
-    for (int s = 0; s < srcCh; ++s) {
-        for (int o = 0; o < outCh; ++o) {
-            std::optional<float> xpDb;
-            if (!cue.routing.xpoint.empty() &&
-                s < (int)cue.routing.xpoint.size() &&
-                o < (int)cue.routing.xpoint[static_cast<size_t>(s)].size()) {
-                xpDb = cue.routing.xpoint[static_cast<size_t>(s)][static_cast<size_t>(o)];
-            } else {
-                // Default diagonal routing
-                xpDb = (s == o && s < outCh) ? std::optional<float>(0.0f) : std::nullopt;
+    if (m_channelMap.numCh == 0) {
+        // No channel map: channel space == physOut space (legacy / identity path)
+        std::vector<float> xpGains(static_cast<size_t>(srcCh * physOutCh),
+                                    std::numeric_limits<float>::quiet_NaN());
+        for (int s = 0; s < srcCh; ++s) {
+            for (int o = 0; o < physOutCh; ++o) {
+                std::optional<float> xpDb;
+                if (!cue.routing.xpoint.empty() &&
+                    s < (int)cue.routing.xpoint.size() &&
+                    o < (int)cue.routing.xpoint[static_cast<size_t>(s)].size())
+                    xpDb = cue.routing.xpoint[static_cast<size_t>(s)][static_cast<size_t>(o)];
+                else
+                    xpDb = (s == o && s < physOutCh) ? std::optional<float>(0.0f) : std::nullopt;
+                if (xpDb.has_value())
+                    xpGains[static_cast<size_t>(s * physOutCh + o)] = lut::dBToLinear(*xpDb);
             }
-            if (xpDb.has_value())
-                xpGains[static_cast<size_t>(s * outCh + o)] = lut::dBToLinear(*xpDb);
+        }
+        reader.setRouting(std::move(xpGains), std::move(chanOutLev), physOutCh);
+        return;
+    }
+
+    // Fold channel routing through the channel map to get physOut-space routing.
+    // physXp[s * physOutCh + p] = sum_ch( chanOutLev[ch] × xpCue_lin[s][ch] × fold[ch * physOutCh + p] )
+    std::vector<float> physXp(static_cast<size_t>(srcCh * physOutCh),
+                               std::numeric_limits<float>::quiet_NaN());
+
+    for (int s = 0; s < srcCh; ++s) {
+        for (int p = 0; p < physOutCh; ++p) {
+            float total = 0.0f;
+            for (int ch = 0; ch < numCh; ++ch) {
+                const size_t foldIdx = static_cast<size_t>(ch * physOutCh + p);
+                float foldG = (foldIdx < m_channelMap.fold.size()) ? m_channelMap.fold[foldIdx] : 0.0f;
+                if (foldG < 1e-10f) continue;
+                float xpLin = 0.0f;
+                if (!cue.routing.xpoint.empty() &&
+                    s < (int)cue.routing.xpoint.size() &&
+                    ch < (int)cue.routing.xpoint[static_cast<size_t>(s)].size() &&
+                    cue.routing.xpoint[static_cast<size_t>(s)][static_cast<size_t>(ch)].has_value())
+                    xpLin = lut::dBToLinear(*cue.routing.xpoint[static_cast<size_t>(s)][static_cast<size_t>(ch)]);
+                else
+                    xpLin = (s == ch) ? 1.0f : 0.0f;
+                total += xpLin * chanOutLev[static_cast<size_t>(ch)] * foldG;
+            }
+            if (total > 1e-10f)
+                physXp[static_cast<size_t>(s * physOutCh + p)] = total;
         }
     }
 
-    reader.setRouting(std::move(xpGains), std::move(outLevGains), outCh);
+    std::vector<float> physOutLev(static_cast<size_t>(physOutCh), 1.0f);
+    reader.setRouting(std::move(physXp), std::move(physOutLev), physOutCh);
 }
 
 // Build a segment list from a cue's markers and sliceLoops.

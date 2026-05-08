@@ -43,6 +43,7 @@ private slots:
     void onUndo();
     void onRedo();
     void onRenumberCues();
+    void onOpenAudioSetup();
 
 private:
     void buildMenuBar();

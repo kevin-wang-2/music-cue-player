@@ -136,10 +136,30 @@ struct ShowFile {
         std::string title{"Untitled Show"};
     };
 
+    // ---- Audio channel setup -----------------------------------------------
+    // Defines named logical channels that sit between cue outputs and the
+    // device's physical outputs.  Cue routing indices reference channel indices,
+    // not physical output indices.
+    struct AudioSetup {
+        struct Channel {
+            std::string name;
+            bool  linkedStereo{false};  // UI hint only — no effect on routing
+            float masterGainDb{0.0f};   // channel master fader (0 = unity)
+            bool  mute{false};
+        };
+        std::vector<Channel> channels;
+        // Sparse crosspoint: channel[ch] → physOut[out], dB.
+        // Absent entry for (ch, out): diagonal (ch==out) = 0 dB, else off.
+        // Set db <= -144 to explicitly disable the diagonal.
+        struct XpEntry { int ch{0}; int out{0}; float db{0.0f}; };
+        std::vector<XpEntry> xpEntries;
+    };
+
     // ---- Top-level fields --------------------------------------------------
     std::string              version{kCurrentVersion};
     ShowMeta                 show;
     EngineHints              engine;
+    AudioSetup               audioSetup;
     std::vector<CueListData> cueLists;
 
     // ---- I/O ---------------------------------------------------------------

@@ -307,6 +307,38 @@ bool ShowFile::load(const std::filesystem::path& path, std::string& error) {
         engine.deviceName = jget<std::string>(root["engine"], "deviceName", "");
     }
 
+    audioSetup = {};
+    if (root.contains("audioSetup") && root["audioSetup"].is_object()) {
+        const auto& as = root["audioSetup"];
+        if (as.contains("channels") && as["channels"].is_array()) {
+            for (const auto& ch : as["channels"]) {
+                AudioSetup::Channel c;
+                c.name         = jget<std::string>(ch, "name",         "");
+                c.linkedStereo = jget<bool>       (ch, "linkedStereo", false);
+                c.masterGainDb = jget<float>      (ch, "masterGainDb", 0.0f);
+                c.mute         = jget<bool>       (ch, "mute",         false);
+                audioSetup.channels.push_back(c);
+            }
+        }
+        if (as.contains("xpEntries") && as["xpEntries"].is_array()) {
+            for (const auto& xe : as["xpEntries"]) {
+                AudioSetup::XpEntry e;
+                e.ch  = jget<int>  (xe, "ch",  0);
+                e.out = jget<int>  (xe, "out", 0);
+                e.db  = jget<float>(xe, "db",  0.0f);
+                audioSetup.xpEntries.push_back(e);
+            }
+        }
+    }
+    // Migration: old files have no audioSetup → create one channel per engine output
+    if (audioSetup.channels.empty() && engine.channels > 0) {
+        for (int i = 0; i < engine.channels; ++i) {
+            AudioSetup::Channel c;
+            c.name = "Ch " + std::to_string(i + 1);
+            audioSetup.channels.push_back(c);
+        }
+    }
+
     cueLists.clear();
     if (root.contains("cueLists") && root["cueLists"].is_array()) {
         for (const auto& cl : root["cueLists"]) {
@@ -330,6 +362,30 @@ bool ShowFile::save(const std::filesystem::path& path, std::string& error) const
     root["engine"]["channels"]    = engine.channels;
     if (!engine.deviceName.empty())
         root["engine"]["deviceName"] = engine.deviceName;
+
+    {
+        json as;
+        json chArr = json::array();
+        for (const auto& ch : audioSetup.channels) {
+            json cj;
+            cj["name"] = ch.name;
+            if (ch.linkedStereo)         cj["linkedStereo"]  = true;
+            if (ch.masterGainDb != 0.0f) cj["masterGainDb"]  = ch.masterGainDb;
+            if (ch.mute)                 cj["mute"]          = true;
+            chArr.push_back(cj);
+        }
+        as["channels"] = chArr;
+        if (!audioSetup.xpEntries.empty()) {
+            json xpArr = json::array();
+            for (const auto& xe : audioSetup.xpEntries) {
+                json ej;
+                ej["ch"] = xe.ch; ej["out"] = xe.out; ej["db"] = xe.db;
+                xpArr.push_back(ej);
+            }
+            as["xpEntries"] = xpArr;
+        }
+        root["audioSetup"] = as;
+    }
 
     json clArr = json::array();
     for (const auto& cld : cueLists) {

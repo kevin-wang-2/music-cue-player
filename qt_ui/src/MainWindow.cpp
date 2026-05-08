@@ -1,5 +1,6 @@
 #include "MainWindow.h"
 #include "AppModel.h"
+#include "AudioSetupDialog.h"
 #include "CueTableView.h"
 #include "DeviceDialog.h"
 #include "InspectorWidget.h"
@@ -438,6 +439,7 @@ void MainWindow::buildMenuBar() {
     connect(actRenumber, &QAction::triggered, this, &MainWindow::onRenumberCues);
 
     auto* showMenu = mb->addMenu("&Show");
+    showMenu->addAction("Audio &Setup…", this, &MainWindow::onOpenAudioSetup);
     showMenu->addAction("Audio &Device…", this, &MainWindow::onOpenDeviceDialog);
     showMenu->addSeparator();
 
@@ -539,6 +541,19 @@ void MainWindow::onSaveShowAs() {
     m_model->showPath = path.toStdString();
     m_model->baseDir  = std::filesystem::path(m_model->showPath).parent_path().string();
     onSaveShow();
+}
+
+void MainWindow::onOpenAudioSetup() {
+    AudioSetupDialog dlg(m_model, this);
+    if (dlg.exec() != QDialog::Accepted) return;
+    m_model->sf.audioSetup = dlg.result();
+    m_model->dirty = true;
+    emit m_model->dirtyChanged(true);
+    std::string err;
+    ShowHelpers::rebuildCueList(*m_model, err);
+    // Refresh the inspector so channel labels and fader counts update
+    m_inspector->setCueIndex(m_model->cues.selectedIndex());
+    updateTitle();
 }
 
 void MainWindow::onOpenDeviceDialog() {

@@ -1,6 +1,7 @@
 #include "ShowHelpers.h"
 #include "AppModel.h"
 
+#include "engine/AudioMath.h"
 #include "engine/FadeData.h"
 
 #include <algorithm>
@@ -76,6 +77,55 @@ bool rebuildCueList(AppModel& m, std::string& /*err*/) {
     if (m.sf.cueLists.empty()) return true;
     const auto& topCues = m.sf.cueLists[0].cues;
     const auto  base    = std::filesystem::path(m.baseDir);
+
+    // Build and install the channel map so applyRoutingToReader folds correctly.
+    {
+        const int numPhys = m.engineOk ? m.engine.channels() : 2;
+        mcp::ChannelMap cm;
+        cm.numPhys = numPhys;
+        const auto& setup = m.sf.audioSetup;
+        cm.numCh = static_cast<int>(setup.channels.size());
+
+        if (cm.numCh == 0) {
+            // No audio setup: identity map (legacy / new empty show)
+            cm.numCh = numPhys;
+            cm.fold.assign(static_cast<size_t>(numPhys * numPhys), 0.0f);
+            for (int i = 0; i < numPhys; ++i)
+                cm.fold[static_cast<size_t>(i * numPhys + i)] = 1.0f;
+            cm.primaryPhys.resize(static_cast<size_t>(numPhys));
+            for (int i = 0; i < numPhys; ++i) cm.primaryPhys[static_cast<size_t>(i)] = i;
+        } else {
+            cm.fold.assign(static_cast<size_t>(cm.numCh * numPhys), 0.0f);
+            // Default: diagonal (channel ch → physOut ch if in range)
+            for (int ch = 0; ch < cm.numCh && ch < numPhys; ++ch)
+                cm.fold[static_cast<size_t>(ch * numPhys + ch)] = 1.0f;
+            // Apply explicit crosspoint entries
+            for (const auto& xe : setup.xpEntries) {
+                if (xe.ch >= 0 && xe.ch < cm.numCh && xe.out >= 0 && xe.out < numPhys)
+                    cm.fold[static_cast<size_t>(xe.ch * numPhys + xe.out)] =
+                        (xe.db <= -144.0f) ? 0.0f : mcp::lut::dBToLinear(xe.db);
+            }
+            // Apply channel master gain and mute
+            for (int ch = 0; ch < cm.numCh; ++ch) {
+                const auto& cfg = setup.channels[static_cast<size_t>(ch)];
+                float g = cfg.mute ? 0.0f : mcp::lut::dBToLinear(cfg.masterGainDb);
+                for (int p = 0; p < numPhys; ++p)
+                    cm.fold[static_cast<size_t>(ch * numPhys + p)] *= g;
+            }
+            // Compute primary physOut per channel (argmax of fold row)
+            cm.primaryPhys.resize(static_cast<size_t>(cm.numCh), 0);
+            for (int ch = 0; ch < cm.numCh; ++ch) {
+                float maxG = -1.0f;
+                int   maxP = (ch < numPhys) ? ch : 0;
+                for (int p = 0; p < numPhys; ++p) {
+                    float g = cm.fold[static_cast<size_t>(ch * numPhys + p)];
+                    if (g > maxG) { maxG = g; maxP = p; }
+                }
+                cm.primaryPhys[static_cast<size_t>(ch)] = maxP;
+            }
+        }
+        m.cues.setChannelMap(std::move(cm));
+    }
 
     // Build cueNumber → flat engine index map (DFS pre-order = insertion order).
     std::vector<std::pair<std::string, int>> numToIdx;

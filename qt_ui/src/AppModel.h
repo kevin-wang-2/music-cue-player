@@ -6,6 +6,7 @@
 #include "engine/ShowFile.h"
 
 #include <QObject>
+#include <QString>
 #include <set>
 #include <string>
 #include <vector>
@@ -48,6 +49,24 @@ public:
     // Called every frame (~16ms) from MainWindow timer:
     // reclaims finished StreamReaders and refreshes playback state.
     void tick();
+
+    // Number of logical channels defined in the current show.
+    // Falls back to engine.channels() if audioSetup is empty.
+    int channelCount() const {
+        if (!sf.audioSetup.channels.empty())
+            return static_cast<int>(sf.audioSetup.channels.size());
+        return engineOk ? engine.channels() : 2;
+    }
+
+    // Human-readable name for channel index ch (e.g. "L", "R").
+    // Returns "Ch N" if the setup has no name for that index.
+    QString channelName(int ch) const {
+        if (ch >= 0 && ch < static_cast<int>(sf.audioSetup.channels.size())) {
+            const auto& n = sf.audioSetup.channels[static_cast<size_t>(ch)].name;
+            if (!n.empty()) return QString::fromStdString(n);
+        }
+        return QString("Ch %1").arg(ch + 1);
+    }
 
 signals:
     void cueListChanged();

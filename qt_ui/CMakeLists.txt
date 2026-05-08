@@ -22,6 +22,8 @@ set(QT_UI_SOURCES
     src/ShowHelpers.cpp
     src/AppModel.h
     src/AppModel.cpp
+    src/AudioSetupDialog.h
+    src/AudioSetupDialog.cpp
     src/FaderWidget.h
     src/FaderWidget.cpp
     src/WaveformView.h

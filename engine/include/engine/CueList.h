@@ -14,6 +14,18 @@
 
 namespace mcp {
 
+// Channel-to-physical-output routing fold matrix.
+// Built from ShowFile::AudioSetup and set on CueList before playback.
+// cue.routing indices are channel indices; the fold maps them to physOut indices.
+struct ChannelMap {
+    int numCh{0};    // number of logical channels (0 = use identity / legacy)
+    int numPhys{0};  // physical output count (= AudioEngine::channels())
+    // fold[ch * numPhys + p] = linear gain for channel ch routing to physOut p.
+    std::vector<float> fold;
+    // primaryPhys[ch] = argmax_p(fold[ch*numPhys+p]). Used for live fade updates.
+    std::vector<int> primaryPhys;
+};
+
 // High-level cue sequencer backed by a shared AudioEngine and Scheduler.
 //
 // Cue types
@@ -156,6 +168,11 @@ public:
     // Initialize xpoint to default (diagonal) if it is empty.
     // srcCh = file channels, outCh = engine output channels.
     void initCueRouting(int index, int srcCh, int outCh);
+
+    // Set the channel-to-physical-output fold matrix.
+    // Call after loading show data and after each audio device change.
+    // An empty map (numCh == 0) uses legacy identity routing.
+    void setChannelMap(ChannelMap map);
 
     // Fade cue setters (no-op if cue[index] is not a Fade cue).
     void setCueFadeMasterTarget (int index, bool enabled, float targetDb);
@@ -322,6 +339,7 @@ private:
     Scheduler&   m_scheduler;
     std::vector<Cue> m_cues;
     int m_selectedIndex{0};
+    ChannelMap   m_channelMap;
 
     // Pending devamp follow-up actions: call go() when the trigger fires.
     // waitForStop=true → wait for voice to go inactive (mode 1);

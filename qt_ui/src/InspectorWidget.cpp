@@ -1025,7 +1025,7 @@ void InspectorWidget::rebuildLevelsForCue() {
     if (!c) return;
 
     if (c->type == mcp::CueType::Audio) {
-        const int outCh = m_model->engineOk ? m_model->engine.channels() : 2;
+        const int outCh = m_model->channelCount();
         const int srcCh = c->audioFile.isLoaded() ? c->audioFile.metadata().channels : 1;
 
         // ── Fader row ──────────────────────────────────────────────────
@@ -1048,7 +1048,7 @@ void InspectorWidget::rebuildLevelsForCue() {
             float dB = 0.0f;
             if (o < (int)c->routing.outLevelDb.size())
                 dB = c->routing.outLevelDb[o];
-            auto* fw = new FaderWidget(QString("Out %1").arg(o + 1), m_levelsContent);
+            auto* fw = new FaderWidget(m_model->channelName(o), m_levelsContent);
             fw->setValue(dB);
             m_outFaders.push_back(fw);
             fadersRow->addWidget(fw);
@@ -1087,7 +1087,7 @@ void InspectorWidget::rebuildLevelsForCue() {
             grid->setColumnStretch(outCh + 1, 1);
 
             for (int o = 0; o < outCh; ++o) {
-                auto* lbl = new QLabel(QString("Out %1").arg(o + 1), xpGroup);
+                auto* lbl = new QLabel(m_model->channelName(o), xpGroup);
                 lbl->setFixedWidth(kCellW);
                 lbl->setAlignment(Qt::AlignHCenter);
                 lbl->setStyleSheet("color:#888;font-size:10px;");
@@ -1153,7 +1153,7 @@ void InspectorWidget::rebuildLevelsForCue() {
 
     } else if (c->type == mcp::CueType::Fade && c->fadeData) {
         const auto& fd = *c->fadeData;
-        const int outCh = m_model->engineOk ? m_model->engine.channels() : 2;
+        const int outCh = m_model->channelCount();
 
         // Helper: create a toggleable fader for a fade target.
         // Clicking the label toggles the "enabled" state; dragging sets target dB.
@@ -1183,7 +1183,7 @@ void InspectorWidget::rebuildLevelsForCue() {
         for (int o = 0; o < outCh; ++o) {
             bool  enabled = (o < (int)fd.outLevels.size()) ? fd.outLevels[o].enabled  : false;
             float target  = (o < (int)fd.outLevels.size()) ? fd.outLevels[o].targetDb : 0.0f;
-            auto* fw = makeFadeFader(QString("Out %1").arg(o + 1), enabled, target);
+            auto* fw = makeFadeFader(m_model->channelName(o), enabled, target);
             m_fadeOutFaders.push_back(fw);
             fadersRow->addWidget(fw);
             connect(fw, &FaderWidget::dragStarted, this, [this]() {
@@ -1257,7 +1257,7 @@ void InspectorWidget::rebuildLevelsForCue() {
             grid->setColumnStretch(xpOutCh + 1, 1);
 
             for (int o = 0; o < xpOutCh; ++o) {
-                auto* lbl = new QLabel(QString("Out %1").arg(o + 1), xpGroup);
+                auto* lbl = new QLabel(m_model->channelName(o), xpGroup);
                 lbl->setFixedWidth(kCellW);
                 lbl->setAlignment(Qt::AlignHCenter);
                 lbl->setStyleSheet("color:#888;font-size:10px;");
