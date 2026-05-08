@@ -21,9 +21,11 @@ class QGroupBox;
 class QLabel;
 class QLineEdit;
 class QPlainTextEdit;
+class PythonEditor;
 class QPushButton;
 class QScrollArea;
 class QSpinBox;
+class ScriptEditorWidget;
 
 // Right-hand inspector panel.
 // Shows a QTabWidget with tabs appropriate to the selected cue type:
@@ -72,6 +74,7 @@ private:
     void buildMCTab();
     void buildScriptTab();
     void loadScript();
+    void refreshScriptErrors();   // re-apply error highlight for current cue
     void buildNetworkTab();
     void loadNetwork();
     void buildMidiTab();
@@ -178,8 +181,8 @@ private:
     TimelineGroupView* m_timelineView{nullptr};
 
     // Script tab (Scriptlet cues)
-    QWidget*        m_scriptPage{nullptr};
-    QPlainTextEdit* m_editScript{nullptr};
+    QWidget*           m_scriptPage{nullptr};
+    ScriptEditorWidget* m_editScript{nullptr};
 
     // Network tab
     QWidget*       m_networkPage{nullptr};

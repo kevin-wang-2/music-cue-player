@@ -1,6 +1,7 @@
 #include "MainWindow.h"
 #include "AppModel.h"
 #include "ProjectStatusDialog.h"
+#include "ScriptletLibraryDialog.h"
 #include "SettingsDialog.h"
 #include "CueTableView.h"
 #include "DeviceDialog.h"
@@ -145,9 +146,6 @@ MainWindow::MainWindow(AppModel* model, QWidget* parent)
         if (!m_model->engineOk)
             showToast("Engine error: " + QString::fromStdString(m_model->engineError));
     });
-    connect(m_model, &AppModel::scriptletError, this, [this](const QString& msg) {
-        QMessageBox::warning(this, "Scriptlet Error", msg);
-    });
 
     connect(m_cueTable,  &CueTableView::rowSelected,    this, &MainWindow::onRowSelected);
     connect(m_cueTable,  &CueTableView::cueListModified, this, &MainWindow::onCueListModified);
@@ -159,6 +157,7 @@ MainWindow::MainWindow(AppModel* model, QWidget* parent)
     // Start external trigger infrastructure
     m_model->applyMidiInput();
     m_model->applyOscSettings();
+    m_model->applyScriptletLibrary();
 
     // App-level event filter for per-cue hotkey triggers
     qApp->installEventFilter(this);
@@ -474,6 +473,13 @@ void MainWindow::buildMenuBar() {
         m_statusDialog->activateWindow();
         m_statusDialog->refreshWarnings();
     });
+    showMenu->addAction("Scriptlet &Library…", this, [this]() {
+        if (!m_libraryDialog)
+            m_libraryDialog = new ScriptletLibraryDialog(m_model, this);
+        m_libraryDialog->show();
+        m_libraryDialog->raise();
+        m_libraryDialog->activateWindow();
+    });
     showMenu->addSeparator();
 
     auto* actPanic = showMenu->addAction("Panic", this, [this]() {
@@ -543,6 +549,7 @@ void MainWindow::onNewShow() {
     m_model->showPath.clear();
     m_model->baseDir.clear();
     m_model->dirty = false;
+    m_model->applyScriptletLibrary();
     std::string err;
     ShowHelpers::rebuildCueList(*m_model, err);
     m_cueTable->refresh();
@@ -550,6 +557,7 @@ void MainWindow::onNewShow() {
     updateCueInfo();
     updateTitle();
     m_actSave->setEnabled(false);
+    if (m_libraryDialog) m_libraryDialog->refreshList();
 }
 
 void MainWindow::onOpenShow() {
@@ -811,12 +819,14 @@ void MainWindow::loadShowFile(const QString& path) {
     m_model->baseDir  = std::filesystem::path(m_model->showPath).parent_path().string();
     m_model->dirty    = false;
     m_model->applyOscSettings();
+    m_model->applyScriptletLibrary();
     ShowHelpers::rebuildCueList(*m_model, err);
     m_cueTable->refresh();
     m_inspector->setCueIndex(-1);
     updateCueInfo();
     updateTitle();
     m_actSave->setEnabled(false);
+    if (m_libraryDialog) m_libraryDialog->refreshList();
     showToast("Loaded: " + QString::fromStdString(
         std::filesystem::path(path.toStdString()).filename().string()));
 }

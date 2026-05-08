@@ -205,6 +205,16 @@ struct ShowFile {
         std::vector<XpEntry> xpEntries;
     };
 
+    // ---- Scriptlet library -------------------------------------------------
+    // Named Python modules available as `import mcp.library.<name>` in scriptlets.
+    struct ScriptletLibrary {
+        struct Entry {
+            std::string name;   // valid Python identifier; must be unique within the library
+            std::string code;
+        };
+        std::vector<Entry> entries;
+    };
+
     // ---- Top-level fields --------------------------------------------------
     std::string              version{kCurrentVersion};
     ShowMeta                 show;
@@ -214,6 +224,7 @@ struct ShowFile {
     MidiSetup                midiSetup;
     SystemControlBindings    systemControls;
     OscServerSettings        oscServer;
+    ScriptletLibrary         scriptletLibrary;
     std::vector<CueListData> cueLists;
 
     // ---- I/O ---------------------------------------------------------------

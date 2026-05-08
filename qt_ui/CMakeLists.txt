@@ -66,6 +66,12 @@ set(QT_UI_SOURCES
     src/ControlsDialog.cpp
     src/ScriptletEngine.h
     src/ScriptletEngine.cpp
+    src/PythonEditor.h
+    src/PythonEditor.cpp
+    src/ScriptEditorWidget.h
+    src/ScriptEditorWidget.cpp
+    src/ScriptletLibraryDialog.h
+    src/ScriptletLibraryDialog.cpp
     src/ProjectStatusDialog.h
     src/ProjectStatusDialog.cpp
 )

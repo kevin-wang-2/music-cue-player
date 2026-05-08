@@ -8,6 +8,7 @@ class AppModel;
 class CueTableView;
 class InspectorWidget;
 class ProjectStatusDialog;
+class ScriptletLibraryDialog;
 class QSplitter;
 class QTimer;
 class QToolButton;
@@ -65,7 +66,8 @@ private:
     AppModel*             m_model{nullptr};
     CueTableView*         m_cueTable{nullptr};
     InspectorWidget*      m_inspector{nullptr};
-    ProjectStatusDialog*  m_statusDialog{nullptr};
+    ProjectStatusDialog*    m_statusDialog{nullptr};
+    ScriptletLibraryDialog* m_libraryDialog{nullptr};
     QSplitter*       m_splitter{nullptr};
     QTimer*          m_timer{nullptr};
 

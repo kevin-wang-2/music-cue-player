@@ -507,6 +507,17 @@ bool ShowFile::load(const std::filesystem::path& path, std::string& error) {
         }
     }
 
+    scriptletLibrary = {};
+    if (root.contains("scriptletLibrary") && root["scriptletLibrary"].is_array()) {
+        for (const auto& ej : root["scriptletLibrary"]) {
+            ScriptletLibrary::Entry e;
+            e.name = jget<std::string>(ej, "name", "");
+            e.code = jget<std::string>(ej, "code", "");
+            if (!e.name.empty())
+                scriptletLibrary.entries.push_back(std::move(e));
+        }
+    }
+
     cueLists.clear();
     if (root.contains("cueLists") && root["cueLists"].is_array()) {
         for (const auto& cl : root["cueLists"]) {
@@ -618,6 +629,17 @@ bool ShowFile::save(const std::filesystem::path& path, std::string& error) const
             os["accessList"] = alArr;
         }
         root["oscServer"] = os;
+    }
+
+    if (!scriptletLibrary.entries.empty()) {
+        json libArr = json::array();
+        for (const auto& e : scriptletLibrary.entries) {
+            json ej;
+            ej["name"] = e.name;
+            ej["code"] = e.code;
+            libArr.push_back(ej);
+        }
+        root["scriptletLibrary"] = libArr;
     }
 
     json clArr = json::array();

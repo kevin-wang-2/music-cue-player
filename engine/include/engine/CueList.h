@@ -130,9 +130,14 @@ public:
     // Set the Python source code for a Scriptlet cue.
     void setCueScriptletCode(int index, const std::string& code);
 
-    // Drain and return any scriptlet codes queued since the last call.
-    // Thread-safe: may be called from any thread.
-    std::vector<std::string> drainScriptlets();
+    // Drain and return any scriptlets queued since the last call.
+    // Each entry is {cueIndex, pythonCode}.  Thread-safe.
+    std::vector<std::pair<int, std::string>> drainScriptlets();
+
+    // Drain and return indices of cues that were triggered (go/start) since last call.
+    // Fires regardless of pre-wait — represents the trigger moment, not playback start.
+    // Thread-safe (shares m_scriptletMutex).
+    std::vector<int> drainFiredCues();
 
     // Append a Network cue.  When fired, sends the stored command to the
     // network patch identified by networkPatchIdx.
@@ -449,8 +454,9 @@ private:
 
     // Pending scriptlet codes queued by fire() (possibly scheduler thread);
     // drained on the main thread by AppModel::tick() via drainScriptlets().
-    mutable std::mutex       m_scriptletMutex;
-    std::vector<std::string> m_pendingScriptlets;
+    mutable std::mutex                         m_scriptletMutex;
+    std::vector<std::pair<int, std::string>>   m_pendingScriptlets;
+    std::vector<int>                           m_pendingFiredCues;
 
     // Active MTC generators keyed by cue index.  Protected by m_slotMutex.
     // Stored so stop() / panic() can terminate a running generator immediately.

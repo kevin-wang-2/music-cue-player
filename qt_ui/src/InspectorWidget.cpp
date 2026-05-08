@@ -4,6 +4,8 @@
 #include "FaderWidget.h"
 #include "MCImport.h"
 #include "MusicContextView.h"
+#include "PythonEditor.h"
+#include "ScriptEditorWidget.h"
 #include "ShowHelpers.h"
 #include "SyncGroupView.h"
 #include "TimelineGroupView.h"
@@ -22,7 +24,6 @@
 #include <QComboBox>
 #include <QEvent>
 #include <QKeyEvent>
-#include <QPlainTextEdit>
 #include <QDoubleSpinBox>
 #include <QFileDialog>
 #include <QFormLayout>
@@ -36,6 +37,7 @@
 #include <QMenu>
 #include <QMessageBox>
 #include <QPushButton>
+#include <QRegularExpression>
 #include <QScrollArea>
 #include <QSpinBox>
 #include <QTabWidget>
@@ -1525,36 +1527,56 @@ void InspectorWidget::buildScriptTab() {
     m_scriptPage = new QWidget;
     auto* lay = new QVBoxLayout(m_scriptPage);
     lay->setContentsMargins(8, 8, 8, 8);
-    lay->setSpacing(4);
+    lay->setSpacing(0);
 
-    auto* hint = new QLabel("import mcp   →   mcp.go()  /  mcp.select(\"5\")  /  mcp.alert(\"hello\")");
-    hint->setStyleSheet("color:#888; font-size:11px;");
-    lay->addWidget(hint);
-
-    m_editScript = new QPlainTextEdit;
-    m_editScript->setPlaceholderText("import mcp\n\nmcp.go()");
-    m_editScript->setStyleSheet(
-        "QPlainTextEdit { background:#1a1a2e; color:#e0e0ff;"
-        "  border:1px solid #444; border-radius:3px;"
-        "  font-family:monospace; font-size:12px; }");
-    lay->addWidget(m_editScript);
+    m_editScript = new ScriptEditorWidget;
+    lay->addWidget(m_editScript, 1);
 
     m_tabs->addTab(m_scriptPage, "Script");
 
-    connect(m_editScript, &QPlainTextEdit::textChanged, this, [this]() {
+    connect(m_editScript, &ScriptEditorWidget::codeChanged, this, [this](const QString& code) {
         if (m_loading || m_cueIdx < 0) return;
-        m_model->cues.setCueScriptletCode(m_cueIdx, m_editScript->toPlainText().toStdString());
+        m_model->cues.setCueScriptletCode(m_cueIdx, code.toStdString());
+        m_model->scriptletErrorCues.erase(m_cueIdx);
+        m_model->scriptletErrors.erase(m_cueIdx);
+        m_editScript->clearErrorLines();
         ShowHelpers::syncSfFromCues(*m_model);
         emit cueEdited();
+    });
+
+    connect(m_model, &AppModel::cueListChanged, this, [this]() {
+        if (m_cueIdx >= 0) refreshScriptErrors();
     });
 }
 
 void InspectorWidget::loadScript() {
     const mcp::Cue* c = (m_cueIdx >= 0) ? m_model->cues.cueAt(m_cueIdx) : nullptr;
     if (!c) return;
-    m_editScript->blockSignals(true);
-    m_editScript->setPlainText(QString::fromStdString(c->scriptletCode));
-    m_editScript->blockSignals(false);
+    const QString cueNum = QString::fromStdString(c->cueNumber);
+    m_loading = true;
+    m_editScript->setContext("cue_" + cueNum);
+    m_editScript->setCode(QString::fromStdString(c->scriptletCode));
+    m_loading = false;
+    refreshScriptErrors();
+}
+
+void InspectorWidget::refreshScriptErrors() {
+    if (!m_editScript || m_cueIdx < 0) return;
+    const auto it = m_model->scriptletErrors.find(m_cueIdx);
+    if (it == m_model->scriptletErrors.end()) {
+        m_editScript->clearErrorLines();
+        return;
+    }
+    static const QRegularExpression lineRe(R"(line (\d+))");
+    const QString errStr = QString::fromStdString(it->second);
+    int errorLine = -1;
+    auto mi = lineRe.globalMatch(errStr);
+    while (mi.hasNext())
+        errorLine = mi.next().captured(1).toInt();  // take last (deepest frame)
+    if (errorLine > 0)
+        m_editScript->markErrorLine(errorLine);
+    else
+        m_editScript->clearErrorLines();
 }
 
 void InspectorWidget::buildNetworkTab() {

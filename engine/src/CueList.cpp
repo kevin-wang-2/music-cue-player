@@ -271,10 +271,17 @@ void CueList::setCueScriptletCode(int index, const std::string& code) {
         m_cues[static_cast<size_t>(index)].scriptletCode = code;
 }
 
-std::vector<std::string> CueList::drainScriptlets() {
+std::vector<std::pair<int, std::string>> CueList::drainScriptlets() {
     std::lock_guard<std::mutex> lk(m_scriptletMutex);
-    std::vector<std::string> out;
+    std::vector<std::pair<int, std::string>> out;
     out.swap(m_pendingScriptlets);
+    return out;
+}
+
+std::vector<int> CueList::drainFiredCues() {
+    std::lock_guard<std::mutex> lk(m_scriptletMutex);
+    std::vector<int> out;
+    out.swap(m_pendingFiredCues);
     return out;
 }
 
@@ -1643,7 +1650,7 @@ bool CueList::fire(int idx) {
         case CueType::Scriptlet: {
             {
                 std::lock_guard<std::mutex> lk(m_scriptletMutex);
-                m_pendingScriptlets.push_back(cue.scriptletCode);
+                m_pendingScriptlets.emplace_back(idx, cue.scriptletCode);
             }
             result = true;
             followFrames = 0;
@@ -1746,6 +1753,8 @@ bool CueList::go(int64_t originFrame) {
         // Selection has already been advanced; leave the cue running.
         if (isCuePlaying(idx) || isCuePending(idx)) break;
 
+        { std::lock_guard<std::mutex> lk(m_scriptletMutex); m_pendingFiredCues.push_back(idx); }
+
         const double pw = cue.preWaitSeconds + quantizeDelay(idx, originFrame);
 
         if (pw > 0.0) {
@@ -1775,6 +1784,9 @@ bool CueList::start(int index, int64_t originFrame) {
 
     const auto& cue = m_cues[index];
     if (originFrame < 0) originFrame = m_engine.enginePlayheadFrames();
+
+    { std::lock_guard<std::mutex> lk(m_scriptletMutex); m_pendingFiredCues.push_back(index); }
+
     const double pw = cue.preWaitSeconds + quantizeDelay(index, originFrame);
 
     if (pw > 0.0) {

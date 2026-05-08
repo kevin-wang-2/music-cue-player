@@ -11,9 +11,11 @@
 
 #include <QObject>
 #include <QString>
+#include <map>
 #include <set>
 #include <string>
 #include <vector>
+#include <array>
 
 // Central application model.  Owns the audio engine stack and show data.
 // All UI widgets hold a pointer to this object.
@@ -46,6 +48,16 @@ public:
     // UI state shared between widgets
     std::set<int>                         multiSel;
     std::vector<mcp::ShowFile::CueData>   clipboard;
+
+    // Cue indices where the last scriptlet execution failed.
+    // Cleared on successful re-run or when the cue's code is edited.
+    std::set<int>                         scriptletErrorCues;
+    // Full error/traceback string per cue index (parallel to scriptletErrorCues).
+    std::map<int, std::string>            scriptletErrors;
+
+    // Music-event tracking — updated in tick().
+    int    m_mcCueIdx{-1};         // flat index of active MC cue, -1 if none
+    std::map<int, double> m_lastMusicBoundary;  // subdivision → last fired boundary (elapsed secs)
 
     // Undo / redo history — snapshots of cueLists[0].cues.
     static constexpr int kMaxUndo = 100;
@@ -83,6 +95,8 @@ public:
     void applyOscSettings();
     // Apply MIDI input: open all ports.
     void applyMidiInput();
+    // Sync scriptlet library from sf into the ScriptletEngine.
+    void applyScriptletLibrary();
 
     // Route an incoming MIDI message to matching cue triggers + system controls.
     // Called internally; also exposed for testing.
@@ -92,7 +106,6 @@ public:
 
 signals:
     void cueListChanged();
-    void scriptletError(const QString& msg);
     // Emitted before routing so monitors (e.g. ProjectStatusDialog) can log.
     void midiInputReceived(mcp::MidiMsgType type, int ch, int d1, int d2);
     void oscInputReceived(const QString& path, const QVariantList& args);
@@ -104,4 +117,7 @@ signals:
     void engineStatusChanged();
     // Emitted when an external trigger fires a cue (for UI highlight feedback)
     void externalTriggerFired(int cueIndex);
+    // Emitted when any cue is triggered (regardless of pre-wait).
+    // Used by the scriptlet event system; also fired for internally-triggered cues.
+    void cueFired(int cueIndex);
 };

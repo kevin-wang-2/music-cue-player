@@ -299,7 +299,7 @@ void CueTableView::setRowStatus(int row) {
     if (!c) return;
 
     int status = 0;
-    if (!c->isLoaded()) {
+    if (!c->isLoaded() || m_model->scriptletErrorCues.count(row)) {
         status = 4;
     } else if (m_model->cues.isCuePlaying(row) || m_model->cues.isFadeActive(row)) {
         status = 1;
