@@ -48,6 +48,8 @@ set(QT_UI_SOURCES
     src/SyncGroupView.cpp
     src/MusicContextView.h
     src/MusicContextView.cpp
+    src/CueListPanel.h
+    src/CueListPanel.cpp
     src/MainWindow.h
     src/MainWindow.cpp
     src/MCImport.h

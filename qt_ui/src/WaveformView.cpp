@@ -57,7 +57,7 @@ void WaveformView::setCueIndex(int idx) {
         m_viewDur   = 0.0;   // 0 = "fit to file once peaks arrive"
     }
 
-    const mcp::Cue* c = m_model->cues.cueAt(idx);
+    const mcp::Cue* c = m_model->cues().cueAt(idx);
     if (!c || c->type != mcp::CueType::Audio) { update(); return; }
 
     // Resolve absolute path
@@ -69,7 +69,7 @@ void WaveformView::setCueIndex(int idx) {
 }
 
 void WaveformView::updatePlayhead() {
-    if (m_cueIdx >= 0 && m_model->cues.isCuePlaying(m_cueIdx))
+    if (m_cueIdx >= 0 && m_model->cues().isCuePlaying(m_cueIdx))
         update();
 }
 
@@ -123,7 +123,7 @@ void WaveformView::paintEvent(QPaintEvent*) {
         m_viewStart = std::clamp(m_viewStart, 0.0, std::max(0.0, fileDur - m_viewDur));
     }
 
-    const mcp::Cue* c = (m_cueIdx >= 0) ? m_model->cues.cueAt(m_cueIdx) : nullptr;
+    const mcp::Cue* c = (m_cueIdx >= 0) ? m_model->cues().cueAt(m_cueIdx) : nullptr;
     const double startSec = c ? c->startTime : 0.0;
     const double endSec   = c
         ? ((c->duration > 0.0) ? c->startTime + c->duration : fileDur)
@@ -241,8 +241,8 @@ void WaveformView::paintEvent(QPaintEvent*) {
     }
 
     // Playhead
-    if (c && m_model->cues.isCuePlaying(m_cueIdx)) {
-        const double fp  = m_model->cues.cuePlayheadFileSeconds(m_cueIdx);
+    if (c && m_model->cues().isCuePlaying(m_cueIdx)) {
+        const double fp  = m_model->cues().cuePlayheadFileSeconds(m_cueIdx);
         const int    phx = (int)secToX(fp);
         if (phx >= 0 && phx < W) {
             p.setPen(QPen(QColor(100, 255, 120, 200), 1.5));
@@ -359,7 +359,7 @@ void WaveformView::mousePressEvent(QMouseEvent* ev) {
     const double yd = ev->position().y();
     const double sec = xToSec(xd);
 
-    const mcp::Cue* c = (m_cueIdx >= 0) ? m_model->cues.cueAt(m_cueIdx) : nullptr;
+    const mcp::Cue* c = (m_cueIdx >= 0) ? m_model->cues().cueAt(m_cueIdx) : nullptr;
     if (!c) return;
 
     const double fileDur = m_peaks.valid ? m_peaks.fileDur : 1.0;
@@ -410,7 +410,7 @@ void WaveformView::mousePressEvent(QMouseEvent* ev) {
                 emit markerSelectionChanged(-1);
             }
             m_armSec = snapToGrid(sec);
-            m_model->cues.arm(m_cueIdx, m_armSec);
+            m_model->cues().arm(m_cueIdx, m_armSec);
             emit armPositionChanged(sec);
             update();
         }
@@ -425,7 +425,7 @@ void WaveformView::mousePressEvent(QMouseEvent* ev) {
 void WaveformView::mouseMoveEvent(QMouseEvent* ev) {
     const double xd = ev->position().x();
 
-    const mcp::Cue* c = (m_cueIdx >= 0) ? m_model->cues.cueAt(m_cueIdx) : nullptr;
+    const mcp::Cue* c = (m_cueIdx >= 0) ? m_model->cues().cueAt(m_cueIdx) : nullptr;
     if (!c) return;
 
     const double fileDur = m_peaks.valid ? m_peaks.fileDur : 1.0;
@@ -437,15 +437,15 @@ void WaveformView::mouseMoveEvent(QMouseEvent* ev) {
         const double delta = (xd - m_dragPxOrig) / width() * m_viewDur;
         if (m_drag == -1) {
             double ns = std::clamp(m_dragValOrig + delta, 0.0, endSec - 0.001);
-            m_model->cues.setCueStartTime(m_cueIdx, ns);
+            m_model->cues().setCueStartTime(m_cueIdx, ns);
             ShowHelpers::syncSfFromCues(*m_model);
         } else if (m_drag == -3) {
             double ne = std::clamp(m_dragValOrig + delta, startSec + 0.001, fileDur);
-            m_model->cues.setCueDuration(m_cueIdx, ne - c->startTime);
+            m_model->cues().setCueDuration(m_cueIdx, ne - c->startTime);
             ShowHelpers::syncSfFromCues(*m_model);
         } else if (m_drag >= 0) {
             double nt = std::clamp(m_dragValOrig + delta, startSec + 0.001, endSec - 0.001);
-            m_model->cues.setCueMarkerTime(m_cueIdx, m_drag, nt);
+            m_model->cues().setCueMarkerTime(m_cueIdx, m_drag, nt);
             ShowHelpers::syncSfFromCues(*m_model);
         }
         update();
@@ -483,7 +483,7 @@ void WaveformView::mouseDoubleClickEvent(QMouseEvent* ev) {
     const double xd = ev->position().x();
     const double yd = ev->position().y();
 
-    const mcp::Cue* c = (m_cueIdx >= 0) ? m_model->cues.cueAt(m_cueIdx) : nullptr;
+    const mcp::Cue* c = (m_cueIdx >= 0) ? m_model->cues().cueAt(m_cueIdx) : nullptr;
     if (!c) return;
 
     const double fileDur  = m_peaks.valid ? m_peaks.fileDur : 1.0;
@@ -569,7 +569,7 @@ void WaveformView::contextMenuEvent(QContextMenuEvent* ev) {
     QMenu menu(this);
 
     // If right-click is on an existing marker, offer Delete first.
-    const mcp::Cue* cCtx = (m_cueIdx >= 0) ? m_model->cues.cueAt(m_cueIdx) : nullptr;
+    const mcp::Cue* cCtx = (m_cueIdx >= 0) ? m_model->cues().cueAt(m_cueIdx) : nullptr;
     if (cCtx) {
         constexpr double kSnapPx = 8.0;
         for (int mi = 0; mi < (int)cCtx->markers.size(); ++mi) {
@@ -579,7 +579,7 @@ void WaveformView::contextMenuEvent(QContextMenuEvent* ev) {
                     [this, mi]() {
                         m_model->pushUndo();
                         const int prevSel = m_selMarker;
-                        m_model->cues.removeCueMarker(m_cueIdx, mi);
+                        m_model->cues().removeCueMarker(m_cueIdx, mi);
                         ShowHelpers::syncSfFromCues(*m_model);
                         // Adjust or clear selection
                         if (prevSel == mi) {
@@ -609,7 +609,7 @@ void WaveformView::contextMenuEvent(QContextMenuEvent* ev) {
         QString("Add marker at %1").arg(posLabel),
         [this, snapSec]() {
             m_model->pushUndo();
-            m_model->cues.addCueMarker(m_cueIdx, snapSec);
+            m_model->cues().addCueMarker(m_cueIdx, snapSec);
             ShowHelpers::syncSfFromCues(*m_model);
             emit markerAdded(snapSec);
             update();
@@ -645,13 +645,13 @@ void WaveformView::contextMenuEvent(QContextMenuEvent* ev) {
 void WaveformView::keyPressEvent(QKeyEvent* ev) {
     if ((ev->key() == Qt::Key_Delete || ev->key() == Qt::Key_Backspace)
             && m_selMarker >= 0 && m_cueIdx >= 0) {
-        const mcp::Cue* c = m_model->cues.cueAt(m_cueIdx);
+        const mcp::Cue* c = m_model->cues().cueAt(m_cueIdx);
         if (c && m_selMarker < (int)c->markers.size()) {
             m_model->pushUndo();
             const int mi = m_selMarker;
             m_selMarker  = -1;
             emit markerSelectionChanged(-1);
-            m_model->cues.removeCueMarker(m_cueIdx, mi);
+            m_model->cues().removeCueMarker(m_cueIdx, mi);
             ShowHelpers::syncSfFromCues(*m_model);
             update();
             ev->accept();
@@ -671,9 +671,9 @@ void WaveformView::leaveEvent(QEvent* ev) {
 
 void WaveformView::commitDrag() {
     if (m_drag >= 0 && m_cueIdx >= 0) {
-        const mcp::Cue* c = m_model->cues.cueAt(m_cueIdx);
+        const mcp::Cue* c = m_model->cues().cueAt(m_cueIdx);
         if (c && m_drag < (int)c->markers.size()) {
-            m_model->cues.setCueMarkerTime(m_cueIdx, m_drag, c->markers[m_drag].time);
+            m_model->cues().setCueMarkerTime(m_cueIdx, m_drag, c->markers[m_drag].time);
             ShowHelpers::syncSfFromCues(*m_model);
         }
     }
@@ -725,7 +725,7 @@ void WaveformView::commitLoopEdit() {
     m_editLoopSlice = -1;
 
     if (m_cueIdx < 0 || sliceIdx < 0) { update(); return; }
-    const mcp::Cue* c = m_model->cues.cueAt(m_cueIdx);
+    const mcp::Cue* c = m_model->cues().cueAt(m_cueIdx);
     if (!c || sliceIdx >= (int)c->sliceLoops.size()) { update(); return; }
 
     int newLc;
@@ -745,7 +745,7 @@ void WaveformView::commitLoopEdit() {
     m_model->pushUndo();
     auto sl = c->sliceLoops;
     sl[sliceIdx] = newLc;
-    m_model->cues.setCueSliceLoops(m_cueIdx, sl);
+    m_model->cues().setCueSliceLoops(m_cueIdx, sl);
     ShowHelpers::syncSfFromCues(*m_model);
     update();
 }

@@ -3,7 +3,9 @@
 #include "FaderWidget.h"
 
 #include <cmath>
+#include <functional>
 #include <QCheckBox>
+#include <QComboBox>
 #include <QDialogButtonBox>
 #include <QDoubleSpinBox>
 #include <QFrame>
@@ -36,7 +38,13 @@ static const char* kDarkStyle =
     "QCheckBox::indicator{width:14px;height:14px;border:1px solid #555;"
     "  border-radius:2px;background:#222;}"
     "QCheckBox::indicator:checked{background:#2a6ab8;border-color:#2a6ab8;}"
+    "QComboBox{background:#252525;color:#ddd;border:1px solid #444;"
+    "  border-radius:3px;padding:2px 5px;}"
+    "QComboBox:focus{border-color:#2a6ab8;}"
+    "QComboBox QAbstractItemView{background:#252525;color:#ddd;selection-background-color:#2a4a70;}"
     "QDoubleSpinBox{background:#252525;color:#ddd;border:1px solid #444;"
+    "  border-radius:3px;padding:2px 5px;}"
+    "QSpinBox{background:#252525;color:#ddd;border:1px solid #444;"
     "  border-radius:3px;padding:2px 5px;}"
     "QLineEdit{background:#252525;color:#ddd;border:1px solid #444;"
     "  border-radius:3px;padding:2px 5px;}"
@@ -71,11 +79,12 @@ AudioSetupDialog::AudioSetupDialog(AppModel* model, QWidget* parent)
     : QDialog(parent), m_model(model)
 {
     setWindowTitle("Audio Setup");
-    setMinimumSize(500, 400);
+    setMinimumSize(540, 420);
     setStyleSheet(kDarkStyle);
 
     m_numPhys = model->engineOk ? model->engine.channels() : 2;
     m_setup   = model->sf.audioSetup;
+    m_paDevices = mcp::AudioEngine::listOutputDevices();
 
     // Ensure at least one channel
     if (m_setup.channels.empty()) {
@@ -88,27 +97,224 @@ AudioSetupDialog::AudioSetupDialog(AppModel* model, QWidget* parent)
 
     auto* vlay = new QVBoxLayout(this);
     vlay->setContentsMargins(12, 12, 12, 12);
-    vlay->setSpacing(10);
+    vlay->setSpacing(8);
 
     m_tabs = new QTabWidget(this);
     vlay->addWidget(m_tabs, 1);
 
+    buildDevicesTab();
     buildChannelsTab();
     buildXpTab();
+
+    // Warning bar — shown only when warnings exist
+    m_warnLabel = new QLabel(this);
+    m_warnLabel->setWordWrap(true);
+    m_warnLabel->setStyleSheet(
+        "color:#e8a020;background:#2a2010;border:1px solid #5a4010;"
+        "border-radius:3px;padding:4px 8px;font-size:11px;");
+    m_warnLabel->setVisible(false);
+    vlay->addWidget(m_warnLabel);
 
     auto* btns = new QDialogButtonBox(QDialogButtonBox::Ok | QDialogButtonBox::Cancel);
     btns->button(QDialogButtonBox::Ok)->setText("Apply");
     btns->button(QDialogButtonBox::Ok)->setDefault(true);
     connect(btns, &QDialogButtonBox::accepted, this, [this]() {
+        syncDevicesFromTable();
         syncChannelsFromTable();
         syncXpFromGrid();
+        m_setup.normalizeMaster();
         accept();
     });
     connect(btns, &QDialogButtonBox::rejected, this, &QDialog::reject);
     vlay->addWidget(btns);
+
+    updateWarnings();
 }
 
-// ── Tab 1 — Channels ───────────────────────────────────────────────────────
+// ── Helpers ────────────────────────────────────────────────────────────────
+
+int AudioSetupDialog::totalPhysOutputs() const {
+    if (m_setup.devices.empty())
+        return m_numPhys;
+    int total = 0;
+    for (const auto& d : m_setup.devices)
+        total += d.channelCount;
+    return total;
+}
+
+// ── Tab 1 — Devices ────────────────────────────────────────────────────────
+
+void AudioSetupDialog::buildDevicesTab() {
+    auto* page = new QWidget;
+    auto* vlay = new QVBoxLayout(page);
+    vlay->setContentsMargins(8, 8, 8, 8);
+    vlay->setSpacing(8);
+
+    // Master clock selector row
+    auto* masterRow = new QHBoxLayout;
+    auto* masterLbl = new QLabel("Master clock device:");
+    masterLbl->setStyleSheet("color:#aaa;");
+    masterRow->addWidget(masterLbl);
+    m_masterCombo = new QComboBox;
+    m_masterCombo->setMinimumWidth(120);
+    connect(m_masterCombo, qOverload<int>(&QComboBox::currentIndexChanged),
+            this, &AudioSetupDialog::updateWarnings);
+    masterRow->addWidget(m_masterCombo);
+    masterRow->addStretch();
+    vlay->addLayout(masterRow);
+
+    // Device table
+    m_devTable = new QTableWidget(0, 3, page);
+    m_devTable->setHorizontalHeaderLabels({"Device Name", "Channels", "Buffer Size"});
+    m_devTable->horizontalHeader()->setSectionResizeMode(0, QHeaderView::Stretch);
+    m_devTable->horizontalHeader()->setSectionResizeMode(1, QHeaderView::ResizeToContents);
+    m_devTable->horizontalHeader()->setSectionResizeMode(2, QHeaderView::ResizeToContents);
+    m_devTable->verticalHeader()->setSectionResizeMode(QHeaderView::Fixed);
+    m_devTable->verticalHeader()->setDefaultSectionSize(28);
+    m_devTable->setSelectionBehavior(QAbstractItemView::SelectRows);
+    m_devTable->setEditTriggers(QAbstractItemView::NoEditTriggers);
+    vlay->addWidget(m_devTable, 1);
+
+    // Add / Remove buttons
+    auto* btnRow = new QHBoxLayout;
+    m_btnAddDev    = new QPushButton("+ Add Device");
+    m_btnRemoveDev = new QPushButton("− Remove Selected");
+    btnRow->addWidget(m_btnAddDev);
+    btnRow->addWidget(m_btnRemoveDev);
+    btnRow->addStretch();
+    vlay->addLayout(btnRow);
+
+    auto* hint = new QLabel(
+        "Add devices to enable multi-device audio output. "
+        "All devices share the same sample rate. "
+        "The master clock device drives the internal timing reference.");
+    hint->setStyleSheet("color:#666;font-size:10px;");
+    hint->setWordWrap(true);
+    vlay->addWidget(hint);
+
+    rebuildDevicesTable();
+
+    connect(m_btnAddDev,    &QPushButton::clicked, this, &AudioSetupDialog::onAddDevice);
+    connect(m_btnRemoveDev, &QPushButton::clicked, this, &AudioSetupDialog::onRemoveDevice);
+
+    m_tabs->addTab(page, "Devices");
+}
+
+void AudioSetupDialog::rebuildDevicesTable() {
+    m_devTable->setRowCount(0);
+    for (int i = 0; i < (int)m_setup.devices.size(); ++i) {
+        m_devTable->insertRow(i);
+        const auto& dev = m_setup.devices[static_cast<size_t>(i)];
+
+        // Column 0: device name combo
+        auto* nameCb = new QComboBox;
+        nameCb->addItem("(system default)", QString(""));
+        for (const auto& pa : m_paDevices)
+            nameCb->addItem(
+                QString::fromStdString(pa.name) +
+                QString(" (%1 ch)").arg(pa.maxOutputChannels),
+                QString::fromStdString(pa.name));
+        const int nameIdx = nameCb->findData(QString::fromStdString(dev.name));
+        if (nameIdx >= 0) nameCb->setCurrentIndex(nameIdx);
+        connect(nameCb, qOverload<int>(&QComboBox::currentIndexChanged),
+                this, &AudioSetupDialog::updateWarnings);
+        m_devTable->setCellWidget(i, 0, nameCb);
+
+        // Column 1: channel count
+        auto* chSpin = new QSpinBox;
+        chSpin->setRange(1, 64);
+        chSpin->setValue(dev.channelCount);
+        connect(chSpin, qOverload<int>(&QSpinBox::valueChanged), this, [this]() {
+            syncDevicesFromTable();
+            rebuildMasterCombo();
+            rebuildXpGrid();
+            updateWarnings();
+        });
+        m_devTable->setCellWidget(i, 1, chSpin);
+
+        // Column 2: buffer size combo
+        auto* bufCb = new QComboBox;
+        for (int bs : {128, 256, 512, 1024, 2048})
+            bufCb->addItem(QString::number(bs), bs);
+        const int bufIdx = bufCb->findData(dev.bufferSize);
+        bufCb->setCurrentIndex(bufIdx >= 0 ? bufIdx : 2);  // default 512
+        m_devTable->setCellWidget(i, 2, bufCb);
+    }
+    rebuildMasterCombo();
+}
+
+void AudioSetupDialog::rebuildMasterCombo() {
+    if (!m_masterCombo) return;
+    const int prevSel = m_masterCombo->currentIndex();
+    m_masterCombo->blockSignals(true);
+    m_masterCombo->clear();
+    for (int i = 0; i < (int)m_setup.devices.size(); ++i)
+        m_masterCombo->addItem(QString("Device %1").arg(i + 1));
+    // Pre-select the device that has masterClock=true
+    int masterIdx = 0;
+    for (int i = 0; i < (int)m_setup.devices.size(); ++i)
+        if (m_setup.devices[static_cast<size_t>(i)].masterClock) { masterIdx = i; break; }
+    const int toSelect = (masterIdx < m_masterCombo->count()) ? masterIdx
+                       : (prevSel < m_masterCombo->count())  ? prevSel : 0;
+    m_masterCombo->setCurrentIndex(toSelect);
+    m_masterCombo->blockSignals(false);
+    m_masterCombo->setEnabled(m_masterCombo->count() > 0);
+}
+
+void AudioSetupDialog::syncDevicesFromTable() {
+    const int masterIdx = m_masterCombo ? m_masterCombo->currentIndex() : 0;
+    const int rows = m_devTable->rowCount();
+    m_setup.devices.resize(static_cast<size_t>(rows));
+    for (int i = 0; i < rows; ++i) {
+        auto& dev = m_setup.devices[static_cast<size_t>(i)];
+        if (auto* cb = qobject_cast<QComboBox*>(m_devTable->cellWidget(i, 0)))
+            dev.name = cb->currentData().toString().toStdString();
+        if (auto* sp = qobject_cast<QSpinBox*>(m_devTable->cellWidget(i, 1)))
+            dev.channelCount = sp->value();
+        if (auto* cb = qobject_cast<QComboBox*>(m_devTable->cellWidget(i, 2)))
+            dev.bufferSize = cb->currentData().toInt();
+        dev.masterClock = (i == masterIdx);
+    }
+}
+
+void AudioSetupDialog::onAddDevice() {
+    syncDevicesFromTable();
+    mcp::ShowFile::AudioSetup::Device d;
+    d.name         = "";    // system default
+    d.channelCount = 2;
+    d.bufferSize   = 512;
+    d.masterClock  = m_setup.devices.empty();  // first device is master by default
+    m_setup.devices.push_back(d);
+    rebuildDevicesTable();
+    rebuildChannelsTable();
+    rebuildXpGrid();
+    updateWarnings();
+}
+
+void AudioSetupDialog::onRemoveDevice() {
+    const int row = m_devTable->currentRow();
+    if (row < 0 || row >= (int)m_setup.devices.size()) return;
+    syncDevicesFromTable();
+    // Remove channels that reference this device; remap higher indices
+    const int removedDev = row;
+    auto& chans = m_setup.channels;
+    chans.erase(
+        std::remove_if(chans.begin(), chans.end(),
+            [removedDev](const mcp::ShowFile::AudioSetup::Channel& c) {
+                return c.deviceIndex == removedDev;
+            }),
+        chans.end());
+    for (auto& c : chans)
+        if (c.deviceIndex > removedDev) --c.deviceIndex;
+    m_setup.devices.erase(m_setup.devices.begin() + removedDev);
+    m_setup.normalizeMaster();
+    rebuildDevicesTable();
+    rebuildChannelsTable();
+    rebuildXpGrid();
+    updateWarnings();
+}
+
+// ── Tab 2 — Channels ───────────────────────────────────────────────────────
 
 void AudioSetupDialog::buildChannelsTab() {
     auto* page = new QWidget;
@@ -125,13 +331,15 @@ void AudioSetupDialog::buildChannelsTab() {
     toolbar->addStretch();
     vlay->addLayout(toolbar);
 
-    // Table: Name | Linked Stereo | Master Gain (dB) | Mute
-    m_chanTable = new QTableWidget(0, 4, page);
-    m_chanTable->setHorizontalHeaderLabels({"Name", "Stereo Link", "Master (dB)", "Mute"});
+    // Table columns: Name | [Device] | Stereo Link | Master (dB) | Mute
+    // Device column is inserted only in multi-device mode (see rebuildChannelsTable)
+    m_chanTable = new QTableWidget(0, 5, page);
+    m_chanTable->setHorizontalHeaderLabels({"Name", "Device", "Stereo Link", "Master (dB)", "Mute"});
     m_chanTable->horizontalHeader()->setSectionResizeMode(0, QHeaderView::Stretch);
     m_chanTable->horizontalHeader()->setSectionResizeMode(1, QHeaderView::ResizeToContents);
     m_chanTable->horizontalHeader()->setSectionResizeMode(2, QHeaderView::ResizeToContents);
     m_chanTable->horizontalHeader()->setSectionResizeMode(3, QHeaderView::ResizeToContents);
+    m_chanTable->horizontalHeader()->setSectionResizeMode(4, QHeaderView::ResizeToContents);
     m_chanTable->verticalHeader()->setSectionResizeMode(QHeaderView::Fixed);
     m_chanTable->verticalHeader()->setDefaultSectionSize(26);
     m_chanTable->setSelectionBehavior(QAbstractItemView::SelectRows);
@@ -147,32 +355,42 @@ void AudioSetupDialog::buildChannelsTab() {
 }
 
 void AudioSetupDialog::rebuildChannelsTable() {
+    if (!m_chanTable) return;
     m_chanTable->setRowCount(0);
     const int n = static_cast<int>(m_setup.channels.size());
+    const bool multiDev = !m_setup.devices.empty();
 
-    // First pass: insert all rows
+    // Show/hide Device column
+    m_chanTable->setColumnHidden(1, !multiDev);
+
     for (int i = 0; i < n; ++i)
         m_chanTable->insertRow(i);
 
-    // Second pass: populate rows
     for (int i = 0; i < n; ++i) {
         const auto& ch = m_setup.channels[static_cast<size_t>(i)];
-
-        // Determine if this row is a slave (previous channel linked to it)
-        const bool isSlave = (i > 0 && m_setup.channels[static_cast<size_t>(i - 1)].linkedStereo);
-        // Determine if this row is a master that links to the next
+        const bool isSlave  = (i > 0 && m_setup.channels[static_cast<size_t>(i - 1)].linkedStereo);
         const bool isMaster = ch.linkedStereo && (i + 1 < n);
 
         m_chanTable->setVerticalHeaderItem(
             i, new QTableWidgetItem(isSlave ? QString("   └ %1").arg(i + 1)
                                             : QString::number(i + 1)));
 
-        // Name
+        // Col 0: Name
         auto* nameEdit = new QLineEdit(QString::fromStdString(ch.name));
         nameEdit->setStyleSheet("background:#252525;color:#ddd;border:none;padding:1px 4px;");
         m_chanTable->setCellWidget(i, 0, nameEdit);
 
-        // Stereo Link checkbox (disabled for slave rows)
+        // Col 1: Device (multi-device only)
+        if (multiDev) {
+            auto* devCb = new QComboBox;
+            for (int d = 0; d < (int)m_setup.devices.size(); ++d)
+                devCb->addItem(QString("Device %1").arg(d + 1));
+            if (ch.deviceIndex >= 0 && ch.deviceIndex < (int)m_setup.devices.size())
+                devCb->setCurrentIndex(ch.deviceIndex);
+            m_chanTable->setCellWidget(i, 1, devCb);
+        }
+
+        // Col 2: Stereo Link (skip for slave rows)
         if (!isSlave) {
             auto* stereoChk = new QCheckBox;
             stereoChk->setChecked(ch.linkedStereo);
@@ -183,16 +401,15 @@ void AudioSetupDialog::rebuildChannelsTable() {
             stLay->setAlignment(Qt::AlignCenter);
             stLay->setContentsMargins(0, 0, 0, 0);
             stLay->addWidget(stereoChk);
-            m_chanTable->setCellWidget(i, 1, stereoCell);
+            m_chanTable->setCellWidget(i, 2, stereoCell);
             connect(stereoChk, &QCheckBox::toggled, this, [this](bool) {
                 syncChannelsFromTable();
                 rebuildChannelsTable();
                 rebuildXpGrid();
             });
         }
-        // slave row: leave cell 1 empty (cosmetically part of the master row)
 
-        // Master Gain and Mute: only on non-slave rows
+        // Cols 3 & 4: Master Gain and Mute (non-slave only)
         if (!isSlave) {
             auto* gainSpin = new QDoubleSpinBox;
             gainSpin->setRange(-60.0, 12.0);
@@ -201,7 +418,7 @@ void AudioSetupDialog::rebuildChannelsTable() {
             gainSpin->setSingleStep(0.5);
             gainSpin->setValue(static_cast<double>(ch.masterGainDb));
             gainSpin->setStyleSheet("background:#252525;color:#ddd;border:none;padding:1px 2px;");
-            m_chanTable->setCellWidget(i, 2, gainSpin);
+            m_chanTable->setCellWidget(i, 3, gainSpin);
 
             auto* muteChk = new QCheckBox;
             muteChk->setChecked(ch.mute);
@@ -211,12 +428,11 @@ void AudioSetupDialog::rebuildChannelsTable() {
             muteLay->setAlignment(Qt::AlignCenter);
             muteLay->setContentsMargins(0, 0, 0, 0);
             muteLay->addWidget(muteChk);
-            m_chanTable->setCellWidget(i, 3, muteCell);
+            m_chanTable->setCellWidget(i, 4, muteCell);
 
-            // If master, span gain and mute cells over two rows
             if (isMaster) {
-                m_chanTable->setSpan(i, 2, 2, 1);
                 m_chanTable->setSpan(i, 3, 2, 1);
+                m_chanTable->setSpan(i, 4, 2, 1);
             }
         }
     }
@@ -234,7 +450,6 @@ void AudioSetupDialog::onAddChannel() {
 void AudioSetupDialog::onRemoveChannel() {
     if (m_setup.channels.size() <= 1) return;
     syncChannelsFromTable();
-    // Remove xp entries referencing the last channel
     const int lastCh = static_cast<int>(m_setup.channels.size()) - 1;
     m_setup.xpEntries.erase(
         std::remove_if(m_setup.xpEntries.begin(), m_setup.xpEntries.end(),
@@ -248,7 +463,9 @@ void AudioSetupDialog::onRemoveChannel() {
 void AudioSetupDialog::onChannelCountChanged(int /*n*/) {}
 
 void AudioSetupDialog::syncChannelsFromTable() {
+    if (!m_chanTable) return;
     const int rows = m_chanTable->rowCount();
+    const bool multiDev = !m_setup.devices.empty();
     m_setup.channels.resize(static_cast<size_t>(rows));
     for (int i = 0; i < rows; ++i) {
         auto& c = m_setup.channels[static_cast<size_t>(i)];
@@ -257,17 +474,21 @@ void AudioSetupDialog::syncChannelsFromTable() {
         if (auto* w = qobject_cast<QLineEdit*>(m_chanTable->cellWidget(i, 0)))
             c.name = w->text().toStdString();
 
+        if (multiDev) {
+            if (auto* cb = qobject_cast<QComboBox*>(m_chanTable->cellWidget(i, 1)))
+                c.deviceIndex = cb->currentIndex();
+        }
+
         if (!isSlave) {
-            if (auto* cell = m_chanTable->cellWidget(i, 1))
+            if (auto* cell = m_chanTable->cellWidget(i, 2))
                 if (auto* chk = cell->findChild<QCheckBox*>())
                     c.linkedStereo = chk->isChecked();
-            if (auto* spin = qobject_cast<QDoubleSpinBox*>(m_chanTable->cellWidget(i, 2)))
+            if (auto* spin = qobject_cast<QDoubleSpinBox*>(m_chanTable->cellWidget(i, 3)))
                 c.masterGainDb = static_cast<float>(spin->value());
-            if (auto* cell = m_chanTable->cellWidget(i, 3))
+            if (auto* cell = m_chanTable->cellWidget(i, 4))
                 if (auto* chk = cell->findChild<QCheckBox*>())
                     c.mute = chk->isChecked();
         } else {
-            // Slave inherits gain and mute from master
             const auto& master = m_setup.channels[static_cast<size_t>(i - 1)];
             c.linkedStereo = false;
             c.masterGainDb = master.masterGainDb;
@@ -276,7 +497,7 @@ void AudioSetupDialog::syncChannelsFromTable() {
     }
 }
 
-// ── Tab 2 — Crosspoint ────────────────────────────────────────────────────
+// ── Tab 3 — Crosspoint ────────────────────────────────────────────────────
 
 void AudioSetupDialog::buildXpTab() {
     auto* page = new QWidget;
@@ -300,12 +521,12 @@ void AudioSetupDialog::buildXpTab() {
 }
 
 void AudioSetupDialog::rebuildXpGrid() {
-    // Delete old content
     delete m_xpContent;
     m_xpCells.clear();
 
     const int numCh   = static_cast<int>(m_setup.channels.size());
-    const int numPhys = m_numPhys;
+    const int numPhys = totalPhysOutputs();
+    const bool multiDev = !m_setup.devices.empty();
 
     m_xpContent = new QWidget;
     auto* outer = new QVBoxLayout(m_xpContent);
@@ -318,7 +539,7 @@ void AudioSetupDialog::rebuildXpGrid() {
         return;
     }
 
-    // Build lookup: (ch, out) → db from m_setup.xpEntries
+    // Build lookup: (ch, out) → db
     auto findXp = [&](int ch, int out) -> std::optional<float> {
         for (const auto& xe : m_setup.xpEntries)
             if (xe.ch == ch && xe.out == out)
@@ -326,19 +547,38 @@ void AudioSetupDialog::rebuildXpGrid() {
         return std::nullopt;
     };
 
+    // Build physOut labels and device-break indices
+    // In multi-device mode: "D1.1", "D1.2", "D2.1", etc.
+    std::vector<QString> physLabels;
+    std::vector<int>     physDevIdx;  // which device each physOut belongs to
+    if (multiDev) {
+        int gp = 0;
+        for (int d = 0; d < (int)m_setup.devices.size(); ++d) {
+            for (int lp = 0; lp < m_setup.devices[static_cast<size_t>(d)].channelCount; ++lp, ++gp) {
+                physLabels.push_back(QString("D%1.%2").arg(d + 1).arg(lp + 1));
+                physDevIdx.push_back(d);
+            }
+        }
+    } else {
+        for (int p = 0; p < numPhys; ++p) {
+            physLabels.push_back(QString("Out %1").arg(p + 1));
+            physDevIdx.push_back(0);
+        }
+    }
+
     auto* xpGroup = new QGroupBox("Channel → Physical Output");
     auto* grid = new QGridLayout(xpGroup);
     grid->setSpacing(3);
     grid->setContentsMargins(8, 14, 8, 8);
 
-    constexpr int kCellW = 50;
+    constexpr int kCellW = 52;
     constexpr int kLblW  = 70;
     constexpr int kSp    = 3;
     xpGroup->setFixedWidth(kLblW + numPhys * (kCellW + kSp) + 20);
 
-    // Column headers: physical output indices
+    // Column headers
     for (int p = 0; p < numPhys; ++p) {
-        auto* lbl = new QLabel(QString("Out %1").arg(p + 1), xpGroup);
+        auto* lbl = new QLabel(physLabels[static_cast<size_t>(p)], xpGroup);
         lbl->setFixedWidth(kCellW);
         lbl->setAlignment(Qt::AlignHCenter);
         lbl->setStyleSheet("color:#888;font-size:10px;");
@@ -349,7 +589,6 @@ void AudioSetupDialog::rebuildXpGrid() {
                      std::vector<QLineEdit*>(static_cast<size_t>(numPhys), nullptr));
 
     for (int ch = 0; ch < numCh; ++ch) {
-        // Row label: channel name
         const QString chName = (ch < (int)m_setup.channels.size())
             ? QString::fromStdString(m_setup.channels[static_cast<size_t>(ch)].name)
             : QString("Ch %1").arg(ch + 1);
@@ -363,22 +602,27 @@ void AudioSetupDialog::rebuildXpGrid() {
             auto* cell = new QLineEdit(xpGroup);
             cell->setFixedSize(kCellW, 22);
             cell->setAlignment(Qt::AlignHCenter);
-            cell->setStyleSheet(
-                "QLineEdit{background:#1a1a1a;color:#ddd;border:1px solid #383838;"
-                "  border-radius:2px;padding:1px 3px;font-size:11px;}"
-                "QLineEdit:focus{border-color:#2a6ab8;}");
 
-            // Determine display: explicit entry or diagonal default
+            // Dim cells that belong to a different device than this channel's device
+            const bool channelOnSameDev =
+                !multiDev ||
+                (ch < (int)m_setup.channels.size() &&
+                 m_setup.channels[static_cast<size_t>(ch)].deviceIndex == physDevIdx[static_cast<size_t>(p)]);
+            cell->setStyleSheet(channelOnSameDev
+                ? "QLineEdit{background:#1a1a1a;color:#ddd;border:1px solid #383838;"
+                  "  border-radius:2px;padding:1px 3px;font-size:11px;}"
+                  "QLineEdit:focus{border-color:#2a6ab8;}"
+                : "QLineEdit{background:#141414;color:#555;border:1px solid #262626;"
+                  "  border-radius:2px;padding:1px 3px;font-size:11px;}");
+
             auto xpVal = findXp(ch, p);
             if (xpVal.has_value()) {
                 cell->setText(fmtDb(*xpVal));
             } else if (ch == p) {
-                // Default diagonal = 0 dB, shown as placeholder
                 cell->setPlaceholderText("0.0");
-            }
-            // Off-diagonal default = off, shown as placeholder
-            if (ch != p && !xpVal.has_value())
+            } else {
                 cell->setPlaceholderText("-inf");
+            }
 
             m_xpCells[static_cast<size_t>(ch)][static_cast<size_t>(p)] = cell;
             grid->addWidget(cell, ch + 1, p + 1);
@@ -400,12 +644,59 @@ void AudioSetupDialog::syncXpFromGrid() {
             auto* cell = m_xpCells[static_cast<size_t>(ch)][static_cast<size_t>(p)];
             if (!cell) continue;
             const QString txt = cell->text().trimmed();
-            if (txt.isEmpty()) continue;  // use default (diagonal=0, else off)
+            if (txt.isEmpty()) continue;
             float db = parseDb(txt, ch == p ? 0.0f : kInfDb);
-            // Only store non-default values
             bool isDefault = (ch == p) ? (std::abs(db) < 0.001f) : (db <= kInfDb);
             if (!isDefault)
                 m_setup.xpEntries.push_back({ch, p, db});
         }
     }
+}
+
+// ── Warnings ───────────────────────────────────────────────────────────────
+
+void AudioSetupDialog::updateWarnings() {
+    if (!m_warnLabel) return;
+    QStringList warns;
+
+    const int numDevices = static_cast<int>(m_setup.devices.size());
+    if (numDevices >= 2) {
+        warns << "Multiple independent devices may drift over long shows.";
+
+        // Check for LTC cues routed to a non-master device
+        const int masterDev = m_masterCombo ? m_masterCombo->currentIndex() : 0;
+
+        // Build physOut → device map from current device list
+        std::vector<int> physDev;
+        for (int d = 0; d < numDevices; ++d) {
+            const int cnt = m_setup.devices[static_cast<size_t>(d)].channelCount;
+            for (int lp = 0; lp < cnt; ++lp)
+                physDev.push_back(d);
+        }
+
+        // Recursive scan of show cues for LTC cues on non-master device
+        bool ltcOnNonMaster = false;
+        std::function<void(const std::vector<mcp::ShowFile::CueData>&)> scanCues;
+        scanCues = [&](const std::vector<mcp::ShowFile::CueData>& cues) {
+            for (const auto& c : cues) {
+                if (c.type == "timecode" && c.tcType == "ltc") {
+                    const int ch = c.tcLtcChannel;
+                    if (ch >= 0 && ch < (int)physDev.size() && physDev[ch] != masterDev)
+                        ltcOnNonMaster = true;
+                }
+                if (!c.children.empty())
+                    scanCues(c.children);
+            }
+        };
+        if (m_model) {
+            for (const auto& cl : m_model->sf.cueLists)
+                scanCues(cl.cues);
+        }
+        if (ltcOnNonMaster)
+            warns << "LTC cue is routed to a non-master device — timecode may drift.";
+    }
+
+    m_warnLabel->setVisible(!warns.isEmpty());
+    if (!warns.isEmpty())
+        m_warnLabel->setText("⚠  " + warns.join("\n⚠  "));
 }

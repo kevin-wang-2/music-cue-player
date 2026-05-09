@@ -91,9 +91,9 @@ int SyncGroupView::laneY(int i) const {
 double SyncGroupView::viewDuration() const {
     double maxEnd = kMinViewSec;
     if (m_groupIdx >= 0) {
-        const double base = m_model->cues.syncGroupBaseDuration(m_groupIdx);
+        const double base = m_model->cues().syncGroupBaseDuration(m_groupIdx);
         if (base > 0.0) maxEnd = std::max(maxEnd, base);
-        const mcp::Cue* g = m_model->cues.cueAt(m_groupIdx);
+        const mcp::Cue* g = m_model->cues().cueAt(m_groupIdx);
         if (g) for (const auto& mk : g->markers)
             maxEnd = std::max(maxEnd, mk.time + 0.5);
     }
@@ -115,11 +115,11 @@ int SyncGroupView::secToPix(double sec) const {
 void SyncGroupView::rebuildBlocks() {
     m_blocks.clear();
     if (m_groupIdx < 0) return;
-    const mcp::Cue* group = m_model->cues.cueAt(m_groupIdx);
+    const mcp::Cue* group = m_model->cues().cueAt(m_groupIdx);
     if (!group || group->type != mcp::CueType::Group) return;
 
     for (int i = m_groupIdx + 1; i <= m_groupIdx + group->childCount; ) {
-        const mcp::Cue* c = m_model->cues.cueAt(i);
+        const mcp::Cue* c = m_model->cues().cueAt(i);
         if (!c) { ++i; continue; }
         if (c->parentIndex == m_groupIdx) {
             ChildBlock b;
@@ -127,7 +127,7 @@ void SyncGroupView::rebuildBlocks() {
             b.offset    = c->timelineOffset;
             b.startTime = c->startTime;
             b.fileDur   = (c->type == mcp::CueType::Audio)
-                          ? m_model->cues.cueTotalSeconds(i) : 0.0;
+                          ? m_model->cues().cueTotalSeconds(i) : 0.0;
             b.duration  = (c->duration > 0.0) ? c->duration
                         : (b.fileDur > 0.0 ? b.fileDur - c->startTime : 2.0);
             b.label = QString::fromStdString(
@@ -170,9 +170,9 @@ void SyncGroupView::paintEvent(QPaintEvent*) {
     const int H = height();
     const int loopStripY = H - kLoopH;
 
-    const mcp::Cue* group = (m_groupIdx >= 0) ? m_model->cues.cueAt(m_groupIdx) : nullptr;
+    const mcp::Cue* group = (m_groupIdx >= 0) ? m_model->cues().cueAt(m_groupIdx) : nullptr;
     const double baseDur  = (m_groupIdx >= 0)
-        ? m_model->cues.syncGroupBaseDuration(m_groupIdx) : 0.0;
+        ? m_model->cues().syncGroupBaseDuration(m_groupIdx) : 0.0;
 
     // ── Ruler ──────────────────────────────────────────────────────────────
     p.fillRect(0, 0, W, kRulerH, QColor(0x1a, 0x1a, 0x1a));
@@ -391,7 +391,7 @@ void SyncGroupView::mousePressEvent(QMouseEvent* ev) {
     const int    py  = ev->pos().y();
     const int    lsY = height() - kLoopH;
 
-    const mcp::Cue* group = (m_groupIdx >= 0) ? m_model->cues.cueAt(m_groupIdx) : nullptr;
+    const mcp::Cue* group = (m_groupIdx >= 0) ? m_model->cues().cueAt(m_groupIdx) : nullptr;
 
     if (ev->button() == Qt::LeftButton) {
         // Hit-test marker triangles (ruler zone + small hit area below ruler)
@@ -477,16 +477,16 @@ void SyncGroupView::mouseMoveEvent(QMouseEvent* ev) {
         const double delta = static_cast<double>(px - m_dragMarkerPxOrig) / m_pixPerSec;
         double nt = std::max(0.001, m_dragMarkerOrig + delta);
         if (m_mc && m_quantSubdiv > 0) nt = snapToGrid(nt);
-        const mcp::Cue* group = m_model->cues.cueAt(m_groupIdx);
+        const mcp::Cue* group = m_model->cues().cueAt(m_groupIdx);
         if (group) {
             const double lo = (m_dragMarker > 0)
                 ? group->markers[m_dragMarker - 1].time + 0.001 : 0.001;
-            const double baseDur = m_model->cues.syncGroupBaseDuration(m_groupIdx);
+            const double baseDur = m_model->cues().syncGroupBaseDuration(m_groupIdx);
             const double hi = (m_dragMarker + 1 < (int)group->markers.size())
                 ? group->markers[m_dragMarker + 1].time - 0.001
                 : (baseDur > 0.0 ? baseDur - 0.001 : 99999.0);
             nt = std::clamp(nt, lo, hi);
-            m_model->cues.setCueMarkerTime(m_groupIdx, m_dragMarker, nt);
+            m_model->cues().setCueMarkerTime(m_groupIdx, m_dragMarker, nt);
             ShowHelpers::syncSfFromCues(*m_model);
             update();
         }
@@ -540,7 +540,7 @@ void SyncGroupView::mouseMoveEvent(QMouseEvent* ev) {
 void SyncGroupView::mouseReleaseEvent(QMouseEvent* ev) {
     if (ev->button() == Qt::LeftButton) {
         if (m_dragMarker >= 0) {
-            const mcp::Cue* group = m_model->cues.cueAt(m_groupIdx);
+            const mcp::Cue* group = m_model->cues().cueAt(m_groupIdx);
             if (group && m_dragMarker < (int)group->markers.size())
                 emit cueModified();
             m_dragMarker = -2;
@@ -556,10 +556,10 @@ void SyncGroupView::mouseReleaseEvent(QMouseEvent* ev) {
             m_dragMode  = DragMode::None;
 
             m_model->pushUndo();
-            m_model->cues.setCueTimelineOffset(flatIdx, newOff);
+            m_model->cues().setCueTimelineOffset(flatIdx, newOff);
             if (mode == DragMode::TrimLeft || mode == DragMode::TrimRight) {
-                m_model->cues.setCueStartTime(flatIdx, newSt);
-                m_model->cues.setCueDuration(flatIdx, newDur);
+                m_model->cues().setCueStartTime(flatIdx, newSt);
+                m_model->cues().setCueDuration(flatIdx, newDur);
             }
             ShowHelpers::syncSfFromCues(*m_model);
             emit cueModified();
@@ -575,9 +575,9 @@ void SyncGroupView::mouseDoubleClickEvent(QMouseEvent* ev) {
     const int lsY = height() - kLoopH;
 
     if (py >= lsY) {
-        const mcp::Cue* group = (m_groupIdx >= 0) ? m_model->cues.cueAt(m_groupIdx) : nullptr;
+        const mcp::Cue* group = (m_groupIdx >= 0) ? m_model->cues().cueAt(m_groupIdx) : nullptr;
         if (!group) { ev->accept(); return; }
-        const double baseDur = m_model->cues.syncGroupBaseDuration(m_groupIdx);
+        const double baseDur = m_model->cues().syncGroupBaseDuration(m_groupIdx);
         if (baseDur <= 0.0) { ev->accept(); return; }
 
         std::vector<double> bounds { 0.0 };
@@ -636,7 +636,7 @@ void SyncGroupView::contextMenuEvent(QContextMenuEvent* ev) {
     QMenu menu(this);
 
     // Delete marker if cursor is near one
-    const mcp::Cue* group = m_model->cues.cueAt(m_groupIdx);
+    const mcp::Cue* group = m_model->cues().cueAt(m_groupIdx);
     int hitMarker = -1;
     if (group) {
         for (int mi = 0; mi < (int)group->markers.size(); ++mi) {
@@ -648,7 +648,7 @@ void SyncGroupView::contextMenuEvent(QContextMenuEvent* ev) {
     if (hitMarker >= 0) {
         menu.addAction(QString("Delete marker %1").arg(hitMarker + 1), [this, hitMarker]() {
             m_model->pushUndo();
-            m_model->cues.removeCueMarker(m_groupIdx, hitMarker);
+            m_model->cues().removeCueMarker(m_groupIdx, hitMarker);
             ShowHelpers::syncSfFromCues(*m_model);
             if (m_selMarker == hitMarker) {
                 m_selMarker = -1;
@@ -674,7 +674,7 @@ void SyncGroupView::contextMenuEvent(QContextMenuEvent* ev) {
         QString("Add marker at %1").arg(posLabel),
         [this, snapSec]() {
             m_model->pushUndo();
-            m_model->cues.addCueMarker(m_groupIdx, snapSec);
+            m_model->cues().addCueMarker(m_groupIdx, snapSec);
             ShowHelpers::syncSfFromCues(*m_model);
             emit cueModified();
             update();
@@ -769,7 +769,7 @@ void SyncGroupView::commitLoopEdit() {
     m_editLoopSlice = -1;
 
     if (m_groupIdx < 0 || sliceIdx < 0) { update(); return; }
-    const mcp::Cue* c = m_model->cues.cueAt(m_groupIdx);
+    const mcp::Cue* c = m_model->cues().cueAt(m_groupIdx);
     if (!c || sliceIdx >= (int)c->sliceLoops.size()) { update(); return; }
 
     int newLc;
@@ -784,7 +784,7 @@ void SyncGroupView::commitLoopEdit() {
     m_model->pushUndo();
     auto sl = c->sliceLoops;
     sl[sliceIdx] = newLc;
-    m_model->cues.setCueSliceLoops(m_groupIdx, sl);
+    m_model->cues().setCueSliceLoops(m_groupIdx, sl);
     ShowHelpers::syncSfFromCues(*m_model);
     emit cueModified();
     update();

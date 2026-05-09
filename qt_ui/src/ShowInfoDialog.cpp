@@ -89,7 +89,7 @@ void ShowInfoDialog::refresh() {
     // Current Cue
     {
         const int idx = m_model->m_currentCueIdx;
-        const mcp::Cue* c = (idx >= 0) ? m_model->cues.cueAt(idx) : nullptr;
+        const mcp::Cue* c = (idx >= 0) ? m_model->cues().cueAt(idx) : nullptr;
         if (c) {
             const QString text = cueText(
                 QString::fromStdString(c->cueNumber),
@@ -110,8 +110,8 @@ void ShowInfoDialog::refresh() {
 
     // Next Cue (= selected cue)
     {
-        const int idx = m_model->cues.selectedIndex();
-        const mcp::Cue* c = (idx >= 0) ? m_model->cues.cueAt(idx) : nullptr;
+        const int idx = m_model->cues().selectedIndex();
+        const mcp::Cue* c = (idx >= 0) ? m_model->cues().cueAt(idx) : nullptr;
         if (c) {
             const QString text = cueText(
                 QString::fromStdString(c->cueNumber),

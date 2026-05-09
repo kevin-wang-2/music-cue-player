@@ -133,9 +133,9 @@ void ProjectStatusDialog::buildWarningsTab() {
 
 void ProjectStatusDialog::refreshWarnings() {
     m_warningsList->clear();
-    const int n = m_model->cues.cueCount();
+    const int n = m_model->cues().cueCount();
     for (int i = 0; i < n; ++i) {
-        const mcp::Cue* c = m_model->cues.cueAt(i);
+        const mcp::Cue* c = m_model->cues().cueAt(i);
         if (!c || c->isLoaded()) continue;
         auto* item = new QTreeWidgetItem(m_warningsList);
         item->setText(0, QString::fromStdString(c->cueNumber));

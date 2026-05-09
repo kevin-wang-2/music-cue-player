@@ -85,11 +85,11 @@ void TimelineGroupView::setGroupCueIndex(int groupFlatIdx) {
 void TimelineGroupView::rebuildBlocks() {
     m_blocks.clear();
     if (m_groupIdx < 0) return;
-    const mcp::Cue* group = m_model->cues.cueAt(m_groupIdx);
+    const mcp::Cue* group = m_model->cues().cueAt(m_groupIdx);
     if (!group || group->type != mcp::CueType::Group) return;
 
     for (int i = m_groupIdx + 1; i <= m_groupIdx + group->childCount; ) {
-        const mcp::Cue* c = m_model->cues.cueAt(i);
+        const mcp::Cue* c = m_model->cues().cueAt(i);
         if (!c) { ++i; continue; }
         if (c->parentIndex == m_groupIdx) {
             ChildBlock b;
@@ -97,7 +97,7 @@ void TimelineGroupView::rebuildBlocks() {
             b.offset    = c->timelineOffset;
             b.startTime = c->startTime;
             b.fileDur   = (c->type == mcp::CueType::Audio)
-                          ? m_model->cues.cueTotalSeconds(i) : 0.0;
+                          ? m_model->cues().cueTotalSeconds(i) : 0.0;
             b.duration  = (c->duration > 0.0) ? c->duration
                         : (b.fileDur > 0.0 ? b.fileDur - c->startTime : 2.0);
             b.label = QString::fromStdString(

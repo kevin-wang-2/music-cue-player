@@ -48,6 +48,11 @@ struct Cue {
 
     // Start/Stop/Arm/Devamp/Fade/Marker cues: index of the target cue in the same CueList
     int    targetIndex{-1};
+    // Cross-list target (set by ShowHelpers for multi-list shows).
+    // When crossListNumericId != -1, the cue's target lives in a different CueList.
+    // CueList::fire() will invoke the cross-list callback instead of acting locally.
+    int    crossListNumericId{-1};
+    int    crossListFlatIdx{-1};
     // Marker cues only: which marker within the target cue (-1 = cue start)
     int    markerIndex{-1};
     // Arm cues only: pre-load the target audio from this offset (seconds). 0 = from start.

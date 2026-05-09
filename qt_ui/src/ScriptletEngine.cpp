@@ -38,6 +38,9 @@ static std::function<void(int, int, bool)>               s_cueMoveCb;
 static std::function<void(int)>                          s_cueDeleteCb;
 static std::function<ScriptletMCInfo()>                  s_getMcCb;
 static std::function<ScriptletStateInfo()>               s_getStateCb;
+static std::function<std::vector<std::pair<int,std::string>>()> s_listInfoCb;
+static std::function<int()>                              s_activeListIdCb;
+static std::function<void(int)>                          s_switchListCb;
 
 static std::function<int()>                              s_getSampleRateCb;
 // (cueIdx, bar, beat) → seconds from cue start, or -1.0 if no MC
@@ -315,17 +318,25 @@ static PyObject* mcp_time_to_timecode(MCPTimeObject* self, PyObject* args) {
     return PyUnicode_FromString(buf);
 }
 
+// Forward declarations for static factory methods (defined below makeTimeObject).
+static PyObject* mcp_time_from_sample   (PyObject*, PyObject*);
+static PyObject* mcp_time_from_min_sec  (PyObject*, PyObject*);
+static PyObject* mcp_time_from_timecode (PyObject*, PyObject*);
+static PyObject* mcp_time_from_bar_beat (PyObject*, PyObject*);
+
 static PyMethodDef kTimeMethods[] = {
-    {"to_seconds",  (PyCFunction)mcp_time_to_seconds,  METH_NOARGS,  "to_seconds() → float"},
-    {"to_samples",  (PyCFunction)mcp_time_to_samples,  METH_NOARGS,  "to_samples() → int"},
-    {"to_min_sec",  (PyCFunction)mcp_time_to_min_sec,  METH_NOARGS,  "to_min_sec() → (int, float)"},
-    {"to_timecode", (PyCFunction)mcp_time_to_timecode, METH_VARARGS, "to_timecode(fps=25) → 'HH:MM:SS:FF'"},
+    // Instance methods
+    {"to_seconds",    (PyCFunction)mcp_time_to_seconds,    METH_NOARGS,                  "to_seconds() → float"},
+    {"to_samples",    (PyCFunction)mcp_time_to_samples,    METH_NOARGS,                  "to_samples() → int"},
+    {"to_min_sec",    (PyCFunction)mcp_time_to_min_sec,    METH_NOARGS,                  "to_min_sec() → (int, float)"},
+    {"to_timecode",   (PyCFunction)mcp_time_to_timecode,   METH_VARARGS,                 "to_timecode(fps=25) → 'HH:MM:SS:FF'"},
+    // Static factory methods (PyType_Ready wraps these in staticmethod descriptors)
+    {"from_sample",   (PyCFunction)mcp_time_from_sample,   METH_VARARGS | METH_STATIC,   "from_sample(n) → Time"},
+    {"from_min_sec",  (PyCFunction)mcp_time_from_min_sec,  METH_VARARGS | METH_STATIC,   "from_min_sec(min, sec) → Time"},
+    {"from_timecode", (PyCFunction)mcp_time_from_timecode, METH_VARARGS | METH_STATIC,   "from_timecode(tc, fps=25) → Time"},
+    {"from_bar_beat", (PyCFunction)mcp_time_from_bar_beat, METH_VARARGS | METH_STATIC,   "from_bar_beat(bar, beat, cue) → Time"},
     {nullptr}
 };
-
-// --- Class (static) factory methods — defined separately as module-level ----
-// They live on the mcp.time module as Time.from_*; attached via PyObject_SetAttrString.
-// (Defining METH_STATIC inside tp_methods requires extra wrapping — using setattr is simpler.)
 
 // Helper: allocate a MCPTimeObject and set its seconds field.
 // Bypasses tp_new guard — the only way to create Time objects.
@@ -380,15 +391,6 @@ static PyObject* mcp_time_from_bar_beat(PyObject*, PyObject* args) {
     return makeTimeObject(secs);
 }
 
-// Factory method table — attached to the Time class object after PyType_Ready.
-static PyMethodDef kTimeFactories[] = {
-    {"from_sample",    mcp_time_from_sample,    METH_VARARGS | METH_STATIC, "from_sample(n) → Time"},
-    {"from_min_sec",   mcp_time_from_min_sec,   METH_VARARGS | METH_STATIC, "from_min_sec(min, sec) → Time"},
-    {"from_timecode",  mcp_time_from_timecode,  METH_VARARGS | METH_STATIC, "from_timecode(tc, fps=25) → Time"},
-    {"from_bar_beat",  mcp_time_from_bar_beat,  METH_VARARGS | METH_STATIC, "from_bar_beat(bar, beat, cue) → Time"},
-    {nullptr}
-};
-
 #pragma GCC diagnostic push
 #pragma GCC diagnostic ignored "-Wmissing-field-initializers"
 PyTypeObject MCPTimeType = {
@@ -428,15 +430,6 @@ static PyModuleDef kTimeModuleDef = {
 
 static PyObject* PyInit_mcp_time() {
     if (PyType_Ready(&MCPTimeType) < 0) return nullptr;
-
-    // Attach static factory methods to the Time class.
-    for (const PyMethodDef* md = kTimeFactories; md->ml_name; ++md) {
-        PyObject* fn    = PyCFunction_New(const_cast<PyMethodDef*>(md), nullptr);
-        PyObject* smeth = PyStaticMethod_New(fn);
-        Py_DECREF(fn);
-        PyObject_SetAttrString((PyObject*)&MCPTimeType, md->ml_name, smeth);
-        Py_DECREF(smeth);
-    }
 
     PyObject* mod = PyModule_Create(&kTimeModuleDef);
     if (!mod) return nullptr;
@@ -804,14 +797,45 @@ static PyObject* py_get_state(PyObject*, PyObject*) {
     return d;
 }
 
+static PyObject* py_list_lists(PyObject*, PyObject*) {
+    if (!s_listInfoCb) return PyList_New(0);
+    const auto lists = s_listInfoCb();
+    PyObject* result = PyList_New(static_cast<Py_ssize_t>(lists.size()));
+    if (!result) return nullptr;
+    for (size_t i = 0; i < lists.size(); ++i) {
+        PyObject* d = PyDict_New();
+        PyObject* id   = PyLong_FromLong(lists[i].first);
+        PyObject* name = PyUnicode_FromString(lists[i].second.c_str());
+        PyDict_SetItemString(d, "id",   id);
+        PyDict_SetItemString(d, "name", name);
+        Py_DECREF(id); Py_DECREF(name);
+        PyList_SET_ITEM(result, static_cast<Py_ssize_t>(i), d);
+    }
+    return result;
+}
+
+static PyObject* py_get_active_list(PyObject*, PyObject*) {
+    return PyLong_FromLong(s_activeListIdCb ? s_activeListIdCb() : -1);
+}
+
+static PyObject* py_switch_list(PyObject*, PyObject* args) {
+    int listId;
+    if (!PyArg_ParseTuple(args, "i", &listId)) return nullptr;
+    if (s_switchListCb) s_switchListCb(listId);
+    Py_RETURN_NONE;
+}
+
 static PyMethodDef kMcpMethods[] = {
-    {"go",        py_go,        METH_NOARGS,  "go()"},
-    {"select",    py_select,    METH_VARARGS, "select(num)"},
-    {"alert",     py_alert,     METH_VARARGS, "alert(msg)"},
-    {"confirm",   py_confirm,   METH_VARARGS, "confirm(msg) → bool"},
-    {"panic",     py_panic,     METH_NOARGS,  "panic()"},
-    {"get_mc",    py_get_mc,    METH_NOARGS,  "get_mc() → dict"},
-    {"get_state", py_get_state, METH_NOARGS,  "get_state() → dict"},
+    {"go",              py_go,              METH_NOARGS,  "go()"},
+    {"select",          py_select,          METH_VARARGS, "select(num)"},
+    {"alert",           py_alert,           METH_VARARGS, "alert(msg)"},
+    {"confirm",         py_confirm,         METH_VARARGS, "confirm(msg) → bool"},
+    {"panic",           py_panic,           METH_NOARGS,  "panic()"},
+    {"get_mc",          py_get_mc,          METH_NOARGS,  "get_mc() → dict"},
+    {"get_state",       py_get_state,       METH_NOARGS,  "get_state() → dict"},
+    {"list_lists",      py_list_lists,      METH_NOARGS,  "list_lists() → [{id, name}]"},
+    {"get_active_list", py_get_active_list, METH_NOARGS,  "get_active_list() → int"},
+    {"switch_list",     py_switch_list,     METH_VARARGS, "switch_list(list_id)"},
     {nullptr, nullptr, 0, nullptr}
 };
 
@@ -880,6 +904,10 @@ void ScriptletEngine::setGetStateCallback   (std::function<ScriptletStateInfo()>
 
 void ScriptletEngine::setGetSampleRateCallback    (std::function<int()> cb)                       { s_getSampleRateCb     = std::move(cb); }
 void ScriptletEngine::setMusicalToSecondsCallback (std::function<double(int, int, int)> cb)       { s_musicalToSecondsCb  = std::move(cb); }
+
+void ScriptletEngine::setListInfoCallback    (std::function<std::vector<std::pair<int,std::string>>()> cb) { s_listInfoCb     = std::move(cb); }
+void ScriptletEngine::setActiveListIdCallback(std::function<int()>     cb)                                 { s_activeListIdCb = std::move(cb); }
+void ScriptletEngine::setSwitchListCallback  (std::function<void(int)> cb)                                 { s_switchListCb   = std::move(cb); }
 
 // ---------------------------------------------------------------------------
 // Event firing

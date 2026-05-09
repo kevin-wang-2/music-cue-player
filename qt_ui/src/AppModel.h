@@ -28,7 +28,7 @@ public:
     // Engine stack — declared in init order (each depends on the previous).
     mcp::AudioEngine engine;
     mcp::Scheduler   scheduler;
-    mcp::CueList     cues;
+    // NOTE: CueList instances live in m_cueLists. Use cues() for the active list.
 
     // External trigger infrastructure
     MidiInputManager midiIn;
@@ -63,15 +63,34 @@ public:
     int    m_mcCueIdx{-1};         // flat index of active MC cue, -1 if none
     std::map<int, double> m_lastMusicBoundary;  // subdivision → last fired boundary (elapsed secs)
 
-    // Undo / redo history — snapshots of cueLists[0].cues.
+    // Undo / redo history — snapshots of all sf.cueLists.
     static constexpr int kMaxUndo = 100;
-    std::vector<std::vector<mcp::ShowFile::CueData>> undoStack;
-    std::vector<std::vector<mcp::ShowFile::CueData>> redoStack;
+    std::vector<std::vector<mcp::ShowFile::CueListData>> undoStack;
+    std::vector<std::vector<mcp::ShowFile::CueListData>> redoStack;
 
     // Call BEFORE modifying the cue list.  Saves a snapshot and clears redoStack.
     void pushUndo();
     bool canUndo() const { return !undoStack.empty(); }
     bool canRedo() const { return !redoStack.empty(); }
+
+    // Active-list access — the list the operator is currently viewing / controlling.
+    mcp::CueList& cues();
+    int  activeListIdx() const { return m_activeListIdx; }
+    int  listCount()     const { return static_cast<int>(m_cueLists.size()); }
+    void setActiveList(int idx);
+
+    // Ensure the engine CueList vector has the same count as sf.cueLists.
+    // Creates or removes engine CueLists as needed (new ones start empty).
+    void syncListCount();
+
+    // Direct access to a specific engine CueList (for ShowHelpers::rebuildCueList).
+    mcp::CueList& cueListAt(int idx) { return *m_cueLists[static_cast<size_t>(idx)]; }
+
+    // Stop all cues in every list and emit playbackStateChanged.
+    void panicAll();
+
+    // Convenience: sf.cueLists[activeListIdx()]. Callers must ensure list is non-empty.
+    mcp::ShowFile::CueListData& sfActiveList() { return sf.cueLists[static_cast<size_t>(m_activeListIdx)]; }
 
     // Called every frame (~16ms) from MainWindow timer:
     // reclaims finished StreamReaders and refreshes playback state.
@@ -132,4 +151,12 @@ signals:
     // Emitted when any cue is triggered (regardless of pre-wait).
     // Used by the scriptlet event system; also fired for internally-triggered cues.
     void cueFired(int cueIndex);
+    // Emitted when the operator switches the active cue list.
+    void activeListChanged(int listIdx);
+    // Emitted when lists are added, removed, or renamed (sidebar refresh).
+    void cueListsChanged();
+
+private:
+    std::vector<std::unique_ptr<mcp::CueList>> m_cueLists;
+    int m_activeListIdx{0};
 };

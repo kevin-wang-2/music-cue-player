@@ -38,6 +38,7 @@ static ShowFile::CueData parseCue(const json& j) {
     c.path            = jget<std::string>(j, "path",            "");
     c.target          = jget<int>        (j, "target",          -1);
     c.targetCueNumber = jget<std::string>(j, "targetCueNumber", "");
+    c.targetListId    = jget<int>        (j, "targetListId",    -1);
     c.armStartTime    = jget<double>     (j, "armStartTime",    0.0);
     c.preWait         = jget<double>     (j, "preWait",         0.0);
     c.goQuantize      = jget<int>        (j, "goQuantize",      0);
@@ -71,6 +72,7 @@ static ShowFile::CueData parseCue(const json& j) {
             tm.time                 = jget<double>     (m, "time", 0.0);
             tm.name                 = jget<std::string>(m, "name", "");
             tm.anchorMarkerCueNumber = jget<std::string>(m, "anchorMarkerCueNumber", "");
+            tm.anchorMarkerListId    = jget<int>        (m, "anchorMarkerListId",    -1);
             c.markers.push_back(tm);
         }
     }
@@ -226,6 +228,7 @@ static json cueToJson(const ShowFile::CueData& c) {
             json mj; mj["time"] = m.time;
             if (!m.name.empty())                   mj["name"]                 = m.name;
             if (!m.anchorMarkerCueNumber.empty())  mj["anchorMarkerCueNumber"] = m.anchorMarkerCueNumber;
+            if (m.anchorMarkerListId >= 0)         mj["anchorMarkerListId"]    = m.anchorMarkerListId;
             arr.push_back(mj);
         }
         j["markers"] = arr;
@@ -266,18 +269,22 @@ static json cueToJson(const ShowFile::CueData& c) {
     } else if (c.type == "marker") {
         j["target"]          = c.target;
         j["targetCueNumber"] = c.targetCueNumber;
+        if (c.targetListId >= 0) j["targetListId"] = c.targetListId;
         j["markerIndex"]     = c.markerIndex;
     } else if (c.type == "goto") {
         j["target"]          = c.target;
         j["targetCueNumber"] = c.targetCueNumber;
+        if (c.targetListId >= 0) j["targetListId"] = c.targetListId;
     } else if (c.type == "start" || c.type == "stop" || c.type == "arm") {
         j["target"]          = c.target;
         j["targetCueNumber"] = c.targetCueNumber;
+        if (c.targetListId >= 0) j["targetListId"] = c.targetListId;
         if (c.type == "arm" && c.armStartTime != 0.0)
             j["armStartTime"] = c.armStartTime;
     } else if (c.type == "devamp") {
         j["target"]          = c.target;
         j["targetCueNumber"] = c.targetCueNumber;
+        if (c.targetListId >= 0) j["targetListId"] = c.targetListId;
         if (c.devampMode != 0)  j["devampMode"]    = c.devampMode;
         if (c.devampPreVamp)    j["devampPreVamp"]  = true;
     } else if (c.type == "fade") {
@@ -556,14 +563,16 @@ bool ShowFile::load(const std::filesystem::path& path, std::string& error) {
     if (root.contains("cueLists") && root["cueLists"].is_array()) {
         for (const auto& cl : root["cueLists"]) {
             CueListData cld;
-            cld.id   = jget<std::string>(cl, "id",   "main");
-            cld.name = jget<std::string>(cl, "name", "Main");
+            cld.id        = jget<std::string>(cl, "id",        "main");
+            cld.name      = jget<std::string>(cl, "name",      "Main");
+            cld.numericId = jget<int>        (cl, "numericId", 0);
             if (cl.contains("cues") && cl["cues"].is_array())
                 for (const auto& cj : cl["cues"])
                     cld.cues.push_back(parseCue(cj));
             cueLists.push_back(std::move(cld));
         }
     }
+    assignListIds();
     return true;
 }
 
@@ -695,8 +704,9 @@ bool ShowFile::save(const std::filesystem::path& path, std::string& error) const
     json clArr = json::array();
     for (const auto& cld : cueLists) {
         json cl;
-        cl["id"]   = cld.id;
-        cl["name"] = cld.name;
+        cl["id"]        = cld.id;
+        cl["name"]      = cld.name;
+        cl["numericId"] = cld.numericId;
         json cArr  = json::array();
         for (const auto& c : cld.cues) cArr.push_back(cueToJson(c));
         cl["cues"] = cArr;
@@ -713,8 +723,22 @@ bool ShowFile::save(const std::filesystem::path& path, std::string& error) const
 ShowFile ShowFile::empty(const std::string& title) {
     ShowFile sf;
     sf.show.title = title;
-    sf.cueLists.push_back({"main", "Main", {}});
+    CueListData cld;
+    cld.id        = "main";
+    cld.name      = "Main";
+    cld.numericId = 1;
+    sf.cueLists.push_back(std::move(cld));
     return sf;
+}
+
+void ShowFile::assignListIds() {
+    // Collect already-assigned IDs
+    int maxId = 0;
+    for (const auto& cl : cueLists)
+        if (cl.numericId > 0) maxId = std::max(maxId, cl.numericId);
+    // Assign IDs to any list that doesn't have one yet
+    for (auto& cl : cueLists)
+        if (cl.numericId <= 0) cl.numericId = ++maxId;
 }
 
 } // namespace mcp

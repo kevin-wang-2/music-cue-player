@@ -38,8 +38,8 @@ MusicContextView::MusicContextView(AppModel* model, QWidget* parent)
 
 mcp::MusicContext* MusicContextView::getMC() const {
     if (m_cueIdx < 0) return nullptr;
-    const auto* c = m_model->cues.cueAt(m_cueIdx);
-    return c ? m_model->cues.musicContextOf(m_cueIdx) : nullptr;
+    const auto* c = m_model->cues().cueAt(m_cueIdx);
+    return c ? m_model->cues().musicContextOf(m_cueIdx) : nullptr;
 }
 
 double MusicContextView::qnToX(double qn) const {

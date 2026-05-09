@@ -87,6 +87,14 @@ public:
     // --- mcp.get_state() callback ---
     void setGetStateCallback(std::function<ScriptletStateInfo()> cb);
 
+    // --- multi-list callbacks ---
+    // list_lists() → [(numericId, name), ...]
+    void setListInfoCallback    (std::function<std::vector<std::pair<int,std::string>>()> cb);
+    // get_active_list() → numericId of the currently active list
+    void setActiveListIdCallback(std::function<int()>       cb);
+    // switch_list(numericId) — change the active list
+    void setSwitchListCallback  (std::function<void(int)>   cb);
+
     // --- mcp.event fire methods (called from AppModel on events) ---
     void fireCueFiredEvent   (int idx);
     void fireCueSelectedEvent(int idx);

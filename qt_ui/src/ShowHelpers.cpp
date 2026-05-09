@@ -14,8 +14,25 @@
 
 namespace ShowHelpers {
 
+void normalizeListRefs(mcp::ShowFile& sf) {
+    for (auto& cl : sf.cueLists) {
+        const int listId = cl.numericId;
+        if (listId == 0) continue;  // not yet assigned — skip
+        std::function<void(std::vector<mcp::ShowFile::CueData>&)> fix;
+        fix = [&](std::vector<mcp::ShowFile::CueData>& cues) {
+            for (auto& cd : cues) {
+                if (cd.targetListId == -1) cd.targetListId = listId;
+                for (auto& mk : cd.markers)
+                    if (mk.anchorMarkerListId == -1) mk.anchorMarkerListId = listId;
+                if (!cd.children.empty()) fix(cd.children);
+            }
+        };
+        fix(cl.cues);
+    }
+}
+
 std::string nextCueNumber(const mcp::ShowFile& sf) {
-    // Collect all existing cue numbers (recursively through group children).
+    // Collect all existing cue numbers from ALL lists (globally unique numbering).
     std::vector<std::string> taken;
     std::function<void(const std::vector<mcp::ShowFile::CueData>&)> collect;
     collect = [&](const std::vector<mcp::ShowFile::CueData>& cues) {
@@ -24,7 +41,7 @@ std::string nextCueNumber(const mcp::ShowFile& sf) {
             if (!cd.children.empty()) collect(cd.children);
         }
     };
-    if (!sf.cueLists.empty()) collect(sf.cueLists[0].cues);
+    for (const auto& cl : sf.cueLists) collect(cl.cues);
 
     int n = 1;
     while (true) {
@@ -40,6 +57,7 @@ std::string nextCueNumber(const mcp::ShowFile& sf) {
 // DFS pre-order: parent counted before its children — same ordering as rebuildCueList.
 int findCueByNumber(const mcp::ShowFile& sf, const std::string& num) {
     if (num.empty() || sf.cueLists.empty()) return -1;
+    // Search the first (active) list only — caller resolves cross-list refs separately.
     int flatIdx = 0;
     std::function<int(const std::vector<mcp::ShowFile::CueData>&)> search;
     search = [&](const std::vector<mcp::ShowFile::CueData>& cues) -> int {
@@ -73,15 +91,16 @@ std::string fmtDuration(double s) {
     return fmtTime(s);
 }
 
-bool rebuildCueList(AppModel& m, std::string& /*err*/) {
-    m.cues.clear();
+bool rebuildCueList(AppModel& m, int listIdx, std::string& /*err*/) {
+    mcp::CueList& cl = m.cueListAt(listIdx);
+    cl.clear();
     if (m.sf.cueLists.empty()) return true;
-    const auto& topCues = m.sf.cueLists[0].cues;
+    const auto& topCues = m.sf.cueLists[static_cast<size_t>(listIdx)].cues;
     const auto  base    = std::filesystem::path(m.baseDir);
 
     // Install network and MIDI patches so their cues can fire.
-    m.cues.setNetworkPatches(m.sf.networkSetup.patches);
-    m.cues.setMidiPatches(m.sf.midiSetup.patches);
+    cl.setNetworkPatches(m.sf.networkSetup.patches);
+    cl.setMidiPatches(m.sf.midiSetup.patches);
 
     // Build and install the channel map so applyRoutingToReader folds correctly.
     {
@@ -156,7 +175,7 @@ bool rebuildCueList(AppModel& m, std::string& /*err*/) {
                 cm.primaryPhys[static_cast<size_t>(ch)] = maxP;
             }
         }
-        m.cues.setChannelMap(std::move(cm));
+        cl.setChannelMap(std::move(cm));
     }
 
     // Build cueNumber → flat engine index map (DFS pre-order = insertion order).
@@ -177,7 +196,15 @@ bool rebuildCueList(AppModel& m, std::string& /*err*/) {
 
     // Resolve target index: prefer cue-number lookup (stable across rebuilds) over
     // the stored flat index (which goes stale when groups are inserted or removed).
+    // targetListId must match this list's numericId for within-list resolution;
+    // cross-list targets (-1 after normalizeListRefs means unassigned, any other
+    // mismatching ID means another list) return -1 — the engine doesn't support
+    // cross-list targeting yet.
+    const int thisListId = m.sf.cueLists[static_cast<size_t>(listIdx)].numericId;
     auto resolveTarget = [&](const mcp::ShowFile::CueData& cd) -> int {
+        // -1 is legacy "same list" kept for files written before normalizeListRefs.
+        const bool sameList = (cd.targetListId == -1 || cd.targetListId == thisListId);
+        if (!sameList) return -1;  // cross-list: not supported in engine yet
         if (!cd.targetCueNumber.empty()) {
             for (const auto& p : numToIdx)
                 if (p.first == cd.targetCueNumber) return p.second;
@@ -212,7 +239,7 @@ bool rebuildCueList(AppModel& m, std::string& /*err*/) {
     std::function<void(const std::vector<mcp::ShowFile::CueData>&, int)> process;
     process = [&](const std::vector<mcp::ShowFile::CueData>& cues, int parentFlatIdx) {
         for (const auto& cd : cues) {
-            const int myIdx = m.cues.cueCount();
+            const int myIdx = cl.cueCount();
 
             if (cd.type == "group") {
                 // Count ALL descendants (recursive) to set childCount correctly.
@@ -232,23 +259,23 @@ bool rebuildCueList(AppModel& m, std::string& /*err*/) {
                     (cd.groupMode == "sync")       ? mcp::GroupData::Mode::Sync       :
                                                      mcp::GroupData::Mode::Timeline;
 
-                m.cues.addGroupCue(mode, cd.groupRandom, cd.name, cd.preWait);
-                m.cues.setCueCueNumber   (myIdx, cd.cueNumber);
-                m.cues.setCueAutoContinue(myIdx, cd.autoContinue);
-                m.cues.setCueAutoFollow  (myIdx, cd.autoFollow);
-                m.cues.setCueChildCount  (myIdx, countAll(cd.children));
-                if (parentFlatIdx >= 0) m.cues.setCueParentIndex(myIdx, parentFlatIdx);
-                m.cues.setCueTimelineOffset(myIdx, cd.timelineOffset);
+                cl.addGroupCue(mode, cd.groupRandom, cd.name, cd.preWait);
+                cl.setCueCueNumber   (myIdx, cd.cueNumber);
+                cl.setCueAutoContinue(myIdx, cd.autoContinue);
+                cl.setCueAutoFollow  (myIdx, cd.autoFollow);
+                cl.setCueChildCount  (myIdx, countAll(cd.children));
+                if (parentFlatIdx >= 0) cl.setCueParentIndex(myIdx, parentFlatIdx);
+                cl.setCueTimelineOffset(myIdx, cd.timelineOffset);
 
                 // SyncGroup: load its own markers and slice loops
                 if (cd.groupMode == "sync") {
                     std::vector<mcp::Cue::TimeMarker> marks;
                     for (const auto& mk : cd.markers) marks.push_back({mk.time, mk.name});
-                    m.cues.setCueMarkers   (myIdx, marks);
-                    m.cues.setCueSliceLoops(myIdx, cd.sliceLoops);
+                    cl.setCueMarkers   (myIdx, marks);
+                    cl.setCueSliceLoops(myIdx, cd.sliceLoops);
                 }
 
-                m.cues.setCueMusicContext(myIdx, buildMC(cd.musicContext));
+                cl.setCueMusicContext(myIdx, buildMC(cd.musicContext));
 
                 // Recursively add children immediately after the group header.
                 process(cd.children, myIdx);
@@ -259,60 +286,60 @@ bool rebuildCueList(AppModel& m, std::string& /*err*/) {
                 if (cd.type == "audio") {
                     auto p = std::filesystem::path(cd.path);
                     if (p.is_relative()) p = base / p;
-                    if (!m.cues.addCue(p.string(), cd.name, cd.preWait))
-                        m.cues.addBrokenAudioCue(p.string(), cd.name, cd.preWait);
+                    if (!cl.addCue(p.string(), cd.name, cd.preWait))
+                        cl.addBrokenAudioCue(p.string(), cd.name, cd.preWait);
                 } else if (cd.type == "start") {
-                    m.cues.addStartCue(target, cd.name, cd.preWait);
+                    cl.addStartCue(target, cd.name, cd.preWait);
                 } else if (cd.type == "stop") {
-                    m.cues.addStopCue(target, cd.name, cd.preWait);
+                    cl.addStopCue(target, cd.name, cd.preWait);
                 } else if (cd.type == "fade") {
                     const auto curve = (cd.fadeCurve == "equalpower")
                         ? mcp::FadeData::Curve::EqualPower : mcp::FadeData::Curve::Linear;
-                    m.cues.addFadeCue(target, cd.targetCueNumber, curve,
+                    cl.addFadeCue(target, cd.targetCueNumber, curve,
                                       cd.fadeStopWhenDone, cd.name, cd.preWait);
                 } else if (cd.type == "arm") {
-                    m.cues.addArmCue(target, cd.name, cd.preWait);
+                    cl.addArmCue(target, cd.name, cd.preWait);
                 } else if (cd.type == "devamp") {
-                    m.cues.addDevampCue(target, cd.name, cd.preWait, cd.devampMode);
+                    cl.addDevampCue(target, cd.name, cd.preWait, cd.devampMode);
                 } else if (cd.type == "mc") {
-                    m.cues.addMCCue(cd.name, cd.preWait);
+                    cl.addMCCue(cd.name, cd.preWait);
                 } else if (cd.type == "marker") {
-                    m.cues.addMarkerCue(target, cd.markerIndex, cd.name, cd.preWait);
+                    cl.addMarkerCue(target, cd.markerIndex, cd.name, cd.preWait);
                 } else if (cd.type == "goto") {
-                    m.cues.addGotoCue(target, cd.name, cd.preWait);
+                    cl.addGotoCue(target, cd.name, cd.preWait);
                 } else if (cd.type == "memo") {
-                    m.cues.addMemoCue(cd.name, cd.preWait);
+                    cl.addMemoCue(cd.name, cd.preWait);
                 } else if (cd.type == "scriptlet") {
-                    m.cues.addScriptletCue(cd.name, cd.preWait);
+                    cl.addScriptletCue(cd.name, cd.preWait);
                 } else if (cd.type == "network") {
-                    m.cues.addNetworkCue(cd.name, cd.preWait);
+                    cl.addNetworkCue(cd.name, cd.preWait);
                 } else if (cd.type == "midi") {
-                    m.cues.addMidiCue(cd.name, cd.preWait);
+                    cl.addMidiCue(cd.name, cd.preWait);
                 } else if (cd.type == "timecode") {
-                    m.cues.addTimecodeCue(cd.name, cd.preWait);
+                    cl.addTimecodeCue(cd.name, cd.preWait);
                 }
 
-                m.cues.setCueCueNumber   (myIdx, cd.cueNumber);
-                m.cues.setCueStartTime   (myIdx, cd.startTime);
-                m.cues.setCueDuration    (myIdx, cd.duration);
-                m.cues.setCueLevel       (myIdx, cd.level);
-                m.cues.setCueTrim        (myIdx, cd.trim);
-                m.cues.setCueAutoContinue(myIdx, cd.autoContinue);
-                m.cues.setCueAutoFollow  (myIdx, cd.autoFollow);
-                m.cues.setCueGoQuantize  (myIdx, cd.goQuantize);
-                if (parentFlatIdx >= 0) m.cues.setCueParentIndex(myIdx, parentFlatIdx);
-                m.cues.setCueTimelineOffset(myIdx, cd.timelineOffset);
+                cl.setCueCueNumber   (myIdx, cd.cueNumber);
+                cl.setCueStartTime   (myIdx, cd.startTime);
+                cl.setCueDuration    (myIdx, cd.duration);
+                cl.setCueLevel       (myIdx, cd.level);
+                cl.setCueTrim        (myIdx, cd.trim);
+                cl.setCueAutoContinue(myIdx, cd.autoContinue);
+                cl.setCueAutoFollow  (myIdx, cd.autoFollow);
+                cl.setCueGoQuantize  (myIdx, cd.goQuantize);
+                if (parentFlatIdx >= 0) cl.setCueParentIndex(myIdx, parentFlatIdx);
+                cl.setCueTimelineOffset(myIdx, cd.timelineOffset);
 
                 if (cd.type == "arm")
-                    m.cues.setCueArmStartTime(myIdx, cd.armStartTime);
+                    cl.setCueArmStartTime(myIdx, cd.armStartTime);
                 if (cd.type == "devamp") {
-                    m.cues.setCueDevampMode   (myIdx, cd.devampMode);
-                    m.cues.setCueDevampPreVamp(myIdx, cd.devampPreVamp);
+                    cl.setCueDevampMode   (myIdx, cd.devampMode);
+                    cl.setCueDevampPreVamp(myIdx, cd.devampPreVamp);
                 }
                 if (cd.type == "marker")
-                    m.cues.setCueMarkerIndex(myIdx, cd.markerIndex);
+                    cl.setCueMarkerIndex(myIdx, cd.markerIndex);
                 if (cd.type == "scriptlet")
-                    m.cues.setCueScriptletCode(myIdx, cd.scriptletCode);
+                    cl.setCueScriptletCode(myIdx, cd.scriptletCode);
                 if (cd.type == "network") {
                     // Resolve patch name → index
                     int patchIdx = -1;
@@ -322,8 +349,8 @@ bool rebuildCueList(AppModel& m, std::string& /*err*/) {
                             break;
                         }
                     }
-                    m.cues.setCueNetworkPatch  (myIdx, patchIdx);
-                    m.cues.setCueNetworkCommand(myIdx, cd.networkCommand);
+                    cl.setCueNetworkPatch  (myIdx, patchIdx);
+                    cl.setCueNetworkCommand(myIdx, cd.networkCommand);
                 }
                 if (cd.type == "midi") {
                     int patchIdx = -1;
@@ -333,8 +360,8 @@ bool rebuildCueList(AppModel& m, std::string& /*err*/) {
                             break;
                         }
                     }
-                    m.cues.setCueMidiPatch  (myIdx, patchIdx);
-                    m.cues.setCueMidiMessage(myIdx, cd.midiMessageType,
+                    cl.setCueMidiPatch  (myIdx, patchIdx);
+                    cl.setCueMidiMessage(myIdx, cd.midiMessageType,
                                              cd.midiChannel, cd.midiData1, cd.midiData2);
                 }
                 if (cd.type == "timecode") {
@@ -343,11 +370,11 @@ bool rebuildCueList(AppModel& m, std::string& /*err*/) {
                     mcp::TcPoint startTC, endTC;
                     mcp::tcFromString(cd.tcStartTC, startTC);
                     mcp::tcFromString(cd.tcEndTC,   endTC);
-                    m.cues.setCueTcFps  (myIdx, fps);
-                    m.cues.setCueTcStart(myIdx, startTC);
-                    m.cues.setCueTcEnd  (myIdx, endTC);
-                    m.cues.setCueTcType (myIdx, cd.tcType);
-                    m.cues.setCueTcLtcChannel(myIdx, cd.tcLtcChannel);
+                    cl.setCueTcFps  (myIdx, fps);
+                    cl.setCueTcStart(myIdx, startTC);
+                    cl.setCueTcEnd  (myIdx, endTC);
+                    cl.setCueTcType (myIdx, cd.tcType);
+                    cl.setCueTcLtcChannel(myIdx, cd.tcLtcChannel);
                     // Resolve MTC MIDI patch name → index
                     int midiPatchIdx = -1;
                     if (!cd.tcMidiPatchName.empty()) {
@@ -357,27 +384,27 @@ bool rebuildCueList(AppModel& m, std::string& /*err*/) {
                             }
                         }
                     }
-                    m.cues.setCueTcMidiPatch(myIdx, midiPatchIdx);
+                    cl.setCueTcMidiPatch(myIdx, midiPatchIdx);
                 }
                 if (cd.type == "audio") {
                     std::vector<mcp::Cue::TimeMarker> marks;
                     for (const auto& mk : cd.markers) marks.push_back({mk.time, mk.name});
-                    m.cues.setCueMarkers   (myIdx, marks);
-                    m.cues.setCueSliceLoops(myIdx, cd.sliceLoops);
+                    cl.setCueMarkers   (myIdx, marks);
+                    cl.setCueSliceLoops(myIdx, cd.sliceLoops);
                     for (int o = 0; o < (int)cd.outLevelDb.size(); ++o)
-                        m.cues.setCueOutLevel(myIdx, o, cd.outLevelDb[o]);
+                        cl.setCueOutLevel(myIdx, o, cd.outLevelDb[o]);
                     for (const auto& xe : cd.xpEntries)
-                        m.cues.setCueXpoint(myIdx, xe.s, xe.o, xe.db);
+                        cl.setCueXpoint(myIdx, xe.s, xe.o, xe.db);
                 }
                 if (cd.type == "fade") {
-                    m.cues.setCueFadeMasterTarget  (myIdx, cd.fadeMasterEnabled, cd.fadeMasterTarget);
-                    m.cues.setCueFadeOutTargetCount(myIdx, (int)cd.fadeOutLevels.size());
+                    cl.setCueFadeMasterTarget  (myIdx, cd.fadeMasterEnabled, cd.fadeMasterTarget);
+                    cl.setCueFadeOutTargetCount(myIdx, (int)cd.fadeOutLevels.size());
                     for (const auto& fl : cd.fadeOutLevels)
-                        m.cues.setCueFadeOutTarget(myIdx, fl.ch, fl.enabled, fl.target);
+                        cl.setCueFadeOutTarget(myIdx, fl.ch, fl.enabled, fl.target);
                     for (const auto& fx : cd.fadeXpEntries)
-                        m.cues.setCueFadeXpTarget(myIdx, fx.s, fx.o, fx.enabled, fx.target);
+                        cl.setCueFadeXpTarget(myIdx, fx.s, fx.o, fx.enabled, fx.target);
                 }
-                m.cues.setCueMusicContext(myIdx, buildMC(cd.musicContext));
+                cl.setCueMusicContext(myIdx, buildMC(cd.musicContext));
             }
         }
     };
@@ -388,8 +415,8 @@ bool rebuildCueList(AppModel& m, std::string& /*err*/) {
     // Done after process() so forward-references (source cue comes later) work.
     {
         std::unordered_map<std::string, int> numToFlatIdx;
-        for (int i = 0; i < m.cues.cueCount(); ++i) {
-            const auto* c = m.cues.cueAt(i);
+        for (int i = 0; i < cl.cueCount(); ++i) {
+            const auto* c = cl.cueAt(i);
             if (c && !c->cueNumber.empty()) numToFlatIdx[c->cueNumber] = i;
         }
         // Walk the CueData tree to find pending mcSourceNumber entries.
@@ -400,7 +427,7 @@ bool rebuildCueList(AppModel& m, std::string& /*err*/) {
                 if (!cd.mcSourceNumber.empty()) {
                     auto it = numToFlatIdx.find(cd.mcSourceNumber);
                     if (it != numToFlatIdx.end())
-                        m.cues.setCueMCSource(myIdx, it->second);
+                        cl.setCueMCSource(myIdx, it->second);
                 }
                 if (!cd.children.empty()) resolveSource(cd.children, flatIdx);
             }
@@ -420,10 +447,10 @@ bool rebuildCueList(AppModel& m, std::string& /*err*/) {
                         const auto& mkNum = cd.markers[static_cast<size_t>(mi)].anchorMarkerCueNumber;
                         if (mkNum.empty()) continue;
                         // Find the Marker cue with this cue number
-                        for (int ci = 0; ci < m.cues.cueCount(); ++ci) {
-                            const auto* cc = m.cues.cueAt(ci);
+                        for (int ci = 0; ci < cl.cueCount(); ++ci) {
+                            const auto* cc = cl.cueAt(ci);
                             if (cc && cc->cueNumber == mkNum)
-                                m.cues.setMarkerAnchor(myIdx, mi, ci);
+                                cl.setMarkerAnchor(myIdx, mi, ci);
                         }
                     }
                 }
@@ -437,17 +464,107 @@ bool rebuildCueList(AppModel& m, std::string& /*err*/) {
     return true;
 }
 
+bool rebuildAllCueLists(AppModel& m, std::string& err) {
+    m.syncListCount();
+    bool ok = true;
+    for (int li = 0; li < static_cast<int>(m.sf.cueLists.size()); ++li)
+        if (!rebuildCueList(m, li, err)) ok = false;
+    // Resolve any -1 "same list" placeholders to absolute numericIds so that
+    // cut+paste across lists never misidentifies the source list.
+    normalizeListRefs(m.sf);
+
+    // Second pass: wire up cross-list targets now that all engine lists are built.
+    for (int li = 0; li < static_cast<int>(m.sf.cueLists.size()); ++li) {
+        const int thisListId = m.sf.cueLists[static_cast<size_t>(li)].numericId;
+        auto& cl = m.cueListAt(li);
+
+        int counter = 0;
+        std::function<void(const std::vector<mcp::ShowFile::CueData>&)> visit;
+        visit = [&](const std::vector<mcp::ShowFile::CueData>& cues) {
+            for (const auto& cd : cues) {
+                const int myFlatIdx = counter++;
+                const bool crossList = (cd.targetListId != -1 && cd.targetListId != thisListId);
+                if (crossList && (cd.type == "start" || cd.type == "stop")) {
+                    // Find the target list's engine.
+                    int tgtListIdx = -1;
+                    for (int tli = 0; tli < static_cast<int>(m.sf.cueLists.size()); ++tli) {
+                        if (m.sf.cueLists[static_cast<size_t>(tli)].numericId == cd.targetListId) {
+                            tgtListIdx = tli; break;
+                        }
+                    }
+                    if (tgtListIdx >= 0 && tgtListIdx < m.listCount()) {
+                        auto& tgtEng = m.cueListAt(tgtListIdx);
+                        int tgtFlatIdx = -1;
+                        // Prefer cue-number lookup (stable), fall back to stored flat index.
+                        if (!cd.targetCueNumber.empty()) {
+                            for (int ti = 0; ti < tgtEng.cueCount(); ++ti) {
+                                const auto* tc = tgtEng.cueAt(ti);
+                                if (tc && tc->cueNumber == cd.targetCueNumber) {
+                                    tgtFlatIdx = ti; break;
+                                }
+                            }
+                        }
+                        if (tgtFlatIdx < 0 && cd.target >= 0 && cd.target < tgtEng.cueCount())
+                            tgtFlatIdx = cd.target;
+                        if (tgtFlatIdx >= 0) {
+                            cl.setCueCrossListTarget(myFlatIdx, cd.targetListId, tgtFlatIdx);
+                            // Back-fill targetCueNumber in SF so future syncs preserve it.
+                            if (auto* sfCue = sfCueAt(m.sf, li, myFlatIdx)) {
+                                if (sfCue->targetCueNumber.empty()) {
+                                    const auto* tc = tgtEng.cueAt(tgtFlatIdx);
+                                    if (tc && !tc->cueNumber.empty())
+                                        sfCue->targetCueNumber = tc->cueNumber;
+                                }
+                            }
+                        }
+                    }
+                }
+                if (!cd.children.empty()) visit(cd.children);
+            }
+        };
+        visit(m.sf.cueLists[static_cast<size_t>(li)].cues);
+    }
+
+    // Set up cross-list callbacks on each list so fire() can delegate.
+    for (int li = 0; li < m.listCount(); ++li) {
+        m.cueListAt(li).setCrossListStartCallback([&m](int numericId, int flatIdx) {
+            for (int tli = 0; tli < m.listCount(); ++tli) {
+                if (tli < static_cast<int>(m.sf.cueLists.size()) &&
+                    m.sf.cueLists[static_cast<size_t>(tli)].numericId == numericId) {
+                    m.cueListAt(tli).start(flatIdx);
+                    return;
+                }
+            }
+        });
+        m.cueListAt(li).setCrossListStopCallback([&m](int numericId, int flatIdx) {
+            for (int tli = 0; tli < m.listCount(); ++tli) {
+                if (tli < static_cast<int>(m.sf.cueLists.size()) &&
+                    m.sf.cueLists[static_cast<size_t>(tli)].numericId == numericId) {
+                    m.cueListAt(tli).stop(flatIdx);
+                    return;
+                }
+            }
+        });
+    }
+
+    return ok;
+}
+
 // Reconstruct the nested ShowFile structure from the flat engine CueList.
 // Group headers and their descendants are re-nested using childCount for range tracking.
-void syncSfFromCues(AppModel& m) {
+void syncSfFromCues(AppModel& m, int listIdx) {
     if (m.sf.cueLists.empty()) return;
+    if (listIdx < 0) listIdx = m.activeListIdx();
+    if (listIdx < 0 || listIdx >= static_cast<int>(m.sf.cueLists.size())) return;
 
-    const int total = m.cues.cueCount();
+    auto& cueList = m.cueListAt(listIdx);
+    const int activeListNumericId = m.sf.cueLists[static_cast<size_t>(listIdx)].numericId;
+    const int total               = cueList.cueCount();
 
     // Build a helper to look up a cue's number by flat index.
     auto cueNumAt = [&](int idx) -> std::string {
         if (idx < 0 || idx >= total) return "";
-        const auto* c = m.cues.cueAt(idx);
+        const auto* c = cueList.cueAt(idx);
         return c ? c->cueNumber : "";
     };
 
@@ -480,12 +597,32 @@ void syncSfFromCues(AppModel& m) {
         }
     };
 
+    // Resolve target reference from engine fields — cross-list or same-list.
+    auto resolveEngineTargetRef = [&](const mcp::Cue* c, mcp::ShowFile::CueData& cd) {
+        if (c->crossListNumericId != -1) {
+            cd.targetListId = c->crossListNumericId;
+            cd.target       = c->crossListFlatIdx;
+            for (int tli = 0; tli < m.listCount(); ++tli) {
+                if (tli < (int)m.sf.cueLists.size() &&
+                    m.sf.cueLists[static_cast<size_t>(tli)].numericId == c->crossListNumericId) {
+                    const auto* tc = m.cueListAt(tli).cueAt(c->crossListFlatIdx);
+                    if (tc) cd.targetCueNumber = tc->cueNumber;
+                    break;
+                }
+            }
+        } else {
+            cd.targetListId    = activeListNumericId;
+            cd.target          = c->targetIndex;
+            cd.targetCueNumber = cueNumAt(c->targetIndex);
+        }
+    };
+
     // Recursively reconstruct nesting.
     // Processes flat indices [startIdx, startIdx+count) into dest.
     std::function<void(int, int, std::vector<mcp::ShowFile::CueData>&)> extract;
     extract = [&](int startIdx, int count, std::vector<mcp::ShowFile::CueData>& dest) {
         for (int i = startIdx; i < startIdx + count && i < total; ) {
-            const auto* c = m.cues.cueAt(i);
+            const auto* c = cueList.cueAt(i);
             if (!c) { ++i; continue; }
 
             mcp::ShowFile::CueData cd;
@@ -516,33 +653,29 @@ void syncSfFromCues(AppModel& m) {
                     break;
 
                 case mcp::CueType::Start:
-                    cd.type            = "start";
-                    cd.target          = c->targetIndex;
-                    cd.targetCueNumber = cueNumAt(c->targetIndex);
+                    cd.type = "start";
+                    resolveEngineTargetRef(c, cd);
                     ++i;
                     break;
 
                 case mcp::CueType::Stop:
-                    cd.type            = "stop";
-                    cd.target          = c->targetIndex;
-                    cd.targetCueNumber = cueNumAt(c->targetIndex);
+                    cd.type = "stop";
+                    resolveEngineTargetRef(c, cd);
                     ++i;
                     break;
 
                 case mcp::CueType::Arm:
-                    cd.type            = "arm";
-                    cd.target          = c->targetIndex;
-                    cd.armStartTime    = c->armStartTime;
-                    cd.targetCueNumber = cueNumAt(c->targetIndex);
+                    cd.type         = "arm";
+                    cd.armStartTime = c->armStartTime;
+                    resolveEngineTargetRef(c, cd);
                     ++i;
                     break;
 
                 case mcp::CueType::Devamp:
-                    cd.type            = "devamp";
-                    cd.target          = c->targetIndex;
-                    cd.devampMode      = c->devampMode;
-                    cd.devampPreVamp   = c->devampPreVamp;
-                    cd.targetCueNumber = cueNumAt(c->targetIndex);
+                    cd.type          = "devamp";
+                    cd.devampMode    = c->devampMode;
+                    cd.devampPreVamp = c->devampPreVamp;
+                    resolveEngineTargetRef(c, cd);
                     ++i;
                     break;
 
@@ -602,23 +735,22 @@ void syncSfFromCues(AppModel& m) {
                     break;
 
                 case mcp::CueType::Marker:
-                    cd.type            = "marker";
-                    cd.target          = c->targetIndex;
-                    cd.targetCueNumber = cueNumAt(c->targetIndex);
-                    cd.markerIndex     = c->markerIndex;
+                    cd.type        = "marker";
+                    cd.markerIndex = c->markerIndex;
+                    resolveEngineTargetRef(c, cd);
                     ++i;
                     break;
 
                 case mcp::CueType::Network:
                     cd.type              = "network";
-                    cd.networkPatchName  = m.cues.networkPatchName(c->networkPatchIdx);
+                    cd.networkPatchName  = cueList.networkPatchName(c->networkPatchIdx);
                     cd.networkCommand    = c->networkCommand;
                     ++i;
                     break;
 
                 case mcp::CueType::Midi:
                     cd.type            = "midi";
-                    cd.midiPatchName   = m.cues.midiPatchName(c->midiPatchIdx);
+                    cd.midiPatchName   = cueList.midiPatchName(c->midiPatchIdx);
                     cd.midiMessageType = c->midiMessageType;
                     cd.midiChannel     = c->midiChannel;
                     cd.midiData1       = c->midiData1;
@@ -631,14 +763,13 @@ void syncSfFromCues(AppModel& m) {
                     cd.tcStartTC       = mcp::tcToString(c->tcStartTC);
                     cd.tcEndTC         = mcp::tcToString(c->tcEndTC);
                     cd.tcLtcChannel    = c->tcLtcChannel;
-                    cd.tcMidiPatchName = m.cues.midiPatchName(c->tcMidiPatchIdx);
+                    cd.tcMidiPatchName = cueList.midiPatchName(c->tcMidiPatchIdx);
                     ++i;
                     break;
 
                 case mcp::CueType::Goto:
-                    cd.type            = "goto";
-                    cd.target          = c->targetIndex;
-                    cd.targetCueNumber = cueNumAt(c->targetIndex);
+                    cd.type = "goto";
+                    resolveEngineTargetRef(c, cd);
                     ++i;
                     break;
 
@@ -658,16 +789,65 @@ void syncSfFromCues(AppModel& m) {
         }
     };
 
-    m.sf.cueLists[0].cues.clear();
-    extract(0, total, m.sf.cueLists[0].cues);
+    // Snapshot SF-only fields (not tracked by the engine) indexed by cue number.
+    // These are lost when we clear and rebuild from engine state, so we preserve
+    // them here and restore them after the rebuild.
+    struct SfExtra {
+        mcp::CueTriggers triggers;
+        std::vector<int> markerAnchorListIds;  // per marker, by index
+    };
+    std::unordered_map<std::string, SfExtra> extra;
+    {
+        std::function<void(const std::vector<mcp::ShowFile::CueData>&)> snap;
+        snap = [&](const std::vector<mcp::ShowFile::CueData>& cues) {
+            for (const auto& cd : cues) {
+                if (!cd.cueNumber.empty()) {
+                    SfExtra& e = extra[cd.cueNumber];
+                    e.triggers = cd.triggers;
+                    for (const auto& mk : cd.markers)
+                        e.markerAnchorListIds.push_back(mk.anchorMarkerListId);
+                }
+                if (!cd.children.empty()) snap(cd.children);
+            }
+        };
+        snap(m.sf.cueLists[static_cast<size_t>(listIdx)].cues);
+    }
+
+    m.sf.cueLists[static_cast<size_t>(listIdx)].cues.clear();
+    extract(0, total, m.sf.cueLists[static_cast<size_t>(listIdx)].cues);
+
+    // Restore SF-only fields by cue number.
+    {
+        std::function<void(std::vector<mcp::ShowFile::CueData>&)> restore;
+        restore = [&](std::vector<mcp::ShowFile::CueData>& cues) {
+            for (auto& cd : cues) {
+                auto it = extra.find(cd.cueNumber);
+                if (it != extra.end()) {
+                    cd.triggers = it->second.triggers;
+                    for (int mi = 0; mi < (int)cd.markers.size() &&
+                                     mi < (int)it->second.markerAnchorListIds.size(); ++mi)
+                        cd.markers[static_cast<size_t>(mi)].anchorMarkerListId =
+                            it->second.markerAnchorListIds[static_cast<size_t>(mi)];
+                }
+                if (!cd.children.empty()) restore(cd.children);
+            }
+        };
+        restore(m.sf.cueLists[static_cast<size_t>(listIdx)].cues);
+    }
+
     m.dirty = true;
+}
+
+void syncAllSfFromCues(AppModel& m) {
+    for (int li = 0; li < static_cast<int>(m.sf.cueLists.size()); ++li)
+        syncSfFromCues(m, li);
 }
 
 // ---------------------------------------------------------------------------
 // SF navigation helpers (DFS pre-order, matching rebuildCueList insertion order)
 
-mcp::ShowFile::CueData* sfCueAt(mcp::ShowFile& sf, int flatIdx) {
-    if (sf.cueLists.empty() || flatIdx < 0) return nullptr;
+mcp::ShowFile::CueData* sfCueAt(mcp::ShowFile& sf, int listIdx, int flatIdx) {
+    if (listIdx < 0 || listIdx >= (int)sf.cueLists.size() || flatIdx < 0) return nullptr;
     int counter = 0;
     std::function<mcp::ShowFile::CueData*(std::vector<mcp::ShowFile::CueData>&)> find;
     find = [&](std::vector<mcp::ShowFile::CueData>& cues) -> mcp::ShowFile::CueData* {
@@ -679,15 +859,15 @@ mcp::ShowFile::CueData* sfCueAt(mcp::ShowFile& sf, int flatIdx) {
         }
         return nullptr;
     };
-    return find(sf.cueLists[0].cues);
+    return find(sf.cueLists[listIdx].cues);
 }
 
-const mcp::ShowFile::CueData* sfCueAt(const mcp::ShowFile& sf, int flatIdx) {
-    return sfCueAt(const_cast<mcp::ShowFile&>(sf), flatIdx);
+const mcp::ShowFile::CueData* sfCueAt(const mcp::ShowFile& sf, int listIdx, int flatIdx) {
+    return sfCueAt(const_cast<mcp::ShowFile&>(sf), listIdx, flatIdx);
 }
 
-mcp::ShowFile::CueData sfRemoveAt(mcp::ShowFile& sf, int flatIdx) {
-    if (sf.cueLists.empty() || flatIdx < 0) return {};
+mcp::ShowFile::CueData sfRemoveAt(mcp::ShowFile& sf, int listIdx, int flatIdx) {
+    if (listIdx < 0 || listIdx >= (int)sf.cueLists.size() || flatIdx < 0) return {};
     int counter = 0;
     mcp::ShowFile::CueData removed;
     std::function<bool(std::vector<mcp::ShowFile::CueData>&)> rem;
@@ -703,12 +883,12 @@ mcp::ShowFile::CueData sfRemoveAt(mcp::ShowFile& sf, int flatIdx) {
         }
         return false;
     };
-    rem(sf.cueLists[0].cues);
+    rem(sf.cueLists[listIdx].cues);
     return removed;
 }
 
-void sfFixTargetsAfterRemoval(mcp::ShowFile& sf, int removedFlatIdx) {
-    if (sf.cueLists.empty()) return;
+void sfFixTargetsAfterRemoval(mcp::ShowFile& sf, int listIdx, int removedFlatIdx) {
+    if (listIdx < 0 || listIdx >= (int)sf.cueLists.size()) return;
     std::function<void(std::vector<mcp::ShowFile::CueData>&)> fix;
     fix = [&](std::vector<mcp::ShowFile::CueData>& cues) {
         for (auto& cd : cues) {
@@ -717,13 +897,50 @@ void sfFixTargetsAfterRemoval(mcp::ShowFile& sf, int removedFlatIdx) {
             if (!cd.children.empty()) fix(cd.children);
         }
     };
-    fix(sf.cueLists[0].cues);
+    fix(sf.cueLists[listIdx].cues);
 }
 
-void sfInsertBefore(mcp::ShowFile& sf, int beforeFlatIdx, mcp::ShowFile::CueData cd) {
-    if (sf.cueLists.empty()) return;
+void sfFixTargetsForReorder(mcp::ShowFile& sf, int srcListIdx,
+                             int srcRow, int blockSize, int dstRow) {
+    if (srcListIdx < 0 || srcListIdx >= (int)sf.cueLists.size()) return;
+    const int srcListId = sf.cueLists[static_cast<size_t>(srcListIdx)].numericId;
+
+    // Map old flat index T (in the reordered list) to the new flat index after the move.
+    auto newIdx = [&](int T) -> int {
+        if (T < 0) return T;
+        if (dstRow > srcRow) {  // forward move: block ends up at [dstRow-blockSize, dstRow)
+            if (T >= srcRow && T < srcRow + blockSize)
+                return T + (dstRow - srcRow - blockSize);   // moved block
+            if (T >= srcRow + blockSize && T < dstRow)
+                return T - blockSize;                       // shifted left
+        } else if (dstRow < srcRow) {  // backward move: block ends up at [dstRow, dstRow+blockSize)
+            if (T >= srcRow && T < srcRow + blockSize)
+                return T + (dstRow - srcRow);               // moved block
+            if (T >= dstRow && T < srcRow)
+                return T + blockSize;                       // shifted right
+        }
+        return T;
+    };
+
+    for (int li = 0; li < (int)sf.cueLists.size(); ++li) {
+        const int thisListId = sf.cueLists[static_cast<size_t>(li)].numericId;
+        std::function<void(std::vector<mcp::ShowFile::CueData>&)> fix;
+        fix = [&](std::vector<mcp::ShowFile::CueData>& cues) {
+            for (auto& cd : cues) {
+                const bool refersToSrc = (cd.targetListId == srcListId ||
+                    (cd.targetListId == -1 && thisListId == srcListId));
+                if (refersToSrc && cd.target >= 0)
+                    cd.target = newIdx(cd.target);
+                if (!cd.children.empty()) fix(cd.children);
+            }
+        };
+        fix(sf.cueLists[static_cast<size_t>(li)].cues);
+    }
+}
+
+void sfInsertBefore(mcp::ShowFile& sf, int listIdx, int beforeFlatIdx, mcp::ShowFile::CueData cd) {
+    if (listIdx < 0 || listIdx >= (int)sf.cueLists.size()) return;
     int counter = 0;
-    bool inserted = false;
     std::function<bool(std::vector<mcp::ShowFile::CueData>&)> ins;
     ins = [&](std::vector<mcp::ShowFile::CueData>& cues) -> bool {
         for (int i = 0; i < (int)cues.size(); ++i) {
@@ -736,12 +953,12 @@ void sfInsertBefore(mcp::ShowFile& sf, int beforeFlatIdx, mcp::ShowFile::CueData
         }
         return false;
     };
-    if (!ins(sf.cueLists[0].cues))
-        sf.cueLists[0].cues.push_back(std::move(cd));   // past-end → append top-level
+    if (!ins(sf.cueLists[listIdx].cues))
+        sf.cueLists[listIdx].cues.push_back(std::move(cd));   // past-end → append top-level
 }
 
-void sfAppendToGroup(mcp::ShowFile& sf, int groupFlatIdx, mcp::ShowFile::CueData cd) {
-    auto* group = sfCueAt(sf, groupFlatIdx);
+void sfAppendToGroup(mcp::ShowFile& sf, int listIdx, int groupFlatIdx, mcp::ShowFile::CueData cd) {
+    auto* group = sfCueAt(sf, listIdx, groupFlatIdx);
     if (group) group->children.push_back(std::move(cd));
 }
 
@@ -754,17 +971,17 @@ void saveShow(AppModel& m) {
 
 void setCueNumberChecked(AppModel& m, int index, const std::string& num) {
     if (!num.empty()) {
-        for (int i = 0; i < m.cues.cueCount(); ++i) {
+        for (int i = 0; i < m.cues().cueCount(); ++i) {
             if (i == index) continue;
-            const auto* other = m.cues.cueAt(i);
+            const auto* other = m.cues().cueAt(i);
             if (other && other->cueNumber == num) {
-                m.cues.setCueCueNumber(index, "");
+                m.cues().setCueCueNumber(index, "");
                 syncSfFromCues(m);
                 return;
             }
         }
     }
-    m.cues.setCueCueNumber(index, num);
+    m.cues().setCueCueNumber(index, num);
     syncSfFromCues(m);
 }
 

@@ -5,6 +5,7 @@
 #include <QPushButton>
 
 class AppModel;
+class CueListPanel;
 class CueTableView;
 class InspectorWidget;
 class ProjectStatusDialog;
@@ -16,10 +17,12 @@ class QToolButton;
 
 // Top-level application window.
 //
-// Layout (top to bottom):
-//   GoBar    — large GO button (left) + current cue info panel (right)
-//   IconBar  — small icon buttons for adding cue types, with hover tooltips
-//   Splitter — CueTableView (top, stretches) / InspectorWidget (bottom)
+// Layout (left to right inside central widget):
+//   mainArea (fills, stretches):
+//     GoBar    — large GO button (left) + current cue info + toggle button (right)
+//     IconBar  — small icon buttons for adding cue types, with hover tooltips
+//     Splitter — CueTableView (top, stretches) / InspectorWidget (bottom)
+//   CueListPanel (collapsible right sidebar, ~160 px wide)
 //
 // A 16ms QTimer drives tick(), waveform playhead updates, and status refresh.
 // Forced dark Fusion theme set in main.cpp.
@@ -66,6 +69,7 @@ private:
     AppModel*             m_model{nullptr};
     CueTableView*         m_cueTable{nullptr};
     InspectorWidget*      m_inspector{nullptr};
+    CueListPanel*         m_listPanel{nullptr};
     ProjectStatusDialog*    m_statusDialog{nullptr};
     ScriptletLibraryDialog* m_libraryDialog{nullptr};
     ShowInfoDialog*         m_showInfoDialog{nullptr};

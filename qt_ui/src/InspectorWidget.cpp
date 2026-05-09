@@ -171,7 +171,7 @@ void InspectorWidget::buildBasicTab() {
     connect(m_spinDurationBasic, &QDoubleSpinBox::editingFinished, this, [this]() {
         if (m_loading || m_cueIdx < 0) return;
         m_model->pushUndo();
-        m_model->cues.setCueDuration(m_cueIdx, m_spinDurationBasic->value());
+        m_model->cues().setCueDuration(m_cueIdx, m_spinDurationBasic->value());
         ShowHelpers::syncSfFromCues(*m_model);
         emit cueEdited();
     });
@@ -295,7 +295,7 @@ void InspectorWidget::buildTimeTab() {
             m_markerPanel->hide();
             return;
         }
-        const mcp::Cue* c = m_model->cues.cueAt(m_cueIdx);
+        const mcp::Cue* c = m_model->cues().cueAt(m_cueIdx);
         if (!c || mi >= (int)c->markers.size()) { m_markerPanel->hide(); return; }
         m_selMarker = mi;
         m_loading = true;
@@ -311,7 +311,7 @@ void InspectorWidget::buildTimeTab() {
     });
     connect(m_syncGroupView, &SyncGroupView::rulerClicked, this, [this](double timeSec) {
         if (m_cueIdx < 0) return;
-        m_model->cues.setCueTimelineArmSec(m_cueIdx, timeSec);
+        m_model->cues().setCueTimelineArmSec(m_cueIdx, timeSec);
         emit cueEdited();
     });
 
@@ -321,14 +321,14 @@ void InspectorWidget::buildTimeTab() {
     connect(m_spinStart, &QDoubleSpinBox::editingFinished, this, [this]() {
         if (m_loading || m_cueIdx < 0) return;
         m_model->pushUndo();
-        m_model->cues.setCueStartTime(m_cueIdx, m_spinStart->value());
+        m_model->cues().setCueStartTime(m_cueIdx, m_spinStart->value());
         ShowHelpers::syncSfFromCues(*m_model);
         emit cueEdited();
     });
     connect(m_spinDuration, &QDoubleSpinBox::editingFinished, this, [this]() {
         if (m_loading || m_cueIdx < 0) return;
         m_model->pushUndo();
-        m_model->cues.setCueDuration(m_cueIdx, m_spinDuration->value());
+        m_model->cues().setCueDuration(m_cueIdx, m_spinDuration->value());
         ShowHelpers::syncSfFromCues(*m_model);
         emit cueEdited();
     });
@@ -343,7 +343,7 @@ void InspectorWidget::buildTimeTab() {
             m_markerPanel->hide();
             return;
         }
-        const mcp::Cue* c = m_model->cues.cueAt(m_cueIdx);
+        const mcp::Cue* c = m_model->cues().cueAt(m_cueIdx);
         if (!c || mi >= (int)c->markers.size()) { m_markerPanel->hide(); return; }
 
         m_loading = true;
@@ -359,7 +359,7 @@ void InspectorWidget::buildTimeTab() {
     connect(m_markerTimeSpin, &QDoubleSpinBox::editingFinished, this, [this]() {
         if (m_loading || m_cueIdx < 0 || m_selMarker < 0) return;
         m_model->pushUndo();
-        m_model->cues.setCueMarkerTime(m_cueIdx, m_selMarker, m_markerTimeSpin->value());
+        m_model->cues().setCueMarkerTime(m_cueIdx, m_selMarker, m_markerTimeSpin->value());
         ShowHelpers::syncSfFromCues(*m_model);
         if (m_syncGroupView->isVisible()) m_syncGroupView->update();
         emit cueEdited();
@@ -369,22 +369,31 @@ void InspectorWidget::buildTimeTab() {
     connect(m_markerNameEdit, &QLineEdit::editingFinished, this, [this]() {
         if (m_loading || m_cueIdx < 0 || m_selMarker < 0) return;
         m_model->pushUndo();
-        m_model->cues.setCueMarkerName(m_cueIdx, m_selMarker,
+        m_model->cues().setCueMarkerName(m_cueIdx, m_selMarker,
                                         m_markerNameEdit->text().toStdString());
         ShowHelpers::syncSfFromCues(*m_model);
         if (m_syncGroupView->isVisible()) m_syncGroupView->update();
         emit cueEdited();
     });
 
-    // Anchor Marker cue combo
+    // Anchor Marker cue combo (data is QPoint(listIdx, cueIdxInList), or (-1,-1) for none)
     connect(m_comboMarkerAnchor, QOverload<int>::of(&QComboBox::currentIndexChanged),
             this, [this](int) {
         if (m_loading || m_cueIdx < 0 || m_selMarker < 0) return;
         m_model->pushUndo();
-        // combo item data stores the flat index (-1 for "(none)")
-        const int anchorIdx = m_comboMarkerAnchor->currentData().toInt();
-        m_model->cues.setMarkerAnchor(m_cueIdx, m_selMarker, anchorIdx);
+        const QPoint sel = m_comboMarkerAnchor->currentData().toPoint();
+        const int cueIdxInList = sel.y();  // -1 for "(none)"
+        m_model->cues().setMarkerAnchor(m_cueIdx, m_selMarker, cueIdxInList);
         ShowHelpers::syncSfFromCues(*m_model);
+        // Persist anchorMarkerListId — syncSfFromCues doesn't preserve it
+        if (auto* sfCue = ShowHelpers::sfCueAt(m_model->sf, m_model->activeListIdx(), m_cueIdx)) {
+            if (m_selMarker < (int)sfCue->markers.size()) {
+                const int listIdx = sel.x();
+                sfCue->markers[m_selMarker].anchorMarkerListId =
+                    (listIdx < 0 || listIdx == m_model->activeListIdx()) ? -1
+                    : m_model->sf.cueLists[listIdx].numericId;
+            }
+        }
         emit cueEdited();
     });
 }
@@ -408,7 +417,7 @@ void InspectorWidget::buildCurveTab() {
             this, [this](int idx) {
         if (m_loading || m_cueIdx < 0) return;
         m_model->pushUndo();
-        m_model->cues.setCueFadeCurve(m_cueIdx,
+        m_model->cues().setCueFadeCurve(m_cueIdx,
             idx == 1 ? mcp::FadeData::Curve::EqualPower : mcp::FadeData::Curve::Linear);
         ShowHelpers::syncSfFromCues(*m_model);
         emit cueEdited();
@@ -416,7 +425,7 @@ void InspectorWidget::buildCurveTab() {
     connect(m_chkStopWhenDone, &QCheckBox::toggled, this, [this](bool v) {
         if (m_loading || m_cueIdx < 0) return;
         m_model->pushUndo();
-        m_model->cues.setCueFadeStopWhenDone(m_cueIdx, v);
+        m_model->cues().setCueFadeStopWhenDone(m_cueIdx, v);
         ShowHelpers::syncSfFromCues(*m_model);
         emit cueEdited();
     });
@@ -443,12 +452,12 @@ void InspectorWidget::buildModeTab() {
     connect(m_comboGroupMode, QOverload<int>::of(&QComboBox::currentIndexChanged),
             this, [this](int) {
         if (m_loading || m_cueIdx < 0) return;
-        const mcp::Cue* c = m_model->cues.cueAt(m_cueIdx);
+        const mcp::Cue* c = m_model->cues().cueAt(m_cueIdx);
         if (!c || !c->groupData) return;
         m_model->pushUndo();
         auto mode = static_cast<mcp::GroupData::Mode>(
             m_comboGroupMode->currentData().toInt());
-        m_model->cues.setCueGroupMode(m_cueIdx, mode);
+        m_model->cues().setCueGroupMode(m_cueIdx, mode);
         ShowHelpers::syncSfFromCues(*m_model);
         // Show/hide Time and Timeline tabs based on new mode
         const bool isTimeline = (mode == mcp::GroupData::Mode::Timeline);
@@ -463,7 +472,7 @@ void InspectorWidget::buildModeTab() {
     connect(m_chkGroupRandom, &QCheckBox::toggled, this, [this](bool v) {
         if (m_loading || m_cueIdx < 0) return;
         m_model->pushUndo();
-        m_model->cues.setCueGroupRandom(m_cueIdx, v);
+        m_model->cues().setCueGroupRandom(m_cueIdx, v);
         ShowHelpers::syncSfFromCues(*m_model);
         emit cueEdited();
     });
@@ -511,7 +520,7 @@ void InspectorWidget::buildMCTab() {
                 "MIDI files (*.mid *.midi);;Steinberg SMT (*.smt);;All files (*)");
             if (path.isEmpty()) return;
 
-            auto* mc = m_model->cues.musicContextOf(m_cueIdx);
+            auto* mc = m_model->cues().musicContextOf(m_cueIdx);
             if (!mc) {
                 // Ensure MC is attached first
                 auto newMc = std::make_unique<mcp::MusicContext>();
@@ -519,8 +528,8 @@ void InspectorWidget::buildMCTab() {
                 p.bar=1; p.beat=1; p.bpm=120.0;
                 p.isRamp=false; p.hasTimeSig=true; p.timeSigNum=4; p.timeSigDen=4;
                 newMc->points.push_back(p);
-                m_model->cues.setCueMusicContext(m_cueIdx, std::move(newMc));
-                mc = m_model->cues.musicContextOf(m_cueIdx);
+                m_model->cues().setCueMusicContext(m_cueIdx, std::move(newMc));
+                mc = m_model->cues().musicContextOf(m_cueIdx);
             }
 
             m_model->pushUndo();
@@ -537,7 +546,7 @@ void InspectorWidget::buildMCTab() {
                 return;
             }
 
-            m_model->cues.markMCDirty(m_cueIdx);
+            m_model->cues().markMCDirty(m_cueIdx);
             m_mcView->setCueIndex(m_cueIdx);
             m_mcView->update();
             ShowHelpers::syncSfFromCues(*m_model);
@@ -547,15 +556,15 @@ void InspectorWidget::buildMCTab() {
         // Inherit From Child button: copy MC from a direct child with MC
         connect(btnInherit, &QPushButton::clicked, this, [this]() {
             if (m_cueIdx < 0) return;
-            const mcp::Cue* c = m_model->cues.cueAt(m_cueIdx);
+            const mcp::Cue* c = m_model->cues().cueAt(m_cueIdx);
             if (!c || c->type != mcp::CueType::Group) return;
 
             // Collect direct children that have a MusicContext
             std::vector<int> childrenWithMC;
             for (int ci = m_cueIdx + 1;
-                 ci <= m_cueIdx + c->childCount && ci < m_model->cues.cueCount(); ++ci) {
-                const mcp::Cue* child = m_model->cues.cueAt(ci);
-                if (child && child->parentIndex == m_cueIdx && m_model->cues.hasMusicContext(ci))
+                 ci <= m_cueIdx + c->childCount && ci < m_model->cues().cueCount(); ++ci) {
+                const mcp::Cue* child = m_model->cues().cueAt(ci);
+                if (child && child->parentIndex == m_cueIdx && m_model->cues().hasMusicContext(ci))
                     childrenWithMC.push_back(ci);
                 // Skip over nested group descendants
                 if (child && child->type == mcp::CueType::Group)
@@ -571,15 +580,15 @@ void InspectorWidget::buildMCTab() {
             // Build menu of choices
             QMenu menu(this);
             for (int ci : childrenWithMC) {
-                const mcp::Cue* child = m_model->cues.cueAt(ci);
+                const mcp::Cue* child = m_model->cues().cueAt(ci);
                 const QString label = QString("Q%1 %2")
                     .arg(QString::fromStdString(child->cueNumber))
                     .arg(QString::fromStdString(child->name));
                 menu.addAction(label, this, [this, ci]() {
-                    if (!m_model->cues.hasMusicContext(ci)) return;
+                    if (!m_model->cues().hasMusicContext(ci)) return;
                     m_model->pushUndo();
                     // Share by index — no copy; if child is deleted, link auto-clears on rebuild.
-                    m_model->cues.setCueMCSource(m_cueIdx, ci);
+                    m_model->cues().setCueMCSource(m_cueIdx, ci);
                     m_mcView->setCueIndex(m_cueIdx);
                     m_mcView->update();
                     ShowHelpers::syncSfFromCues(*m_model);
@@ -637,9 +646,9 @@ void InspectorWidget::buildMCTab() {
             p.bar = 1; p.beat = 1; p.bpm = 120.0;
             p.isRamp = false; p.hasTimeSig = true; p.timeSigNum = 4; p.timeSigDen = 4;
             mc->points.push_back(p);
-            m_model->cues.setCueMusicContext(m_cueIdx, std::move(mc));
+            m_model->cues().setCueMusicContext(m_cueIdx, std::move(mc));
         } else {
-            m_model->cues.setCueMusicContext(m_cueIdx, nullptr);
+            m_model->cues().setCueMusicContext(m_cueIdx, nullptr);
         }
         ShowHelpers::syncSfFromCues(*m_model);
         emit cueEdited();
@@ -651,7 +660,7 @@ void InspectorWidget::buildMCTab() {
 
     connect(m_chkApplyBefore, &QCheckBox::toggled, this, [this](bool on) {
         if (m_loading || m_cueIdx < 0) return;
-        auto* mc = m_model->cues.musicContextOf(m_cueIdx);
+        auto* mc = m_model->cues().musicContextOf(m_cueIdx);
         if (!mc) return;
         m_model->pushUndo();
         mc->applyBeforeStart = on;
@@ -674,7 +683,7 @@ void InspectorWidget::buildMCTab() {
     // Property panel changes
     auto onPropChanged = [this] {
         if (m_loading || m_cueIdx < 0 || m_selMCPt < 0) return;
-        auto* mc = m_model->cues.musicContextOf(m_cueIdx);
+        auto* mc = m_model->cues().musicContextOf(m_cueIdx);
         if (!mc || m_selMCPt >= (int)mc->points.size()) return;
         m_model->pushUndo();
         auto& pt = mc->points[m_selMCPt];
@@ -702,8 +711,8 @@ void InspectorWidget::buildMCTab() {
 
 void InspectorWidget::loadMCPropPanel() {
     if (m_cueIdx < 0) { m_mcPropGroup->hide(); return; }
-    const auto* c = m_model->cues.cueAt(m_cueIdx);
-    const auto* mc = m_model->cues.musicContextOf(m_cueIdx);
+    const auto* c = m_model->cues().cueAt(m_cueIdx);
+    const auto* mc = m_model->cues().musicContextOf(m_cueIdx);
     if (!mc || m_selMCPt < 0 || m_selMCPt >= (int)mc->points.size()) {
         m_mcPropGroup->hide();
         return;
@@ -740,7 +749,7 @@ void InspectorWidget::buildTimelineTab() {
     connect(m_timelineView, &TimelineGroupView::childOffsetChanged,
             this, [this](int childFlatIdx, double newOffsetSec) {
         m_model->pushUndo();
-        m_model->cues.setCueTimelineOffset(childFlatIdx, newOffsetSec);
+        m_model->cues().setCueTimelineOffset(childFlatIdx, newOffsetSec);
         ShowHelpers::syncSfFromCues(*m_model);
         emit cueEdited();
     });
@@ -749,9 +758,9 @@ void InspectorWidget::buildTimelineTab() {
             this, [this](int childFlatIdx, double newOffsetSec,
                          double newStartTimeSec, double newDurationSec) {
         m_model->pushUndo();
-        m_model->cues.setCueTimelineOffset(childFlatIdx, newOffsetSec);
-        m_model->cues.setCueStartTime(childFlatIdx, newStartTimeSec);
-        m_model->cues.setCueDuration(childFlatIdx, newDurationSec);
+        m_model->cues().setCueTimelineOffset(childFlatIdx, newOffsetSec);
+        m_model->cues().setCueStartTime(childFlatIdx, newStartTimeSec);
+        m_model->cues().setCueDuration(childFlatIdx, newDurationSec);
         ShowHelpers::syncSfFromCues(*m_model);
         emit cueEdited();
     });
@@ -759,7 +768,7 @@ void InspectorWidget::buildTimelineTab() {
     connect(m_timelineView, &TimelineGroupView::rulerClicked,
             this, [this](double timeSec) {
         if (m_cueIdx < 0) return;
-        m_model->cues.setCueTimelineArmSec(m_cueIdx, timeSec);
+        m_model->cues().setCueTimelineArmSec(m_cueIdx, timeSec);
         emit cueEdited();   // refresh table so "armed" state appears
     });
 }
@@ -770,13 +779,22 @@ void InspectorWidget::buildMarkerTab() {
     form->setContentsMargins(8, 8, 8, 8);
     form->setSpacing(6);
 
-    m_comboMarkerTarget = new QComboBox;
-    m_comboMarkerMkIdx  = new QComboBox;
-    form->addRow("Target cue:", m_comboMarkerTarget);
-    form->addRow("Marker:",     m_comboMarkerMkIdx);
+    m_comboMarkerTargetList = new QComboBox;
+    m_comboMarkerTarget     = new QComboBox;
+    m_comboMarkerMkIdx      = new QComboBox;
+    form->addRow("Target list:", m_comboMarkerTargetList);
+    form->addRow("Target cue:",  m_comboMarkerTarget);
+    form->addRow("Marker:",      m_comboMarkerMkIdx);
 
     m_tabs->addTab(m_markerPage, "Marker");
 
+    connect(m_comboMarkerTargetList, QOverload<int>::of(&QComboBox::currentIndexChanged),
+            this, [this](int) {
+        if (m_loading) return;
+        refreshMarkerTargetCombo();
+        refreshMarkerMkIdxCombo();
+        onBasicChanged();
+    });
     connect(m_comboMarkerTarget, QOverload<int>::of(&QComboBox::currentIndexChanged),
             this, [this](int) {
         if (m_loading) return;
@@ -797,7 +815,7 @@ void InspectorWidget::setCueIndex(int idx) {
     m_selMarker = -1;
     m_loading   = true;
 
-    const mcp::Cue* c = (idx >= 0) ? m_model->cues.cueAt(idx) : nullptr;
+    const mcp::Cue* c = (idx >= 0) ? m_model->cues().cueAt(idx) : nullptr;
 
     const bool isAudio    = c && c->type == mcp::CueType::Audio;
     const bool isFade     = c && c->type == mcp::CueType::Fade;
@@ -837,7 +855,7 @@ void InspectorWidget::setCueIndex(int idx) {
 
     // Music Context tab
     if (hasMC) {
-        bool mcAttached = c && m_model->cues.hasMusicContext(idx);
+        bool mcAttached = c && m_model->cues().hasMusicContext(idx);
         // MC cues always have an attached MC — auto-create if missing.
         if (isMCCue && !mcAttached) {
             auto mc = std::make_unique<mcp::MusicContext>();
@@ -845,7 +863,7 @@ void InspectorWidget::setCueIndex(int idx) {
             p.bar = 1; p.beat = 1; p.bpm = 120.0;
             p.hasTimeSig = true; p.timeSigNum = 4; p.timeSigDen = 4;
             mc->points.push_back(p);
-            m_model->cues.setCueMusicContext(idx, std::move(mc));
+            m_model->cues().setCueMusicContext(idx, std::move(mc));
             ShowHelpers::syncSfFromCues(*m_model);
             mcAttached = true;
         }
@@ -860,7 +878,7 @@ void InspectorWidget::setCueIndex(int idx) {
         m_mcContent->setVisible(mcAttached);
         m_selMCPt = -1;
         if (mcAttached) {
-            m_chkApplyBefore->setChecked(m_model->cues.musicContextOf(idx)->applyBeforeStart);
+            m_chkApplyBefore->setChecked(m_model->cues().musicContextOf(idx)->applyBeforeStart);
             m_mcView->setCueIndex(idx);
             m_mcPropGroup->hide();
         }
@@ -883,7 +901,7 @@ void InspectorWidget::setCueIndex(int idx) {
 
     // Pass MC to timeline views for bar/beat ruler
     {
-        const mcp::MusicContext* mc = c ? m_model->cues.musicContextOf(idx) : nullptr;
+        const mcp::MusicContext* mc = c ? m_model->cues().musicContextOf(idx) : nullptr;
         const double startTime = (c && c->type == mcp::CueType::Audio) ? c->startTime : 0.0;
         if (m_waveform)      m_waveform->setMusicContext(mc, startTime);
         if (m_timelineView)  m_timelineView->setMusicContext(mc);
@@ -917,7 +935,7 @@ void InspectorWidget::restoreTabIndex(int idx) {
 // ── load helpers ───────────────────────────────────────────────────────────
 
 void InspectorWidget::loadBasic() {
-    const mcp::Cue* c = (m_cueIdx >= 0) ? m_model->cues.cueAt(m_cueIdx) : nullptr;
+    const mcp::Cue* c = (m_cueIdx >= 0) ? m_model->cues().cueAt(m_cueIdx) : nullptr;
     const bool en = c != nullptr;
 
     m_editNum->setEnabled(en);
@@ -952,18 +970,37 @@ void InspectorWidget::loadBasic() {
     if (c->type == mcp::CueType::Arm)
         m_spinArmStart->setValue(c->armStartTime);
     if (c->type == mcp::CueType::Marker) {
+        // Read targetListId from ShowFile (engine Cue doesn't store it)
+        int targetListId = -1;
+        if (const auto* sfCue = ShowHelpers::sfCueAt(m_model->sf, m_model->activeListIdx(), m_cueIdx))
+            targetListId = sfCue->targetListId;
+
+        m_comboMarkerTargetList->clear();
+        m_comboMarkerTargetList->addItem("(Same list)", -1);
+        for (int li = 0; li < (int)m_model->sf.cueLists.size(); ++li) {
+            m_comboMarkerTargetList->addItem(
+                QString::fromStdString(m_model->sf.cueLists[li].name),
+                m_model->sf.cueLists[li].numericId);
+        }
+        for (int j = 0; j < m_comboMarkerTargetList->count(); ++j) {
+            if (m_comboMarkerTargetList->itemData(j).toInt() == targetListId) {
+                m_comboMarkerTargetList->setCurrentIndex(j);
+                break;
+            }
+        }
+
         refreshMarkerTargetCombo();
         refreshMarkerMkIdxCombo();
     }
 }
 
 void InspectorWidget::loadTrim() {
-    const mcp::Cue* c = (m_cueIdx >= 0) ? m_model->cues.cueAt(m_cueIdx) : nullptr;
+    const mcp::Cue* c = (m_cueIdx >= 0) ? m_model->cues().cueAt(m_cueIdx) : nullptr;
     m_trimFader->setValue(c ? static_cast<float>(c->trim) : 0.0f);
 }
 
 void InspectorWidget::loadTime() {
-    const mcp::Cue* c = (m_cueIdx >= 0) ? m_model->cues.cueAt(m_cueIdx) : nullptr;
+    const mcp::Cue* c = (m_cueIdx >= 0) ? m_model->cues().cueAt(m_cueIdx) : nullptr;
 
     const bool isSyncGroup = c && c->type == mcp::CueType::Group && c->groupData &&
                              c->groupData->mode == mcp::GroupData::Mode::Sync;
@@ -995,7 +1032,7 @@ void InspectorWidget::loadSyncSection() {
 }
 
 void InspectorWidget::loadCurve() {
-    const mcp::Cue* c = (m_cueIdx >= 0) ? m_model->cues.cueAt(m_cueIdx) : nullptr;
+    const mcp::Cue* c = (m_cueIdx >= 0) ? m_model->cues().cueAt(m_cueIdx) : nullptr;
     if (!c || !c->fadeData) {
         m_comboCurve->setCurrentIndex(0);
         m_chkStopWhenDone->setChecked(false);
@@ -1007,7 +1044,7 @@ void InspectorWidget::loadCurve() {
 }
 
 void InspectorWidget::loadMode() {
-    const mcp::Cue* c = (m_cueIdx >= 0) ? m_model->cues.cueAt(m_cueIdx) : nullptr;
+    const mcp::Cue* c = (m_cueIdx >= 0) ? m_model->cues().cueAt(m_cueIdx) : nullptr;
     if (!c || !c->groupData) return;
 
     const auto mode = c->groupData->mode;
@@ -1047,7 +1084,7 @@ void InspectorWidget::rebuildLevelsForCue() {
     lay->setSpacing(8);
     m_levelsScroll->setWidget(m_levelsContent);
 
-    const mcp::Cue* c = (m_cueIdx >= 0) ? m_model->cues.cueAt(m_cueIdx) : nullptr;
+    const mcp::Cue* c = (m_cueIdx >= 0) ? m_model->cues().cueAt(m_cueIdx) : nullptr;
     if (!c) return;
 
     if (c->type == mcp::CueType::Audio) {
@@ -1154,7 +1191,7 @@ void InspectorWidget::rebuildLevelsForCue() {
                         m_model->pushUndo();
                         const QString txt = ce->text().trimmed();
                         if (txt.isEmpty()) {
-                            m_model->cues.setCueXpoint(m_cueIdx, s, o, std::nullopt);
+                            m_model->cues().setCueXpoint(m_cueIdx, s, o, std::nullopt);
                         } else {
                             bool ok = false;
                             float dB = txt.toFloat(&ok);
@@ -1163,7 +1200,7 @@ void InspectorWidget::rebuildLevelsForCue() {
                                 dB = FaderWidget::kFaderInf;
                             else
                                 dB = std::min(dB, FaderWidget::kFaderMax);
-                            m_model->cues.setCueXpoint(m_cueIdx, s, o, dB);
+                            m_model->cues().setCueXpoint(m_cueIdx, s, o, dB);
                             ce->setText(dB <= FaderWidget::kFaderMin + 0.05f
                                 ? QStringLiteral("-inf")
                                 : QString::number(static_cast<double>(dB), 'f', 1));
@@ -1205,7 +1242,7 @@ void InspectorWidget::rebuildLevelsForCue() {
         sep->setStyleSheet("color:#333;");
         fadersRow->addWidget(sep);
 
-        m_model->cues.setCueFadeOutTargetCount(m_cueIdx, outCh);
+        m_model->cues().setCueFadeOutTargetCount(m_cueIdx, outCh);
         for (int o = 0; o < outCh; ++o) {
             bool  enabled = (o < (int)fd.outLevels.size()) ? fd.outLevels[o].enabled  : false;
             float target  = (o < (int)fd.outLevels.size()) ? fd.outLevels[o].targetDb : 0.0f;
@@ -1217,11 +1254,11 @@ void InspectorWidget::rebuildLevelsForCue() {
             });
             connect(fw, &FaderWidget::toggled, this, [this, o](bool en) {
                 if (m_loading || m_cueIdx < 0) return;
-                const mcp::Cue* c2 = m_model->cues.cueAt(m_cueIdx);
+                const mcp::Cue* c2 = m_model->cues().cueAt(m_cueIdx);
                 if (!c2 || !c2->fadeData) return;
                 float tgt = (o < (int)c2->fadeData->outLevels.size())
                     ? c2->fadeData->outLevels[o].targetDb : 0.0f;
-                m_model->cues.setCueFadeOutTarget(m_cueIdx, o, en, tgt);
+                m_model->cues().setCueFadeOutTarget(m_cueIdx, o, en, tgt);
                 ShowHelpers::syncSfFromCues(*m_model);
                 emit cueEdited();
             });
@@ -1236,9 +1273,9 @@ void InspectorWidget::rebuildLevelsForCue() {
         });
         connect(m_fadeMasterFader, &FaderWidget::toggled, this, [this](bool en) {
             if (m_loading || m_cueIdx < 0) return;
-            const mcp::Cue* c2 = m_model->cues.cueAt(m_cueIdx);
+            const mcp::Cue* c2 = m_model->cues().cueAt(m_cueIdx);
             if (!c2 || !c2->fadeData) return;
-            m_model->cues.setCueFadeMasterTarget(m_cueIdx, en,
+            m_model->cues().setCueFadeMasterTarget(m_cueIdx, en,
                 c2->fadeData->masterLevel.targetDb);
             ShowHelpers::syncSfFromCues(*m_model);
             emit cueEdited();
@@ -1256,16 +1293,16 @@ void InspectorWidget::rebuildLevelsForCue() {
             if (!fd.xpTargets[0].empty()) xpOutCh = (int)fd.xpTargets[0].size();
         } else {
             const int tIdx = fd.resolvedTargetIdx;
-            const mcp::Cue* tgt = (tIdx >= 0) ? m_model->cues.cueAt(tIdx) : nullptr;
+            const mcp::Cue* tgt = (tIdx >= 0) ? m_model->cues().cueAt(tIdx) : nullptr;
             if (tgt && tgt->audioFile.isLoaded())
                 xpSrcCh = tgt->audioFile.metadata().channels;
         }
 
         if (xpSrcCh > 0 && xpOutCh > 0) {
             // Ensure matrix is sized (no-op if already correct).
-            m_model->cues.setCueFadeXpSize(m_cueIdx, xpSrcCh, xpOutCh);
+            m_model->cues().setCueFadeXpSize(m_cueIdx, xpSrcCh, xpOutCh);
             // Re-read fd pointer (setCueFadeXpSize may reallocate vectors).
-            const auto& fd2 = *m_model->cues.cueAt(m_cueIdx)->fadeData;
+            const auto& fd2 = *m_model->cues().cueAt(m_cueIdx)->fadeData;
 
             auto* xpGroup = new QGroupBox("Crosspoint fade", m_levelsContent);
             xpGroup->setStyleSheet(
@@ -1327,7 +1364,7 @@ void InspectorWidget::rebuildLevelsForCue() {
                         const QString txt = ce->text().trimmed();
                         if (txt.isEmpty()) {
                             // Empty = deactivate (distinct from -inf which activates at silence)
-                            m_model->cues.setCueFadeXpTarget(m_cueIdx, s, o, false, 0.0f);
+                            m_model->cues().setCueFadeXpTarget(m_cueIdx, s, o, false, 0.0f);
                         } else {
                             bool ok = false;
                             float dB = txt.toFloat(&ok);
@@ -1336,7 +1373,7 @@ void InspectorWidget::rebuildLevelsForCue() {
                                 dB = FaderWidget::kFaderInf;
                             else
                                 dB = std::min(dB, FaderWidget::kFaderMax);
-                            m_model->cues.setCueFadeXpTarget(m_cueIdx, s, o, true, dB);
+                            m_model->cues().setCueFadeXpTarget(m_cueIdx, s, o, true, dB);
                             ce->setText(dB <= FaderWidget::kFaderMin + 0.05f
                                 ? QStringLiteral("-inf")
                                 : QString::number(static_cast<double>(dB), 'f', 1));
@@ -1359,22 +1396,35 @@ void InspectorWidget::refreshMarkerTargetCombo() {
     const bool wasLoading = m_loading;
     m_loading = true;
     m_comboMarkerTarget->clear();
-    const int n = m_model->cues.cueCount();
-    const mcp::Cue* cur = (m_cueIdx >= 0) ? m_model->cues.cueAt(m_cueIdx) : nullptr;
-    for (int i = 0; i < n; ++i) {
-        const auto* c = m_model->cues.cueAt(i);
-        if (!c) continue;
-        const bool isAudio = c->type == mcp::CueType::Audio;
-        const bool isSyncGroup = c->type == mcp::CueType::Group && c->groupData &&
-                                 c->groupData->mode == mcp::GroupData::Mode::Sync;
-        if (!isAudio && !isSyncGroup) continue;
-        const QString label = QString("Q%1 %2")
-            .arg(QString::fromStdString(c->cueNumber))
-            .arg(QString::fromStdString(c->name));
-        m_comboMarkerTarget->addItem(label, i);
+
+    // Determine which list to scan for target cues
+    const int listId = m_comboMarkerTargetList
+                       ? m_comboMarkerTargetList->currentData().toInt() : -1;
+    int targetListIdx = m_model->activeListIdx();
+    if (listId >= 0) {
+        for (int li = 0; li < (int)m_model->sf.cueLists.size(); ++li) {
+            if (m_model->sf.cueLists[li].numericId == listId) { targetListIdx = li; break; }
+        }
     }
-    // Select the current target
-    if (cur) {
+
+    if (targetListIdx >= 0 && targetListIdx < m_model->listCount()) {
+        auto& cl = m_model->cueListAt(targetListIdx);
+        for (int i = 0; i < cl.cueCount(); ++i) {
+            const auto* c = cl.cueAt(i);
+            if (!c) continue;
+            const bool isAudio = c->type == mcp::CueType::Audio;
+            const bool isSyncGroup = c->type == mcp::CueType::Group && c->groupData &&
+                                     c->groupData->mode == mcp::GroupData::Mode::Sync;
+            if (!isAudio && !isSyncGroup) continue;
+            m_comboMarkerTarget->addItem(
+                QString("Q%1 %2").arg(QString::fromStdString(c->cueNumber))
+                                  .arg(QString::fromStdString(c->name)), i);
+        }
+    }
+
+    // Select the current target (flat index within the target list)
+    const mcp::Cue* cur = (m_cueIdx >= 0) ? m_model->cues().cueAt(m_cueIdx) : nullptr;
+    if (cur && cur->targetIndex >= 0) {
         for (int j = 0; j < m_comboMarkerTarget->count(); ++j) {
             if (m_comboMarkerTarget->itemData(j).toInt() == cur->targetIndex) {
                 m_comboMarkerTarget->setCurrentIndex(j);
@@ -1389,10 +1439,22 @@ void InspectorWidget::refreshMarkerMkIdxCombo() {
     const bool wasLoading = m_loading;
     m_loading = true;
     m_comboMarkerMkIdx->clear();
-    const mcp::Cue* cur = (m_cueIdx >= 0) ? m_model->cues.cueAt(m_cueIdx) : nullptr;
+    const mcp::Cue* cur = (m_cueIdx >= 0) ? m_model->cues().cueAt(m_cueIdx) : nullptr;
     const int ti = (m_comboMarkerTarget->count() > 0)
                    ? m_comboMarkerTarget->currentData().toInt() : -1;
-    const mcp::Cue* target = (ti >= 0) ? m_model->cues.cueAt(ti) : nullptr;
+
+    // Resolve the target list (same as in refreshMarkerTargetCombo)
+    const int listId = m_comboMarkerTargetList
+                       ? m_comboMarkerTargetList->currentData().toInt() : -1;
+    int targetListIdx = m_model->activeListIdx();
+    if (listId >= 0) {
+        for (int li = 0; li < (int)m_model->sf.cueLists.size(); ++li) {
+            if (m_model->sf.cueLists[li].numericId == listId) { targetListIdx = li; break; }
+        }
+    }
+
+    const mcp::Cue* target = (ti >= 0 && targetListIdx < m_model->listCount())
+                             ? m_model->cueListAt(targetListIdx).cueAt(ti) : nullptr;
     if (target) {
         for (int mi = 0; mi < (int)target->markers.size(); ++mi) {
             const auto& mk = target->markers[static_cast<size_t>(mi)];
@@ -1418,24 +1480,53 @@ void InspectorWidget::refreshMarkerAnchorCombo() {
     const bool wasLoading = m_loading;
     m_loading = true;
     m_comboMarkerAnchor->clear();
-    m_comboMarkerAnchor->addItem("(none)", -1);
+    m_comboMarkerAnchor->addItem("(none)", QPoint(-1, -1));
 
-    const mcp::Cue* audioCue = (m_cueIdx >= 0) ? m_model->cues.cueAt(m_cueIdx) : nullptr;
+    const mcp::Cue* audioCue = (m_cueIdx >= 0) ? m_model->cues().cueAt(m_cueIdx) : nullptr;
     if (audioCue && m_selMarker >= 0 && m_selMarker < (int)audioCue->markers.size()) {
-        // Only show Marker cues that point to this exact cue+marker
-        for (int i = 0; i < m_model->cues.cueCount(); ++i) {
-            const auto* c = m_model->cues.cueAt(i);
-            if (!c || c->type != mcp::CueType::Marker) continue;
-            if (c->targetIndex != m_cueIdx || c->markerIndex != m_selMarker) continue;
-            const QString label = QString("Q%1 %2")
-                .arg(QString::fromStdString(c->cueNumber))
-                .arg(QString::fromStdString(c->name));
-            m_comboMarkerAnchor->addItem(label, i);
+        const int activeListIdx = m_model->activeListIdx();
+        // Show Marker cues from all lists that point to this cue+marker
+        for (int li = 0; li < m_model->listCount(); ++li) {
+            auto& cl = m_model->cueListAt(li);
+            for (int i = 0; i < cl.cueCount(); ++i) {
+                const auto* c = cl.cueAt(i);
+                if (!c || c->type != mcp::CueType::Marker) continue;
+                // For same-list: check engine targetIndex/markerIndex
+                if (li == activeListIdx) {
+                    if (c->targetIndex != m_cueIdx || c->markerIndex != m_selMarker) continue;
+                } else {
+                    // Cross-list: skip — engine targetIndex is ambiguous across lists
+                    continue;
+                }
+                const QString listPrefix = (li != activeListIdx)
+                    ? QString("[%1] ").arg(QString::fromStdString(m_model->sf.cueLists[li].name))
+                    : QString();
+                m_comboMarkerAnchor->addItem(
+                    listPrefix + QString("Q%1 %2")
+                        .arg(QString::fromStdString(c->cueNumber))
+                        .arg(QString::fromStdString(c->name)),
+                    QPoint(li, i));
+            }
         }
-        // Select current anchor
-        const int cur = audioCue->markers[static_cast<size_t>(m_selMarker)].anchorMarkerCueIdx;
+
+        // Select current anchor (read anchorMarkerListId from sf to handle cross-list)
+        int anchorListIdx = activeListIdx;
+        int anchorCueIdx = audioCue->markers[static_cast<size_t>(m_selMarker)].anchorMarkerCueIdx;
+        if (const auto* sfCue = ShowHelpers::sfCueAt(m_model->sf, m_model->activeListIdx(), m_cueIdx)) {
+            if (m_selMarker < (int)sfCue->markers.size()) {
+                const int anchorListId = sfCue->markers[m_selMarker].anchorMarkerListId;
+                if (anchorListId >= 0) {
+                    for (int li = 0; li < (int)m_model->sf.cueLists.size(); ++li) {
+                        if (m_model->sf.cueLists[li].numericId == anchorListId) {
+                            anchorListIdx = li; break;
+                        }
+                    }
+                }
+            }
+        }
         for (int j = 0; j < m_comboMarkerAnchor->count(); ++j) {
-            if (m_comboMarkerAnchor->itemData(j).toInt() == cur) {
+            const QPoint p = m_comboMarkerAnchor->itemData(j).toPoint();
+            if (p.x() == anchorListIdx && p.y() == anchorCueIdx) {
                 m_comboMarkerAnchor->setCurrentIndex(j);
                 break;
             }
@@ -1448,73 +1539,81 @@ void InspectorWidget::refreshMarkerAnchorCombo() {
 
 void InspectorWidget::onBasicChanged() {
     if (m_loading || m_cueIdx < 0) return;
-    const mcp::Cue* c = m_model->cues.cueAt(m_cueIdx);
+    const mcp::Cue* c = m_model->cues().cueAt(m_cueIdx);
     if (!c) return;
     m_model->pushUndo();
 
     ShowHelpers::setCueNumberChecked(*m_model, m_cueIdx,
                                      m_editNum->text().toStdString());
-    m_model->cues.setCueName(m_cueIdx, m_editName->text().toStdString());
-    m_model->cues.setCuePreWait(m_cueIdx, m_spinPreWait->value());
-    m_model->cues.setCueGoQuantize(m_cueIdx, m_comboGoQuantize->currentIndex());
-    m_model->cues.setCueAutoContinue(m_cueIdx, m_chkAutoCont->isChecked());
-    m_model->cues.setCueAutoFollow(m_cueIdx, m_chkAutoFollow->isChecked());
+    m_model->cues().setCueName(m_cueIdx, m_editName->text().toStdString());
+    m_model->cues().setCuePreWait(m_cueIdx, m_spinPreWait->value());
+    m_model->cues().setCueGoQuantize(m_cueIdx, m_comboGoQuantize->currentIndex());
+    m_model->cues().setCueAutoContinue(m_cueIdx, m_chkAutoCont->isChecked());
+    m_model->cues().setCueAutoFollow(m_cueIdx, m_chkAutoFollow->isChecked());
     if (c->type == mcp::CueType::Devamp) {
-        m_model->cues.setCueDevampMode(m_cueIdx, m_comboDevampMode->currentIndex());
-        m_model->cues.setCueDevampPreVamp(m_cueIdx, m_chkDevampPreVamp->isChecked());
+        m_model->cues().setCueDevampMode(m_cueIdx, m_comboDevampMode->currentIndex());
+        m_model->cues().setCueDevampPreVamp(m_cueIdx, m_chkDevampPreVamp->isChecked());
     }
     if (c->type == mcp::CueType::Arm)
-        m_model->cues.setCueArmStartTime(m_cueIdx, m_spinArmStart->value());
+        m_model->cues().setCueArmStartTime(m_cueIdx, m_spinArmStart->value());
     if (c->type == mcp::CueType::Marker) {
-        // Target: stored as item data (flat index)
+        // Target: stored as item data (flat index within the target list)
         const int ti = m_comboMarkerTarget->currentData().toInt();
-        m_model->cues.setCueTarget(m_cueIdx, ti);
+        m_model->cues().setCueTarget(m_cueIdx, ti);
         // Marker index: stored as item data
         const int mi = m_comboMarkerMkIdx->currentData().toInt();
-        m_model->cues.setCueMarkerIndex(m_cueIdx, mi);
+        m_model->cues().setCueMarkerIndex(m_cueIdx, mi);
     }
 
     ShowHelpers::syncSfFromCues(*m_model);
+
+    // Write targetListId back — syncSfFromCues overwrites target fields but doesn't preserve it
+    if (c->type == mcp::CueType::Marker && m_comboMarkerTargetList) {
+        const int targetListId = m_comboMarkerTargetList->currentData().toInt();
+        if (auto* sfCue = ShowHelpers::sfCueAt(m_model->sf, m_model->activeListIdx(), m_cueIdx))
+            sfCue->targetListId = targetListId;
+    }
+
     emit cueEdited();
 }
 
 void InspectorWidget::onMasterFaderChanged(float dB) {
     if (m_loading || m_cueIdx < 0) return;
-    m_model->cues.setCueLevel(m_cueIdx, static_cast<double>(dB));
+    m_model->cues().setCueLevel(m_cueIdx, static_cast<double>(dB));
     ShowHelpers::syncSfFromCues(*m_model);
     emit cueEdited();
 }
 
 void InspectorWidget::onLevelFaderChanged(int outCh, float dB) {
     if (m_loading || m_cueIdx < 0) return;
-    m_model->cues.setCueOutLevel(m_cueIdx, outCh, dB);
+    m_model->cues().setCueOutLevel(m_cueIdx, outCh, dB);
     ShowHelpers::syncSfFromCues(*m_model);
     emit cueEdited();
 }
 
 void InspectorWidget::onTrimFaderChanged(float dB) {
     if (m_loading || m_cueIdx < 0) return;
-    m_model->cues.setCueTrim(m_cueIdx, static_cast<double>(dB));
+    m_model->cues().setCueTrim(m_cueIdx, static_cast<double>(dB));
     ShowHelpers::syncSfFromCues(*m_model);
     emit cueEdited();
 }
 
 void InspectorWidget::onFadeMasterTargetChanged(float dB) {
     if (m_loading || m_cueIdx < 0) return;
-    const mcp::Cue* c = m_model->cues.cueAt(m_cueIdx);
+    const mcp::Cue* c = m_model->cues().cueAt(m_cueIdx);
     if (!c || !c->fadeData) return;
-    m_model->cues.setCueFadeMasterTarget(m_cueIdx, c->fadeData->masterLevel.enabled, dB);
+    m_model->cues().setCueFadeMasterTarget(m_cueIdx, c->fadeData->masterLevel.enabled, dB);
     ShowHelpers::syncSfFromCues(*m_model);
     emit cueEdited();
 }
 
 void InspectorWidget::onFadeOutTargetChanged(int outCh, float dB) {
     if (m_loading || m_cueIdx < 0) return;
-    const mcp::Cue* c = m_model->cues.cueAt(m_cueIdx);
+    const mcp::Cue* c = m_model->cues().cueAt(m_cueIdx);
     if (!c || !c->fadeData) return;
     bool en = (outCh < (int)c->fadeData->outLevels.size())
         ? c->fadeData->outLevels[outCh].enabled : false;
-    m_model->cues.setCueFadeOutTarget(m_cueIdx, outCh, en, dB);
+    m_model->cues().setCueFadeOutTarget(m_cueIdx, outCh, en, dB);
     ShowHelpers::syncSfFromCues(*m_model);
     emit cueEdited();
 }
@@ -1536,7 +1635,7 @@ void InspectorWidget::buildScriptTab() {
 
     connect(m_editScript, &ScriptEditorWidget::codeChanged, this, [this](const QString& code) {
         if (m_loading || m_cueIdx < 0) return;
-        m_model->cues.setCueScriptletCode(m_cueIdx, code.toStdString());
+        m_model->cues().setCueScriptletCode(m_cueIdx, code.toStdString());
         m_model->scriptletErrorCues.erase(m_cueIdx);
         m_model->scriptletErrors.erase(m_cueIdx);
         m_editScript->clearErrorLines();
@@ -1550,7 +1649,7 @@ void InspectorWidget::buildScriptTab() {
 }
 
 void InspectorWidget::loadScript() {
-    const mcp::Cue* c = (m_cueIdx >= 0) ? m_model->cues.cueAt(m_cueIdx) : nullptr;
+    const mcp::Cue* c = (m_cueIdx >= 0) ? m_model->cues().cueAt(m_cueIdx) : nullptr;
     if (!c) return;
     const QString cueNum = QString::fromStdString(c->cueNumber);
     m_loading = true;
@@ -1602,29 +1701,29 @@ void InspectorWidget::buildNetworkTab() {
     connect(m_comboPatch, QOverload<int>::of(&QComboBox::currentIndexChanged),
             this, [this](int idx) {
         if (m_loading || m_cueIdx < 0) return;
-        m_model->cues.setCueNetworkPatch(m_cueIdx, idx - 1);  // -1 = "(none)" item
+        m_model->cues().setCueNetworkPatch(m_cueIdx, idx - 1);  // -1 = "(none)" item
         ShowHelpers::syncSfFromCues(*m_model);
         emit cueEdited();
     });
     connect(m_editNetCmd, &QPlainTextEdit::textChanged, this, [this]() {
         if (m_loading || m_cueIdx < 0) return;
-        m_model->cues.setCueNetworkCommand(m_cueIdx, m_editNetCmd->toPlainText().toStdString());
+        m_model->cues().setCueNetworkCommand(m_cueIdx, m_editNetCmd->toPlainText().toStdString());
         ShowHelpers::syncSfFromCues(*m_model);
         emit cueEdited();
     });
 }
 
 void InspectorWidget::loadNetwork() {
-    const mcp::Cue* c = (m_cueIdx >= 0) ? m_model->cues.cueAt(m_cueIdx) : nullptr;
+    const mcp::Cue* c = (m_cueIdx >= 0) ? m_model->cues().cueAt(m_cueIdx) : nullptr;
     if (!c) return;
 
     // Rebuild patch combo from current network setup
     m_comboPatch->blockSignals(true);
     m_comboPatch->clear();
     m_comboPatch->addItem("(none)");
-    const int numPatches = m_model->cues.networkPatchCount();
+    const int numPatches = m_model->cues().networkPatchCount();
     for (int i = 0; i < numPatches; ++i)
-        m_comboPatch->addItem(QString::fromStdString(m_model->cues.networkPatchName(i)));
+        m_comboPatch->addItem(QString::fromStdString(m_model->cues().networkPatchName(i)));
     // Select current patch (+1 because item 0 is "(none)")
     const int patchIdx = c->networkPatchIdx;
     m_comboPatch->setCurrentIndex(patchIdx + 1);
@@ -1716,7 +1815,7 @@ void InspectorWidget::buildMidiTab() {
         } else if (typeKey == "pitchbend") {
             data1 = m_spinMidiBend->value();
         }
-        m_model->cues.setCueMidiMessage(m_cueIdx, typeKey.toStdString(), ch, data1, data2);
+        m_model->cues().setCueMidiMessage(m_cueIdx, typeKey.toStdString(), ch, data1, data2);
         ShowHelpers::syncSfFromCues(*m_model);
         emit cueEdited();
     };
@@ -1724,7 +1823,7 @@ void InspectorWidget::buildMidiTab() {
     connect(m_comboMidiPatch, QOverload<int>::of(&QComboBox::currentIndexChanged),
             this, [this](int idx) {
         if (m_loading || m_cueIdx < 0) return;
-        m_model->cues.setCueMidiPatch(m_cueIdx, idx - 1);  // -1 = "(none)" item
+        m_model->cues().setCueMidiPatch(m_cueIdx, idx - 1);  // -1 = "(none)" item
         ShowHelpers::syncSfFromCues(*m_model);
         emit cueEdited();
     });
@@ -1758,7 +1857,7 @@ void InspectorWidget::updateMidiFields() {
 }
 
 void InspectorWidget::loadMidi() {
-    const mcp::Cue* c = (m_cueIdx >= 0) ? m_model->cues.cueAt(m_cueIdx) : nullptr;
+    const mcp::Cue* c = (m_cueIdx >= 0) ? m_model->cues().cueAt(m_cueIdx) : nullptr;
     if (!c) return;
 
     m_loading = true;
@@ -1767,9 +1866,9 @@ void InspectorWidget::loadMidi() {
     m_comboMidiPatch->blockSignals(true);
     m_comboMidiPatch->clear();
     m_comboMidiPatch->addItem("(none)");
-    const int numPatches = m_model->cues.midiPatchCount();
+    const int numPatches = m_model->cues().midiPatchCount();
     for (int i = 0; i < numPatches; ++i)
-        m_comboMidiPatch->addItem(QString::fromStdString(m_model->cues.midiPatchName(i)));
+        m_comboMidiPatch->addItem(QString::fromStdString(m_model->cues().midiPatchName(i)));
     m_comboMidiPatch->setCurrentIndex(c->midiPatchIdx + 1);
     m_comboMidiPatch->blockSignals(false);
 
@@ -1889,13 +1988,13 @@ void InspectorWidget::buildTimecodeTab() {
         mcp::tcFromString(m_editTcStart->text().toStdString(), startTC);
         mcp::tcFromString(m_editTcEnd->text().toStdString(),   endTC);
 
-        m_model->cues.setCueTcType (m_cueIdx, tcTypeKey.toStdString());
-        m_model->cues.setCueTcFps  (m_cueIdx, fps);
-        m_model->cues.setCueTcStart(m_cueIdx, startTC);
-        m_model->cues.setCueTcEnd  (m_cueIdx, endTC);
-        m_model->cues.setCueTcLtcChannel(m_cueIdx, m_spinLtcCh->value());
+        m_model->cues().setCueTcType (m_cueIdx, tcTypeKey.toStdString());
+        m_model->cues().setCueTcFps  (m_cueIdx, fps);
+        m_model->cues().setCueTcStart(m_cueIdx, startTC);
+        m_model->cues().setCueTcEnd  (m_cueIdx, endTC);
+        m_model->cues().setCueTcLtcChannel(m_cueIdx, m_spinLtcCh->value());
         // MTC patch: combo index 0 = "(none)" → -1
-        m_model->cues.setCueTcMidiPatch(m_cueIdx, m_comboMtcPatch->currentIndex() - 1);
+        m_model->cues().setCueTcMidiPatch(m_cueIdx, m_comboMtcPatch->currentIndex() - 1);
 
         // Update duration display
         if (startTC < endTC) {
@@ -1935,7 +2034,7 @@ void InspectorWidget::updateTimecodeFields() {
 }
 
 void InspectorWidget::loadTimecode() {
-    const mcp::Cue* c = (m_cueIdx >= 0) ? m_model->cues.cueAt(m_cueIdx) : nullptr;
+    const mcp::Cue* c = (m_cueIdx >= 0) ? m_model->cues().cueAt(m_cueIdx) : nullptr;
     if (!c) return;
 
     m_loading = true;
@@ -1990,9 +2089,9 @@ void InspectorWidget::loadTimecode() {
     m_comboMtcPatch->blockSignals(true);
     m_comboMtcPatch->clear();
     m_comboMtcPatch->addItem("(none)");
-    const int numPatches = m_model->cues.midiPatchCount();
+    const int numPatches = m_model->cues().midiPatchCount();
     for (int i = 0; i < numPatches; ++i)
-        m_comboMtcPatch->addItem(QString::fromStdString(m_model->cues.midiPatchName(i)));
+        m_comboMtcPatch->addItem(QString::fromStdString(m_model->cues().midiPatchName(i)));
     m_comboMtcPatch->setCurrentIndex(c->tcMidiPatchIdx + 1);
     m_comboMtcPatch->blockSignals(false);
 
@@ -2118,10 +2217,9 @@ void InspectorWidget::buildTriggersTab() {
 
 void InspectorWidget::loadTriggers() {
     if (m_cueIdx < 0 || !m_model) return;
-    if (m_model->sf.cueLists.empty()) return;
-    const auto& cueDatas = m_model->sf.cueLists[0].cues;
-    if (m_cueIdx >= (int)cueDatas.size()) return;
-    const auto& tr = cueDatas[m_cueIdx].triggers;
+    const auto* sfCue = ShowHelpers::sfCueAt(m_model->sf, m_model->activeListIdx(), m_cueIdx);
+    if (!sfCue) return;
+    const auto& tr = sfCue->triggers;
 
     m_loading = true;
     m_chkHotkeyEnable->setChecked(tr.hotkey.enabled);
@@ -2140,11 +2238,10 @@ void InspectorWidget::loadTriggers() {
 
 void InspectorWidget::saveTriggers() {
     if (m_cueIdx < 0 || !m_model) return;
-    if (m_model->sf.cueLists.empty()) return;
-    auto& cueDatas = m_model->sf.cueLists[0].cues;
-    if (m_cueIdx >= (int)cueDatas.size()) return;
+    auto* sfCue = ShowHelpers::sfCueAt(m_model->sf, m_model->activeListIdx(), m_cueIdx);
+    if (!sfCue) return;
 
-    auto& tr = cueDatas[m_cueIdx].triggers;
+    auto& tr = sfCue->triggers;
 
     tr.hotkey.enabled   = m_chkHotkeyEnable->isChecked();
     tr.hotkey.keyString = m_editHotkey->text().toStdString();

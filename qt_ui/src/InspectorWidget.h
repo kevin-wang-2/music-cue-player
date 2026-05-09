@@ -134,6 +134,7 @@ private:
     QWidget*      m_armGroup{nullptr};
     QDoubleSpinBox* m_spinArmStart{nullptr};
     // Marker-cue-specific (lives in Marker tab)
+    QComboBox*  m_comboMarkerTargetList{nullptr};  // which list to target
     QComboBox*  m_comboMarkerTarget{nullptr};
     QComboBox*  m_comboMarkerMkIdx{nullptr};
 

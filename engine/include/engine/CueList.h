@@ -217,6 +217,16 @@ public:
     // Also updates the stored targetCueNumber to match.
     void setCueTarget     (int index, int targetIndex);
 
+    // Cross-list targeting — set a cross-list target on an existing cue.
+    // When set, fire() will invoke the registered callback instead of acting locally.
+    void setCueCrossListTarget(int idx, int numericId, int flatIdx);
+
+    // Register callbacks invoked when a cross-list Start or Stop cue fires.
+    // Signature: void(int targetListNumericId, int targetFlatIdx)
+    using CrossListCallback = std::function<void(int, int)>;
+    void setCrossListStartCallback(CrossListCallback cb);
+    void setCrossListStopCallback (CrossListCallback cb);
+
     // Marker cue setter: which marker within the target cue.
     void setCueMarkerIndex(int index, int markerIdx);
 
@@ -423,6 +433,9 @@ private:
 
     AudioEngine& m_engine;
     Scheduler&   m_scheduler;
+    // Unique tag base assigned at construction so voice tags never collide with
+    // voices from a different CueList that shares the same AudioEngine.
+    int m_tagBase{0};
     std::vector<Cue> m_cues;
     int m_selectedIndex{0};
     ChannelMap   m_channelMap;
@@ -492,6 +505,10 @@ private:
     // Active MTC generators keyed by cue index.  Protected by m_slotMutex.
     // Stored so stop() / panic() can terminate a running generator immediately.
     std::unordered_map<int, std::shared_ptr<MtcGenerator>> m_activeMtcGens;
+
+    // Cross-list callbacks (set by ShowHelpers::rebuildAllCueLists).
+    CrossListCallback m_crossListStart;
+    CrossListCallback m_crossListStop;
 
     // Returns the StreamReader for voice slot s, or nullptr for non-StreamReader sources.
     StreamReader* slotStreamReader(size_t s) const {

@@ -42,6 +42,8 @@ struct ShowFile {
         // Start / Stop / Arm / Fade cues
         int         target{-1};
         std::string targetCueNumber;
+        // -1 = same list; else numericId of the target CueList.
+        int         targetListId{-1};
         // Arm cues: pre-load the target from this offset (seconds)
         double      armStartTime{0.0};
         // All types
@@ -66,6 +68,8 @@ struct ShowFile {
             std::string name;
             // Cue number of the Marker cue anchored to this marker ("" = none).
             std::string anchorMarkerCueNumber;
+            // -1 = same list as this cue; else numericId of the target CueList.
+            int anchorMarkerListId{-1};
         };
         std::vector<TimeMarker> markers;
         // Marker cues only: which marker within the target cue (-1 = cue start)
@@ -147,6 +151,9 @@ struct ShowFile {
     struct CueListData {
         std::string           id{"main"};
         std::string           name{"Main"};
+        // Stable integer identifier, 1-based, assigned on first save/load.
+        // Used by cross-list references (CueData::targetListId, TimeMarker::anchorMarkerListId).
+        int                   numericId{0};
         std::vector<CueData>  cues;
     };
 
@@ -253,6 +260,28 @@ struct ShowFile {
     OscServerSettings        oscServer;
     ScriptletLibrary         scriptletLibrary;
     std::vector<CueListData> cueLists;
+
+    // ---- Helpers -----------------------------------------------------------
+
+    // Returns a numericId not yet used by any CueListData.
+    int nextListId() const {
+        int mx = 0;
+        for (const auto& cl : cueLists) mx = std::max(mx, cl.numericId);
+        return mx + 1;
+    }
+
+    // Find a CueListData by numericId; returns nullptr if not found.
+    CueListData* findList(int numericId) {
+        for (auto& cl : cueLists) if (cl.numericId == numericId) return &cl;
+        return nullptr;
+    }
+    const CueListData* findList(int numericId) const {
+        for (const auto& cl : cueLists) if (cl.numericId == numericId) return &cl;
+        return nullptr;
+    }
+
+    // Ensure every CueListData has a non-zero numericId. Call after load / on new list.
+    void assignListIds();
 
     // ---- I/O ---------------------------------------------------------------
 

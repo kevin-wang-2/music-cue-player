@@ -61,7 +61,7 @@ int main(int argc, char* argv[]) {
         if (model.sf.load(path, err)) {
             model.showPath = path;
             model.baseDir  = std::filesystem::path(path).parent_path().string();
-            ShowHelpers::rebuildCueList(model, err);
+            ShowHelpers::rebuildAllCueLists(model, err);
         }
     } else {
         model.sf = mcp::ShowFile::empty();

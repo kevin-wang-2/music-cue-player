@@ -1,5 +1,6 @@
 #include "MainWindow.h"
 #include "AppModel.h"
+#include "CueListPanel.h"
 #include "ProjectStatusDialog.h"
 #include "ScriptletLibraryDialog.h"
 #include "ShowInfoDialog.h"
@@ -101,12 +102,18 @@ MainWindow::MainWindow(AppModel* model, QWidget* parent)
 
     buildMenuBar();
 
-    // Central widget holds everything in a vertical stack
+    // Central widget: horizontal — mainArea (stretches) + CueListPanel (right sidebar)
     auto* central = new QWidget(this);
     central->setObjectName("central");
     setCentralWidget(central);
 
-    auto* vlay = new QVBoxLayout(central);
+    auto* hlay = new QHBoxLayout(central);
+    hlay->setContentsMargins(0, 0, 0, 0);
+    hlay->setSpacing(0);
+
+    // Main area (vertical stack)
+    auto* mainArea = new QWidget(central);
+    auto* vlay = new QVBoxLayout(mainArea);
     vlay->setContentsMargins(0, 0, 0, 0);
     vlay->setSpacing(0);
 
@@ -117,6 +124,13 @@ MainWindow::MainWindow(AppModel* model, QWidget* parent)
     vlay->addWidget(findChild<QWidget*>("goBar"));
     vlay->addWidget(findChild<QWidget*>("iconBar"));
     vlay->addWidget(m_splitter, 1);
+
+    hlay->addWidget(mainArea, 1);
+
+    // Right sidebar — CueListPanel
+    m_listPanel = new CueListPanel(model, central);
+    m_listPanel->setVisible(false);  // hidden by default; toggle via View menu
+    hlay->addWidget(m_listPanel, 0);
 
     // Toast
     m_toastLabel = new QLabel(central);
@@ -137,6 +151,11 @@ MainWindow::MainWindow(AppModel* model, QWidget* parent)
 
     // Model wiring
     connect(m_model, &AppModel::cueListChanged,   m_cueTable,  &CueTableView::refresh);
+    connect(m_model, &AppModel::activeListChanged, m_cueTable,  &CueTableView::refresh);
+    connect(m_model, &AppModel::activeListChanged, this, [this](int) {
+        m_inspector->setCueIndex(-1);
+        updateCueInfo();
+    });
     connect(m_model, &AppModel::selectionChanged,  this,        &MainWindow::onRowSelected);
     connect(m_model, &AppModel::playbackStateChanged, m_cueTable, &CueTableView::refreshStatus);
     connect(m_model, &AppModel::dirtyChanged, this, [this](bool) {
@@ -261,12 +280,12 @@ void MainWindow::buildIconBar() {
                 cd.type      = "group";
                 cd.groupMode = "timeline";
                 cd.cueNumber = ShowHelpers::nextCueNumber(m_model->sf);
-                ShowHelpers::sfInsertBefore(m_model->sf, -1, std::move(cd));
+                ShowHelpers::sfInsertBefore(m_model->sf, m_model->activeListIdx(), -1, std::move(cd));
                 std::string err;
-                ShowHelpers::rebuildCueList(*m_model, err);
+                ShowHelpers::rebuildAllCueLists(*m_model, err);
                 onCueListModified();
                 m_cueTable->refresh();
-                m_cueTable->selectRow(m_model->cues.cueCount() - 1);
+                m_cueTable->selectRow(m_model->cues().cueCount() - 1);
             }
             return;
         }
@@ -281,7 +300,7 @@ void MainWindow::buildIconBar() {
                 || typeStr == "arm" || typeStr == "devamp")
                 cd.target = selRow;
             if (typeStr == "marker") {
-                const auto* tc = m_model->cues.cueAt(selRow);
+                const auto* tc = m_model->cues().cueAt(selRow);
                 if (tc && tc->type == mcp::CueType::Audio) {
                     cd.target      = selRow;
                     cd.markerIndex = -1;
@@ -293,15 +312,15 @@ void MainWindow::buildIconBar() {
         // Insert after the selected cue and all its children (for Group cues).
         int ins = (selRow >= 0) ? selRow + 1 : -1;
         if (selRow >= 0) {
-            const auto* sc = m_model->cues.cueAt(selRow);
+            const auto* sc = m_model->cues().cueAt(selRow);
             if (sc && sc->type == mcp::CueType::Group)
                 ins = selRow + 1 + sc->childCount;
         }
-        ShowHelpers::sfInsertBefore(m_model->sf, ins, std::move(cd));
+        ShowHelpers::sfInsertBefore(m_model->sf, m_model->activeListIdx(), ins, std::move(cd));
         std::string err;
-        ShowHelpers::rebuildCueList(*m_model, err);
-        const int newRow = (ins >= 0) ? ins : m_model->cues.cueCount() - 1;
-        m_model->cues.setSelectedIndex(newRow);
+        ShowHelpers::rebuildAllCueLists(*m_model, err);
+        const int newRow = (ins >= 0) ? ins : m_model->cues().cueCount() - 1;
+        m_model->cues().setSelectedIndex(newRow);
         onCueListModified();
         m_cueTable->refresh();
         m_cueTable->selectRow(newRow);
@@ -363,7 +382,7 @@ void MainWindow::buildIconBar() {
     auto* btnStop = makeIconBtn("■", "Stop selected  [Esc]");
     connect(btnStop, &QToolButton::clicked, this, [this]() {
         const int sel = m_cueTable->selectedRow();
-        if (sel >= 0) m_model->cues.stop(sel);
+        if (sel >= 0) m_model->cues().stop(sel);
         m_inspector->clearTimelineArm();
     });
     hlay->addWidget(btnStop);
@@ -372,7 +391,7 @@ void MainWindow::buildIconBar() {
         "QToolButton:hover{background:#4d1a1a;border-color:#aa2222;color:#f88;}"
         "QToolButton:pressed{background:#2f0f0f;}");
     connect(btnPanic, &QToolButton::clicked, this, [this]() {
-        m_model->cues.panic();
+        m_model->panicAll();
         m_inspector->clearTimelineArm();
     });
     hlay->addWidget(btnPanic);
@@ -485,10 +504,20 @@ void MainWindow::buildMenuBar() {
     showMenu->addSeparator();
 
     auto* actPanic = showMenu->addAction("Panic", this, [this]() {
-        m_model->cues.panic();
+        m_model->panicAll();
         m_inspector->clearTimelineArm();
     });
     actPanic->setShortcut(QKeySequence(Qt::Key_Escape));
+
+    // View menu — sidebar toggle
+    auto* viewMenu = mb->addMenu("&View");
+    auto* actLists = viewMenu->addAction("&Cue Lists Sidebar");
+    actLists->setCheckable(true);
+    actLists->setChecked(false);
+    actLists->setShortcut(QKeySequence(Qt::CTRL | Qt::Key_L));
+    connect(actLists, &QAction::toggled, this, [this](bool on) {
+        m_listPanel->setVisible(on);
+    });
 }
 
 // ── slots ──────────────────────────────────────────────────────────────────
@@ -496,11 +525,12 @@ void MainWindow::buildMenuBar() {
 void MainWindow::onTick() {
     m_model->tick();
     m_cueTable->refreshStatus();
+    if (m_listPanel->isVisible()) m_listPanel->refresh();
     m_inspector->updatePlayhead();
 
     // Sync UI selection to engine's selectedIndex (advances after go()).
-    const int engineSel  = m_model->cues.selectedIndex();
-    const int cueCount   = m_model->cues.cueCount();
+    const int engineSel  = m_model->cues().selectedIndex();
+    const int cueCount   = m_model->cues().cueCount();
     const int currentRow = m_cueTable->selectedRow();
     if (engineSel != currentRow) {
         if (engineSel >= 0 && engineSel < cueCount) {
@@ -515,23 +545,23 @@ void MainWindow::onTick() {
     // Priority 1: dedicated MusicContext cue
     int globalMCIdx = -1;
     for (int i = 0; i < cueCount && globalMCIdx < 0; ++i) {
-        const auto* c = m_model->cues.cueAt(i);
-        if (!c || c->type != mcp::CueType::MusicContext || !m_model->cues.hasMusicContext(i)) continue;
-        if (m_model->cues.isCuePlaying(i)) globalMCIdx = i;
+        const auto* c = m_model->cues().cueAt(i);
+        if (!c || c->type != mcp::CueType::MusicContext || !m_model->cues().hasMusicContext(i)) continue;
+        if (m_model->cues().isCuePlaying(i)) globalMCIdx = i;
     }
     // Priority 2: audio/group cue with MC (outermost)
     for (int i = 0; i < cueCount && globalMCIdx < 0; ++i) {
-        const auto* c = m_model->cues.cueAt(i);
-        if (!c || !m_model->cues.hasMusicContext(i)) continue;
+        const auto* c = m_model->cues().cueAt(i);
+        if (!c || !m_model->cues().hasMusicContext(i)) continue;
         if (c->type == mcp::CueType::MusicContext) continue;  // already handled above
-        if (!m_model->cues.isCuePlaying(i)) continue;
+        if (!m_model->cues().isCuePlaying(i)) continue;
         // Outermost = parent has no MC (or top-level)
         if (c->parentIndex < 0) { globalMCIdx = i; break; }
-        if (!m_model->cues.hasMusicContext(c->parentIndex)) { globalMCIdx = i; break; }
+        if (!m_model->cues().hasMusicContext(c->parentIndex)) { globalMCIdx = i; break; }
     }
     if (globalMCIdx >= 0) {
-        const auto* mc = m_model->cues.musicContextOf(globalMCIdx);
-        const double cueRelSec = m_model->cues.cueElapsedSeconds(globalMCIdx);
+        const auto* mc = m_model->cues().musicContextOf(globalMCIdx);
+        const double cueRelSec = m_model->cues().cueElapsedSeconds(globalMCIdx);
         const auto   pos = mc->secondsToMusical(cueRelSec);
         const double bpm = mc->bpmAt(pos.bar, pos.beat, pos.fraction);
         const auto   ts  = mc->timeSigAt(pos.bar, pos.beat);
@@ -552,8 +582,9 @@ void MainWindow::onNewShow() {
     m_model->baseDir.clear();
     m_model->dirty = false;
     m_model->applyScriptletLibrary();
+    ShowHelpers::normalizeListRefs(m_model->sf);
     std::string err;
-    ShowHelpers::rebuildCueList(*m_model, err);
+    ShowHelpers::rebuildAllCueLists(*m_model, err);
     m_cueTable->refresh();
     m_inspector->setCueIndex(-1);
     updateCueInfo();
@@ -618,8 +649,8 @@ void MainWindow::onOpenSettings() {
     }
 
     std::string err;
-    ShowHelpers::rebuildCueList(*m_model, err);
-    m_inspector->setCueIndex(m_model->cues.selectedIndex());
+    ShowHelpers::rebuildAllCueLists(*m_model, err);
+    m_inspector->setCueIndex(m_model->cues().selectedIndex());
     updateTitle();
 }
 
@@ -636,11 +667,11 @@ void MainWindow::onCueListModified() {
 void MainWindow::onUndo() {
     if (!m_model->canUndo()) return;
     if (!m_model->sf.cueLists.empty())
-        m_model->redoStack.push_back(m_model->sf.cueLists[0].cues);
-    m_model->sf.cueLists[0].cues = std::move(m_model->undoStack.back());
+        m_model->redoStack.push_back(m_model->sf.cueLists);
+    m_model->sf.cueLists = std::move(m_model->undoStack.back());
     m_model->undoStack.pop_back();
     std::string err;
-    ShowHelpers::rebuildCueList(*m_model, err);
+    ShowHelpers::rebuildAllCueLists(*m_model, err);
     m_model->dirty = true;
     emit m_model->dirtyChanged(true);
     m_cueTable->refresh();
@@ -658,11 +689,11 @@ void MainWindow::onUndo() {
 void MainWindow::onRedo() {
     if (!m_model->canRedo()) return;
     if (!m_model->sf.cueLists.empty())
-        m_model->undoStack.push_back(m_model->sf.cueLists[0].cues);
-    m_model->sf.cueLists[0].cues = std::move(m_model->redoStack.back());
+        m_model->undoStack.push_back(m_model->sf.cueLists);
+    m_model->sf.cueLists = std::move(m_model->redoStack.back());
     m_model->redoStack.pop_back();
     std::string err;
-    ShowHelpers::rebuildCueList(*m_model, err);
+    ShowHelpers::rebuildAllCueLists(*m_model, err);
     m_model->dirty = true;
     emit m_model->dirtyChanged(true);
     m_cueTable->refresh();
@@ -684,7 +715,7 @@ void MainWindow::onRenumberCues() {
     for (const auto& idx : m_cueTable->selectionModel()->selectedRows())
         rows.push_back(idx.row());
     if (rows.empty()) {
-        const int n = m_model->cues.cueCount();
+        const int n = m_model->cues().cueCount();
         for (int i = 0; i < n; ++i) rows.push_back(i);
     }
     std::sort(rows.begin(), rows.end());
@@ -713,7 +744,7 @@ void MainWindow::onRenumberCues() {
 
     int reIdx = 0;
     for (const int row : rows) {
-        auto* cd = ShowHelpers::sfCueAt(m_model->sf, row);
+        auto* cd = ShowHelpers::sfCueAt(m_model->sf, m_model->activeListIdx(), row);
         if (!cd) continue;
 
         std::string base;
@@ -730,13 +761,13 @@ void MainWindow::onRenumberCues() {
     }
 
     std::string err;
-    ShowHelpers::rebuildCueList(*m_model, err);
+    ShowHelpers::rebuildAllCueLists(*m_model, err);
     onCueListModified();
     m_cueTable->refresh();
 }
 
 void MainWindow::onRowSelected(int idx) {
-    if (idx >= 0) m_model->cues.setSelectedIndex(idx);
+    if (idx >= 0) m_model->cues().setSelectedIndex(idx);
     m_model->multiSel.clear();
     if (idx >= 0) m_model->multiSel.insert(idx);
     m_inspector->setCueIndex(idx);
@@ -801,18 +832,30 @@ bool MainWindow::eventFilter(QObject* obj, QEvent* ev) {
     const QKeySequence ks(ke->modifiers() | k);
     const std::string ksStr = ks.toString(QKeySequence::PortableText).toStdString();
 
-    if (!m_model->sf.cueLists.empty()) {
-        const auto& cueDatas = m_model->sf.cueLists[0].cues;
-        for (int i = 0; i < (int)cueDatas.size(); ++i) {
-            const auto& ht = cueDatas[i].triggers.hotkey;
-            if (ht.enabled && !ht.keyString.empty() && ht.keyString == ksStr) {
-                m_model->cues.start(i);
-                emit m_model->externalTriggerFired(i);
-                emit m_model->playbackStateChanged();
-                return true;
+    // Hotkeys fire on all lists, including background ones.
+    bool hotkeyFired = false;
+    for (int li = 0; li < m_model->listCount(); ++li) {
+        if (li >= (int)m_model->sf.cueLists.size()) break;
+        auto& engList = m_model->cueListAt(li);
+        int counter = 0;
+        std::function<void(const std::vector<mcp::ShowFile::CueData>&)> visit;
+        visit = [&](const std::vector<mcp::ShowFile::CueData>& cues) {
+            for (const auto& cd : cues) {
+                const int flatIdx = counter++;
+                const auto& ht = cd.triggers.hotkey;
+                if (ht.enabled && !ht.keyString.empty() && ht.keyString == ksStr) {
+                    engList.start(flatIdx);
+                    if (li == m_model->activeListIdx()) emit m_model->externalTriggerFired(flatIdx);
+                    emit m_model->playbackStateChanged();
+                    hotkeyFired = true;
+                    return;
+                }
+                if (!cd.children.empty()) visit(cd.children);
             }
-        }
+        };
+        visit(m_model->sf.cueLists[static_cast<size_t>(li)].cues);
     }
+    if (hotkeyFired) return true;  // consume event — don't propagate to Go button etc.
     return QMainWindow::eventFilter(obj, ev);
 }
 
@@ -838,7 +881,8 @@ void MainWindow::loadShowFile(const QString& path) {
     m_model->dirty    = false;
     m_model->applyOscSettings();
     m_model->applyScriptletLibrary();
-    ShowHelpers::rebuildCueList(*m_model, err);
+    ShowHelpers::normalizeListRefs(m_model->sf);  // resolve any -1 list refs from older files
+    ShowHelpers::rebuildAllCueLists(*m_model, err);
     m_cueTable->refresh();
     m_inspector->setCueIndex(-1);
     updateCueInfo();
@@ -859,7 +903,7 @@ void MainWindow::updateTitle() {
 
 void MainWindow::updateCueInfo() {
     const int idx = m_cueTable->selectedRow();
-    const mcp::Cue* c = (idx >= 0) ? m_model->cues.cueAt(idx) : nullptr;
+    const mcp::Cue* c = (idx >= 0) ? m_model->cues().cueAt(idx) : nullptr;
     if (!c) {
         m_lblCueName->setText("—");
         m_lblCueDetail->clear();

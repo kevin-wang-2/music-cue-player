@@ -7,6 +7,7 @@
 #include "MidiSender.h"
 #include "NetworkSender.h"
 #include <algorithm>
+#include <atomic>
 #include <chrono>
 #include <cmath>
 #include <limits>
@@ -14,9 +15,16 @@
 
 namespace mcp {
 
+// Each CueList instance gets a unique block of tag space so that voice tags from
+// different CueLists sharing the same AudioEngine never collide.
+static constexpr int kTagStride = 1'000'000;  // supports up to 1M cues per list
+static std::atomic<int> s_nextTagBase{0};
 
 CueList::CueList(AudioEngine& engine, Scheduler& scheduler)
-    : m_engine(engine), m_scheduler(scheduler) {}
+    : m_engine(engine)
+    , m_scheduler(scheduler)
+    , m_tagBase(s_nextTagBase.fetch_add(kTagStride, std::memory_order_relaxed))
+{}
 
 CueList::~CueList() { panic(); }
 
@@ -689,6 +697,15 @@ void CueList::setCueTarget(int i, int targetIdx) {
     if (m_cues[i].fadeData) m_cues[i].fadeData->resolvedTargetIdx = targetIdx;
 }
 
+void CueList::setCueCrossListTarget(int i, int numericId, int flatIdx) {
+    if (i < 0 || i >= cueCount()) return;
+    m_cues[i].crossListNumericId = numericId;
+    m_cues[i].crossListFlatIdx   = flatIdx;
+}
+
+void CueList::setCrossListStartCallback(CrossListCallback cb) { m_crossListStart = std::move(cb); }
+void CueList::setCrossListStopCallback (CrossListCallback cb) { m_crossListStop  = std::move(cb); }
+
 void CueList::setCueDevampMode   (int i, int mode) { if (i>=0&&i<cueCount()&&m_cues[i].type==CueType::Devamp) m_cues[i].devampMode    = mode; }
 void CueList::setCueDevampPreVamp(int i, bool v)   { if (i>=0&&i<cueCount()&&m_cues[i].type==CueType::Devamp) m_cues[i].devampPreVamp = v; }
 
@@ -1274,7 +1291,7 @@ int64_t CueList::scheduleVoice(int cueIndex) {
             const int slot = m_engine.scheduleStreamingVoice(
                 devReader.get(),
                 totalFrames > 0 ? totalFrames : INT64_MAX / 2,
-                devPhysCh, cueIndex, gain, d);
+                devPhysCh, m_tagBase + cueIndex, gain, d);
             if (slot < 0) continue;
 
             std::lock_guard<std::mutex> lk(m_slotMutex);
@@ -1309,7 +1326,7 @@ int64_t CueList::scheduleVoice(int cueIndex) {
 
     const int slot = m_engine.scheduleStreamingVoice(
         reader.get(), totalFrames > 0 ? totalFrames : INT64_MAX / 2,
-        outCh, cueIndex, gain);
+        outCh, m_tagBase + cueIndex, gain);
     if (slot < 0) return -1;
 
     std::lock_guard<std::mutex> lk(m_slotMutex);
@@ -1332,16 +1349,26 @@ bool CueList::fire(int idx) {
         }
 
         case CueType::Start: {
-            const int ti = cue.targetIndex;
-            if (ti >= 0 && ti < cueCount() && m_cues[ti].type == CueType::Audio) {
-                const int64_t out = scheduleVoice(ti);
-                result       = (out >= 0);
-                followFrames = result ? out : 0;
+            if (cue.crossListNumericId != -1) {
+                if (m_crossListStart) m_crossListStart(cue.crossListNumericId, cue.crossListFlatIdx);
+                result = true;
+            } else {
+                const int ti = cue.targetIndex;
+                if (ti >= 0 && ti < cueCount() && m_cues[ti].type == CueType::Audio) {
+                    const int64_t out = scheduleVoice(ti);
+                    result       = (out >= 0);
+                    followFrames = result ? out : 0;
+                }
             }
             break;
         }
 
         case CueType::Stop: {
+            if (cue.crossListNumericId != -1) {
+                if (m_crossListStop) m_crossListStop(cue.crossListNumericId, cue.crossListFlatIdx);
+                result = true;
+                break;
+            }
             const int ti = cue.targetIndex;
             // Block stop if the target is a direct child of a SyncGroup
             bool blocked = false;
@@ -1353,7 +1380,7 @@ bool CueList::fire(int idx) {
                            m_cues[pi].groupData->mode == GroupData::Mode::Sync);
             }
             if (!blocked) {
-                m_engine.clearVoicesByTag(ti);
+                m_engine.clearVoicesByTag(m_tagBase + ti);
                 result = true;
             }
             break;
@@ -1570,9 +1597,9 @@ bool CueList::fire(int idx) {
                                 if (tc2.type == CueType::Group) {
                                     for (int di = tIdx + 1;
                                          di <= tIdx + tc2.childCount && di < cueCount(); ++di)
-                                        m_engine.clearVoicesByTag(di);
+                                        m_engine.clearVoicesByTag(m_tagBase + di);
                                 } else {
-                                    m_engine.clearVoicesByTag(tIdx);
+                                    m_engine.clearVoicesByTag(m_tagBase + tIdx);
                                 }
                             }
                         }
@@ -1693,7 +1720,7 @@ bool CueList::fire(int idx) {
                 const int64_t totalFrames = reader->totalOutputFrames();
                 const int slot = m_engine.scheduleStreamingVoice(
                     reader.get(), totalFrames > 0 ? totalFrames : INT64_MAX / 2,
-                    outCh, idx, 1.0f);
+                    outCh, m_tagBase + idx, 1.0f);
                 if (slot >= 0) {
                     std::lock_guard<std::mutex> lk(m_slotMutex);
                     m_cueRuntime[static_cast<size_t>(idx)].slotByDevice[0] = slot;
@@ -1948,7 +1975,7 @@ void CueList::stop(int index) {
     int evtId = -1;
     { std::lock_guard<std::mutex> lk(m_slotMutex); evtId = m_pendingEventId[index]; m_pendingEventId[index] = -1; }
     if (evtId >= 0) m_scheduler.cancel(evtId);
-    m_engine.clearVoicesByTag(index);
+    m_engine.clearVoicesByTag(m_tagBase + index);
     // Clear timeline arm position on group stop so next GO starts from 0.
     if (m_cues[index].type == CueType::Group)
         m_cues[index].timelineArmSec = 0.0;
@@ -1999,7 +2026,12 @@ void CueList::panic() {
 // ---------------------------------------------------------------------------
 // Queries
 
-bool CueList::isAnyCuePlaying() const { return m_engine.activeVoiceCount() > 0; }
+bool CueList::isAnyCuePlaying() const {
+    const int n = cueCount();
+    for (int i = 0; i < n; ++i)
+        if (isCuePlaying(i)) return true;
+    return false;
+}
 
 bool CueList::isCuePlaying(int index) const {
     if (index < 0 || index >= cueCount()) return false;
@@ -2007,11 +2039,11 @@ bool CueList::isCuePlaying(int index) const {
     if (m_cues[index].type == CueType::MusicContext ||
         m_cues[index].type == CueType::Timecode)
         return m_cueFireFrame[static_cast<size_t>(index)] >= 0;
-    if (m_engine.anyVoiceActiveWithTag(index)) return true;
+    if (m_engine.anyVoiceActiveWithTag(m_tagBase + index)) return true;
     const auto* cue = cueAt(index);
     if (cue && cue->type == CueType::Group && cue->childCount > 0) {
         for (int i = index + 1; i <= index + cue->childCount; ++i)
-            if (m_engine.anyVoiceActiveWithTag(i)) return true;
+            if (m_engine.anyVoiceActiveWithTag(m_tagBase + i)) return true;
     }
     return false;
 }
@@ -2111,7 +2143,7 @@ bool CueList::isFadeActive(int index) const {
 int CueList::activeCueCount() const {
     int n = 0;
     for (int i = 0; i < cueCount(); ++i)
-        if (m_engine.anyVoiceActiveWithTag(i)) ++n;
+        if (m_engine.anyVoiceActiveWithTag(m_tagBase + i)) ++n;
     return n;
 }
 
@@ -2257,7 +2289,7 @@ void CueList::stopSyncGroupChildren(int gi) {
     const auto& g = m_cues[gi];
     for (int i = gi + 1; i <= gi + g.childCount && i < cueCount(); ++i)
         if (m_cues[i].type == CueType::Audio)
-            m_engine.clearVoicesByTag(i);
+            m_engine.clearVoicesByTag(m_tagBase + i);
 }
 
 void CueList::fireSyncGroup(int gi, double armPos, int64_t originFrame) {
