@@ -1,5 +1,6 @@
 #pragma once
 
+#include "engine/AudioEngine.h"
 #include "engine/ShowFile.h"
 
 #include <QDialog>
@@ -10,6 +11,7 @@ class QCheckBox;
 class QComboBox;
 class QDoubleSpinBox;
 class QGridLayout;
+class QLabel;
 class QLineEdit;
 class QListWidget;
 class QPushButton;
@@ -23,7 +25,7 @@ class QWidget;
 // Multi-section settings dialog.
 //
 // Left sidebar (QListWidget) switches between sections:
-//   Audio    — Channels tab + Crosspoint tab
+//   Audio    — Devices tab + Channels tab + Crosspoint tab
 //   Network  — Network Output tab + OSC Server tab
 //   MIDI     — MIDI Output tab
 //   Controls — MIDI Learn tab + OSC tab (system action bindings)
@@ -41,7 +43,10 @@ public:
     mcp::SystemControlBindings     controlsResult() const { return m_systemControls; }
 
 private slots:
-    // Audio section
+    // Audio — device section
+    void onAddDevice();
+    void onRemoveDevice();
+    // Audio — channel section
     void onAddChannel();
     void onRemoveChannel();
     // Network section
@@ -54,17 +59,23 @@ private slots:
 private:
     // ── Audio tab helpers ──────────────────────────────────────────────────
     void buildAudioPage();
+    void buildDevicesTab();
     void buildChannelsTab();
     void buildXpTab();
+    void rebuildDevicesTable();
+    void rebuildMasterCombo();
     void rebuildChannelsTable();
     void rebuildXpGrid();
+    void syncDevicesFromTable();
     void syncChannelsFromTable();
     void syncXpFromGrid();
+    void updateAudioWarnings();
+    int  totalPhysOutputs() const;
 
     // ── Network tab helpers ────────────────────────────────────────────────
     void buildNetworkPage();
     void buildNetworkOutputTab();
-    void buildOscServerTab();       // OSC server tab inside Network section
+    void buildOscServerTab();
     void syncNetworkFromTable();
     void syncOscFromUI();
     void rebuildAccessList();
@@ -84,6 +95,7 @@ private:
 
     AppModel* m_model{nullptr};
     int       m_numPhys{2};
+    std::vector<mcp::DeviceInfo> m_paDevices;  // cached PA device list
 
     mcp::ShowFile::AudioSetup      m_audioSetup;
     mcp::ShowFile::NetworkSetup    m_networkSetup;
@@ -95,11 +107,20 @@ private:
     QListWidget*    m_sidebar{nullptr};
     QStackedWidget* m_stack{nullptr};
 
-    // Audio section
+    // Audio section — devices tab
+    QTableWidget* m_devTable{nullptr};
+    QPushButton*  m_btnAddDev{nullptr};
+    QPushButton*  m_btnRemoveDev{nullptr};
+    QComboBox*    m_masterCombo{nullptr};
+    QLabel*       m_audioWarnLabel{nullptr};
+
+    // Audio section — channels tab
     QTabWidget*   m_audioTabs{nullptr};
     QTableWidget* m_chanTable{nullptr};
     QPushButton*  m_btnAddChan{nullptr};
     QPushButton*  m_btnRemoveChan{nullptr};
+
+    // Audio section — crosspoint tab
     QScrollArea*  m_xpScroll{nullptr};
     QWidget*      m_xpContent{nullptr};
     QGridLayout*  m_xpGrid{nullptr};

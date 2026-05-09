@@ -85,11 +85,38 @@ bool rebuildCueList(AppModel& m, std::string& /*err*/) {
 
     // Build and install the channel map so applyRoutingToReader folds correctly.
     {
-        const int numPhys = m.engineOk ? m.engine.channels() : 2;
+        const auto& setup = m.sf.audioSetup;
+        const bool isMultiDevice = !setup.devices.empty();
+
+        // Total physical output count: sum of all device channel counts in
+        // multi-device mode, or the single engine output count in legacy mode.
+        int numPhys = 0;
+        if (isMultiDevice) {
+            for (const auto& d : setup.devices) numPhys += d.channelCount;
+        } else {
+            numPhys = m.engineOk ? m.engine.channels() : 2;
+        }
+
         mcp::ChannelMap cm;
         cm.numPhys = numPhys;
-        const auto& setup = m.sf.audioSetup;
         cm.numCh = static_cast<int>(setup.channels.size());
+
+        // Multi-device: fill physDevice / physLocalCh / devicePhysCount.
+        if (isMultiDevice) {
+            const int numDev = static_cast<int>(setup.devices.size());
+            cm.devicePhysCount.resize(static_cast<size_t>(numDev), 0);
+            cm.physDevice.resize(static_cast<size_t>(numPhys), 0);
+            cm.physLocalCh.resize(static_cast<size_t>(numPhys), 0);
+            int gp = 0;
+            for (int d = 0; d < numDev; ++d) {
+                const int cnt = setup.devices[static_cast<size_t>(d)].channelCount;
+                cm.devicePhysCount[static_cast<size_t>(d)] = cnt;
+                for (int lp = 0; lp < cnt; ++lp, ++gp) {
+                    cm.physDevice[static_cast<size_t>(gp)]  = d;
+                    cm.physLocalCh[static_cast<size_t>(gp)] = lp;
+                }
+            }
+        }
 
         if (cm.numCh == 0) {
             // No audio setup: identity map (legacy / new empty show)

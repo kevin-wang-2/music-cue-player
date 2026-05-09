@@ -38,7 +38,7 @@ bool CueList::addCue(const std::string& path, const std::string& name,
 
     m_cues.push_back(std::move(cue));
     std::lock_guard<std::mutex> lk(m_slotMutex);
-    m_lastSlot.push_back(-1);
+    m_cueRuntime.push_back({});
     m_pendingEventId.push_back(-1);
     m_cueFireFrame.push_back(-1);
     m_cueFireArmBase.push_back(0.0);
@@ -56,7 +56,7 @@ bool CueList::addStartCue(int targetIndex, const std::string& name, double preWa
                              : name;
     m_cues.push_back(std::move(cue));
     std::lock_guard<std::mutex> lk(m_slotMutex);
-    m_lastSlot.push_back(-1);
+    m_cueRuntime.push_back({});
     m_pendingEventId.push_back(-1);
     m_cueFireFrame.push_back(-1);
     m_cueFireArmBase.push_back(0.0);
@@ -74,7 +74,7 @@ bool CueList::addStopCue(int targetIndex, const std::string& name, double preWai
                              : name;
     m_cues.push_back(std::move(cue));
     std::lock_guard<std::mutex> lk(m_slotMutex);
-    m_lastSlot.push_back(-1);
+    m_cueRuntime.push_back({});
     m_pendingEventId.push_back(-1);
     m_cueFireFrame.push_back(-1);
     m_cueFireArmBase.push_back(0.0);
@@ -101,7 +101,7 @@ bool CueList::addFadeCue(int resolvedTargetIdx, const std::string& targetCueNumb
     cue.fadeData->stopWhenDone      = stopWhenDone;
     m_cues.push_back(std::move(cue));
     std::lock_guard<std::mutex> lk(m_slotMutex);
-    m_lastSlot.push_back(-1);
+    m_cueRuntime.push_back({});
     m_pendingEventId.push_back(-1);
     m_cueFireFrame.push_back(-1);
     m_cueFireArmBase.push_back(0.0);
@@ -119,7 +119,7 @@ bool CueList::addBrokenAudioCue(const std::string& path, const std::string& name
     // Intentionally skip loadMetadata — this is a placeholder/broken cue.
     m_cues.push_back(std::move(cue));
     std::lock_guard<std::mutex> lk(m_slotMutex);
-    m_lastSlot.push_back(-1);
+    m_cueRuntime.push_back({});
     m_pendingEventId.push_back(-1);
     m_cueFireFrame.push_back(-1);
     m_cueFireArmBase.push_back(0.0);
@@ -137,7 +137,7 @@ bool CueList::addArmCue(int targetIndex, const std::string& name, double preWait
                              : name;
     m_cues.push_back(std::move(cue));
     std::lock_guard<std::mutex> lk(m_slotMutex);
-    m_lastSlot.push_back(-1);
+    m_cueRuntime.push_back({});
     m_pendingEventId.push_back(-1);
     m_cueFireFrame.push_back(-1);
     m_cueFireArmBase.push_back(0.0);
@@ -157,7 +157,7 @@ bool CueList::addDevampCue(int targetIndex, const std::string& name, double preW
                              : name;
     m_cues.push_back(std::move(cue));
     std::lock_guard<std::mutex> lk(m_slotMutex);
-    m_lastSlot.push_back(-1);
+    m_cueRuntime.push_back({});
     m_pendingEventId.push_back(-1);
     m_cueFireFrame.push_back(-1);
     m_cueFireArmBase.push_back(0.0);
@@ -176,7 +176,7 @@ bool CueList::addGroupCue(GroupData::Mode mode, bool random,
     cue.groupData->random = random;
     m_cues.push_back(std::move(cue));
     std::lock_guard<std::mutex> lk(m_slotMutex);
-    m_lastSlot.push_back(-1);
+    m_cueRuntime.push_back({});
     m_pendingEventId.push_back(-1);
     m_cueFireFrame.push_back(-1);
     m_cueFireArmBase.push_back(0.0);
@@ -191,7 +191,7 @@ bool CueList::addMCCue(const std::string& name, double preWait) {
     cue.name           = name.empty() ? "MC" : name;
     m_cues.push_back(std::move(cue));
     std::lock_guard<std::mutex> lk(m_slotMutex);
-    m_lastSlot.push_back(-1);
+    m_cueRuntime.push_back({});
     m_pendingEventId.push_back(-1);
     m_cueFireFrame.push_back(-1);
     m_cueFireArmBase.push_back(0.0);
@@ -211,7 +211,7 @@ bool CueList::addMarkerCue(int targetIndex, int markerIndex,
         : name;
     m_cues.push_back(std::move(cue));
     std::lock_guard<std::mutex> lk(m_slotMutex);
-    m_lastSlot.push_back(-1);
+    m_cueRuntime.push_back({});
     m_pendingEventId.push_back(-1);
     m_cueFireFrame.push_back(-1);
     m_cueFireArmBase.push_back(0.0);
@@ -227,7 +227,7 @@ bool CueList::addGotoCue(int targetIndex, const std::string& name, double preWai
     cue.name           = name.empty() ? "Goto" : name;
     m_cues.push_back(std::move(cue));
     std::lock_guard<std::mutex> lk(m_slotMutex);
-    m_lastSlot.push_back(-1);
+    m_cueRuntime.push_back({});
     m_pendingEventId.push_back(-1);
     m_cueFireFrame.push_back(-1);
     m_cueFireArmBase.push_back(0.0);
@@ -242,7 +242,7 @@ bool CueList::addMemoCue(const std::string& name, double preWait) {
     cue.name           = name.empty() ? "Memo" : name;
     m_cues.push_back(std::move(cue));
     std::lock_guard<std::mutex> lk(m_slotMutex);
-    m_lastSlot.push_back(-1);
+    m_cueRuntime.push_back({});
     m_pendingEventId.push_back(-1);
     m_cueFireFrame.push_back(-1);
     m_cueFireArmBase.push_back(0.0);
@@ -257,7 +257,7 @@ bool CueList::addScriptletCue(const std::string& name, double preWait) {
     cue.name           = name.empty() ? "Scriptlet" : name;
     m_cues.push_back(std::move(cue));
     std::lock_guard<std::mutex> lk(m_slotMutex);
-    m_lastSlot.push_back(-1);
+    m_cueRuntime.push_back({});
     m_pendingEventId.push_back(-1);
     m_cueFireFrame.push_back(-1);
     m_cueFireArmBase.push_back(0.0);
@@ -292,7 +292,7 @@ bool CueList::addNetworkCue(const std::string& name, double preWait) {
     cue.name           = name.empty() ? "Network Cue" : name;
     m_cues.push_back(std::move(cue));
     std::lock_guard<std::mutex> lk(m_slotMutex);
-    m_lastSlot.push_back(-1);
+    m_cueRuntime.push_back({});
     m_pendingEventId.push_back(-1);
     m_cueFireFrame.push_back(-1);
     m_cueFireArmBase.push_back(0.0);
@@ -331,7 +331,7 @@ bool CueList::addMidiCue(const std::string& name, double preWait) {
     cue.name           = name.empty() ? "MIDI Cue" : name;
     m_cues.push_back(std::move(cue));
     std::lock_guard<std::mutex> lk(m_slotMutex);
-    m_lastSlot.push_back(-1);
+    m_cueRuntime.push_back({});
     m_pendingEventId.push_back(-1);
     m_cueFireFrame.push_back(-1);
     m_cueFireArmBase.push_back(0.0);
@@ -376,7 +376,7 @@ bool CueList::addTimecodeCue(const std::string& name, double preWait) {
     cue.name           = name.empty() ? "Timecode Cue" : name;
     m_cues.push_back(std::move(cue));
     std::lock_guard<std::mutex> lk(m_slotMutex);
-    m_lastSlot.push_back(-1);
+    m_cueRuntime.push_back({});
     m_pendingEventId.push_back(-1);
     m_cueFireFrame.push_back(-1);
     m_cueFireArmBase.push_back(0.0);
@@ -429,7 +429,7 @@ void CueList::clear() {
     }
     m_cues.clear();
     std::lock_guard<std::mutex> lk(m_slotMutex);
-    m_lastSlot.clear();
+    m_cueRuntime.clear();
     m_pendingEventId.clear();
     m_cueFireFrame.clear();
     m_cueFireArmBase.clear();
@@ -551,7 +551,7 @@ void CueList::update() {
             StreamReader* raw = nullptr;
             {
                 std::lock_guard<std::mutex> lk(m_slotMutex);
-                const int slot = m_lastSlot[it->watchCueIdx];
+                const int slot = m_cueRuntime[static_cast<size_t>(it->watchCueIdx)].canonicalSlot();
                 if (slot >= 0) raw = slotStreamReader(static_cast<size_t>(slot));
             }
             if (raw && raw->wasDevampFired()) {
@@ -580,7 +580,10 @@ void CueList::update() {
             m_slotStream[s].reset();
             // Clear fire frame for Timecode LTC cues whose voice just ended.
             for (int ci = 0; ci < cueCount(); ++ci) {
-                if (m_cues[ci].type == CueType::Timecode && m_lastSlot[ci] == s)
+                if (m_cues[ci].type == CueType::Timecode && [&](){
+                    for (const auto& kv : m_cueRuntime[static_cast<size_t>(ci)].slotByDevice)
+                        if (kv.second == s) return true;
+                    return false; }())
                     m_cueFireFrame[static_cast<size_t>(ci)] = -1;
             }
         }
@@ -601,7 +604,7 @@ void CueList::update() {
 
         if (cue.type == CueType::Audio) {
             int slot;
-            { std::lock_guard<std::mutex> lk(m_slotMutex); slot = m_lastSlot[static_cast<size_t>(i)]; }
+            { std::lock_guard<std::mutex> lk(m_slotMutex); slot = m_cueRuntime[static_cast<size_t>(i)].canonicalSlot(); }
             const double curr = (slot >= 0 && m_engine.isVoiceActive(slot))
                                 ? cuePlayheadFileSeconds(i) : 0.0;
 
@@ -904,7 +907,7 @@ void CueList::setChannelMap(ChannelMap map) {
 void CueList::setCueOutLevelGain(int cueIdx, int ch, float linGain) {
     if (cueIdx < 0 || cueIdx >= cueCount() || ch < 0) return;
     int slot;
-    { std::lock_guard<std::mutex> lk(m_slotMutex); slot = m_lastSlot[static_cast<size_t>(cueIdx)]; }
+    { std::lock_guard<std::mutex> lk(m_slotMutex); slot = m_cueRuntime[static_cast<size_t>(cueIdx)].canonicalSlot(); }
     if (slot < 0 || !m_slotStream[static_cast<size_t>(slot)]) return;
     auto& r = m_slotStream[static_cast<size_t>(slot)];
     if (m_channelMap.numCh > 0 && ch < m_channelMap.numCh)
@@ -916,7 +919,7 @@ void CueList::setCueOutLevelGain(int cueIdx, int ch, float linGain) {
 void CueList::setCueXpointGain(int cueIdx, int srcCh, int ch, float linGain) {
     if (cueIdx < 0 || cueIdx >= cueCount() || srcCh < 0 || ch < 0) return;
     int slot;
-    { std::lock_guard<std::mutex> lk(m_slotMutex); slot = m_lastSlot[static_cast<size_t>(cueIdx)]; }
+    { std::lock_guard<std::mutex> lk(m_slotMutex); slot = m_cueRuntime[static_cast<size_t>(cueIdx)].canonicalSlot(); }
     if (slot < 0 || !m_slotStream[static_cast<size_t>(slot)]) return;
     auto& r = m_slotStream[static_cast<size_t>(slot)];
     if (m_channelMap.numCh > 0 && ch < m_channelMap.numCh)
@@ -982,8 +985,9 @@ void CueList::applyRoutingToSource(const Cue& cue, IAudioSource& reader,
                     ch < (int)cue.routing.xpoint[static_cast<size_t>(s)].size() &&
                     cue.routing.xpoint[static_cast<size_t>(s)][static_cast<size_t>(ch)].has_value())
                     xpLin = lut::dBToLinear(*cue.routing.xpoint[static_cast<size_t>(s)][static_cast<size_t>(ch)]);
-                else
-                    xpLin = (s == ch) ? 1.0f : 0.0f;
+                else if (cue.routing.xpoint.empty())
+                    xpLin = (s == ch) ? 1.0f : 0.0f;  // fresh cue: identity default
+                // else: xpoint configured but cell cleared → silence (0.0f)
                 total += xpLin * chanOutLev[static_cast<size_t>(ch)] * foldG;
             }
             if (total > 1e-10f)
@@ -993,6 +997,73 @@ void CueList::applyRoutingToSource(const Cue& cue, IAudioSource& reader,
 
     std::vector<float> physOutLev(static_cast<size_t>(physOutCh), 1.0f);
     reader.setRouting(std::move(physXp), std::move(physOutLev), physOutCh);
+}
+
+void CueList::applyRoutingToSourceForDevice(const Cue& cue, IAudioSource& reader,
+                                             int srcCh, int deviceIdx) {
+    if (m_channelMap.physDevice.empty()) {
+        // Fallback to legacy path if no device info (should not happen in practice).
+        applyRoutingToSource(cue, reader, srcCh, m_engine.channels());
+        return;
+    }
+
+    const int devPhysCh = (deviceIdx < (int)m_channelMap.devicePhysCount.size())
+        ? m_channelMap.devicePhysCount[static_cast<size_t>(deviceIdx)] : 0;
+    if (devPhysCh <= 0) return;
+
+    const int numCh = (m_channelMap.numCh > 0) ? m_channelMap.numCh : devPhysCh;
+
+    std::vector<float> chanOutLev(static_cast<size_t>(numCh), 1.0f);
+    for (int ch = 0; ch < numCh && ch < (int)cue.routing.outLevelDb.size(); ++ch)
+        chanOutLev[static_cast<size_t>(ch)] =
+            lut::dBToLinear(cue.routing.outLevelDb[static_cast<size_t>(ch)]);
+
+    // Collect global physical outputs that belong to this device, in local order.
+    std::vector<int> globalToLocal(static_cast<size_t>(m_channelMap.numPhys), -1);
+    int lp = 0;
+    for (int p = 0; p < m_channelMap.numPhys; ++p) {
+        if (p < (int)m_channelMap.physDevice.size() &&
+            m_channelMap.physDevice[static_cast<size_t>(p)] == deviceIdx) {
+            const int localCh = m_channelMap.physLocalCh.empty()
+                ? lp : m_channelMap.physLocalCh[static_cast<size_t>(p)];
+            if (localCh >= 0 && localCh < devPhysCh)
+                globalToLocal[static_cast<size_t>(p)] = localCh;
+            ++lp;
+        }
+    }
+
+    // Build per-device routing matrix.
+    std::vector<float> devXp(static_cast<size_t>(srcCh * devPhysCh),
+                              std::numeric_limits<float>::quiet_NaN());
+
+    for (int s = 0; s < srcCh; ++s) {
+        for (int p = 0; p < m_channelMap.numPhys; ++p) {
+            const int localCh = globalToLocal[static_cast<size_t>(p)];
+            if (localCh < 0) continue;
+            float total = 0.0f;
+            for (int ch = 0; ch < numCh; ++ch) {
+                const size_t fi = static_cast<size_t>(ch * m_channelMap.numPhys + p);
+                float foldG = (fi < m_channelMap.fold.size()) ? m_channelMap.fold[fi] : 0.0f;
+                if (foldG < 1e-10f) continue;
+                float xpLin = 0.0f;
+                if (!cue.routing.xpoint.empty() &&
+                    s < (int)cue.routing.xpoint.size() &&
+                    ch < (int)cue.routing.xpoint[static_cast<size_t>(s)].size() &&
+                    cue.routing.xpoint[static_cast<size_t>(s)][static_cast<size_t>(ch)].has_value())
+                    xpLin = lut::dBToLinear(
+                        *cue.routing.xpoint[static_cast<size_t>(s)][static_cast<size_t>(ch)]);
+                else if (cue.routing.xpoint.empty())
+                    xpLin = (s == ch) ? 1.0f : 0.0f;  // fresh cue: identity default
+                // else: xpoint configured but cell cleared → silence (0.0f)
+                total += xpLin * chanOutLev[static_cast<size_t>(ch)] * foldG;
+            }
+            if (total > 1e-10f)
+                devXp[static_cast<size_t>(s * devPhysCh + localCh)] = total;
+        }
+    }
+
+    std::vector<float> devOutLev(static_cast<size_t>(devPhysCh), 1.0f);
+    reader.setRouting(std::move(devXp), std::move(devOutLev), devPhysCh);
 }
 
 // Build a segment list from a cue's markers and sliceLoops.
@@ -1177,8 +1248,45 @@ void CueList::fireGroup(int groupIdx, double baseOffset, int64_t originFrame) {
 
 int64_t CueList::scheduleVoice(int cueIndex) {
     const auto& cue = m_cues[cueIndex];
+    const float gain  = levelGain(cue.level, cue.trim);
+    const int   srcCh = static_cast<int>(cue.audioFile.metadata().channels);
 
-    // Take the pre-armed stream if available; otherwise do a cold start.
+    // Multi-device path: create one independent StreamReader per device.
+    if (!m_channelMap.physDevice.empty()) {
+        const int numDevices = static_cast<int>(m_channelMap.devicePhysCount.size());
+        int64_t totalFrames = -1;
+
+        for (int d = 0; d < numDevices; ++d) {
+            const int devPhysCh = m_channelMap.devicePhysCount[static_cast<size_t>(d)];
+            if (devPhysCh <= 0) continue;
+
+            auto segs = buildSegments(cue);
+            auto devReader = std::make_shared<StreamReader>(
+                cue.path, m_engine.sampleRate(), devPhysCh, std::move(segs));
+            if (devReader->hasError()) continue;
+
+            if (totalFrames < 0) totalFrames = devReader->totalOutputFrames();
+            if (totalFrames < 0) continue;
+
+            if (srcCh > 0 && devPhysCh > 0)
+                applyRoutingToSourceForDevice(cue, *devReader, srcCh, d);
+
+            const int slot = m_engine.scheduleStreamingVoice(
+                devReader.get(),
+                totalFrames > 0 ? totalFrames : INT64_MAX / 2,
+                devPhysCh, cueIndex, gain, d);
+            if (slot < 0) continue;
+
+            std::lock_guard<std::mutex> lk(m_slotMutex);
+            m_cueRuntime[static_cast<size_t>(cueIndex)].slotByDevice[d] = slot;
+            m_slotStream[static_cast<size_t>(slot)] = std::move(devReader);
+        }
+
+        if (totalFrames < 0) return -1;
+        return totalFrames > 0 ? totalFrames : voiceFrames(cue);
+    }
+
+    // Single-device path (legacy): take the pre-armed stream if available.
     std::shared_ptr<StreamReader> reader;
     {
         std::lock_guard<std::mutex> lk(m_slotMutex);
@@ -1193,12 +1301,9 @@ int64_t CueList::scheduleVoice(int cueIndex) {
     }
 
     const int64_t totalFrames = reader->totalOutputFrames();
-    // 0 means unknown length (stream); still valid — isDone() will stop the voice.
     if (totalFrames < 0) return -1;
 
-    const float gain  = levelGain(cue.level, cue.trim);
-    const int   outCh = m_engine.channels();
-    const int   srcCh = static_cast<int>(cue.audioFile.metadata().channels);
+    const int outCh = m_engine.channels();
     if (srcCh > 0 && outCh > 0)
         applyRoutingToSource(cue, *reader, srcCh, outCh);
 
@@ -1208,8 +1313,8 @@ int64_t CueList::scheduleVoice(int cueIndex) {
     if (slot < 0) return -1;
 
     std::lock_guard<std::mutex> lk(m_slotMutex);
-    m_lastSlot[cueIndex] = slot;
-    m_slotStream[slot] = std::move(reader);
+    m_cueRuntime[static_cast<size_t>(cueIndex)].slotByDevice[0] = slot;
+    m_slotStream[static_cast<size_t>(slot)] = std::move(reader);
     return totalFrames > 0 ? totalFrames : voiceFrames(cue);
 }
 
@@ -1276,29 +1381,37 @@ bool CueList::fire(int idx) {
                 break;
             }
 
-            // Get the raw StreamReader pointer for the target cue's active voice.
-            // Obtained under the mutex; valid as long as the voice stays active.
-            StreamReader* raw = nullptr;
+            // Collect StreamReaders for all active device slots.
+            // canonical is the device-0 slot used for wasDevampFired() polling.
+            // In single-device mode allReaders has exactly one entry.
+            StreamReader* canonical = nullptr;
+            std::vector<StreamReader*> allReaders;
             int slot = -1;
             {
                 std::lock_guard<std::mutex> lk(m_slotMutex);
-                slot = m_lastSlot[ti];
-                if (slot >= 0) raw = slotStreamReader(static_cast<size_t>(slot));
+                const auto& rt = m_cueRuntime[static_cast<size_t>(ti)];
+                slot = rt.canonicalSlot();
+                if (slot >= 0) canonical = slotStreamReader(static_cast<size_t>(slot));
+                for (const auto& kv : rt.slotByDevice) {
+                    auto* r = slotStreamReader(static_cast<size_t>(kv.second));
+                    if (r && m_engine.isVoiceActive(kv.second))
+                        allReaders.push_back(r);
+                }
             }
-            if (!raw || !m_engine.isVoiceActive(slot)) break;
+            if (!canonical || !m_engine.isVoiceActive(slot)) break;
 
             if (cue.devampMode == 0) {
-                // Mode 0: advance to next slice (classic devamp)
-                raw->devamp(false, cue.devampPreVamp);
+                // Mode 0: advance to next slice on every device (classic devamp)
+                for (auto* r : allReaders) r->devamp(false, cue.devampPreVamp);
             } else {
                 // Modes 1/2: call go() at the end of the current slice.
                 // Pre-arm the currently-selected cue for a seamless start.
                 if (m_selectedIndex >= 0 && m_selectedIndex < cueCount())
                     arm(m_selectedIndex);
 
-                raw->clearDevampFired();
+                canonical->clearDevampFired();  // only canonical drives the fired signal
                 const bool stopCurrent = (cue.devampMode == 1);
-                raw->devamp(stopCurrent, cue.devampPreVamp);
+                for (auto* r : allReaders) r->devamp(stopCurrent, cue.devampPreVamp);
 
                 // Register follow-up: call go() when trigger fires
                 m_followUps.push_back({ti, stopCurrent});
@@ -1324,7 +1437,7 @@ bool CueList::fire(int idx) {
             const auto& tc = m_cues[static_cast<std::size_t>(tIdx)];
             {
                 int tSlot;
-                { std::lock_guard<std::mutex> lk(m_slotMutex); tSlot = m_lastSlot[static_cast<size_t>(tIdx)]; }
+                { std::lock_guard<std::mutex> lk(m_slotMutex); tSlot = m_cueRuntime[static_cast<size_t>(tIdx)].canonicalSlot(); }
                 const IAudioSource* tsr = (tSlot >= 0 && m_engine.isVoiceActive(tSlot)
                                            && m_slotStream[static_cast<size_t>(tSlot)])
                     ? m_slotStream[static_cast<size_t>(tSlot)].get() : nullptr;
@@ -1583,7 +1696,7 @@ bool CueList::fire(int idx) {
                     outCh, idx, 1.0f);
                 if (slot >= 0) {
                     std::lock_guard<std::mutex> lk(m_slotMutex);
-                    m_lastSlot[idx] = slot;
+                    m_cueRuntime[static_cast<size_t>(idx)].slotByDevice[0] = slot;
                     m_slotStream[static_cast<size_t>(slot)] = std::move(reader);
                     result = true;
                     followFrames = totalFrames;
@@ -2005,13 +2118,13 @@ int CueList::activeCueCount() const {
 int CueList::cueVoiceSlot(int index) const {
     if (index < 0 || index >= cueCount()) return -1;
     std::lock_guard<std::mutex> lk(m_slotMutex);
-    return m_lastSlot[index];
+    return m_cueRuntime[static_cast<size_t>(index)].canonicalSlot();
 }
 
 int64_t CueList::cuePlayheadFrames(int index) const {
     if (index < 0 || index >= cueCount()) return 0;
     std::lock_guard<std::mutex> lk(m_slotMutex);
-    const int slot = m_lastSlot[index];
+    const int slot = m_cueRuntime[static_cast<size_t>(index)].canonicalSlot();
     if (slot < 0 || !m_engine.isVoiceActive(slot)) return 0;
     const int64_t pos = m_engine.enginePlayheadFrames() - m_engine.voiceStartEngineFrame(slot);
     return std::max<int64_t>(0, pos);
@@ -2057,7 +2170,7 @@ double CueList::cuePlayheadFileSeconds(int index) const {
     int64_t rp = 0;
     {
         std::lock_guard<std::mutex> lk(m_slotMutex);
-        const int slot = m_lastSlot[static_cast<size_t>(index)];
+        const int slot = m_cueRuntime[static_cast<size_t>(index)].canonicalSlot();
         if (slot < 0 || !m_engine.isVoiceActive(slot)) return 0.0;
         raw      = slotStreamReader(static_cast<size_t>(slot));
         if (!raw) return 0.0;

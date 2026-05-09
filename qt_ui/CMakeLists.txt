@@ -32,8 +32,6 @@ set(QT_UI_SOURCES
     src/ShowHelpers.cpp
     src/AppModel.h
     src/AppModel.cpp
-    src/AudioSetupDialog.h
-    src/AudioSetupDialog.cpp
     src/SettingsDialog.h
     src/SettingsDialog.cpp
     src/FaderWidget.h
@@ -50,8 +48,6 @@ set(QT_UI_SOURCES
     src/SyncGroupView.cpp
     src/MusicContextView.h
     src/MusicContextView.cpp
-    src/DeviceDialog.h
-    src/DeviceDialog.cpp
     src/MainWindow.h
     src/MainWindow.cpp
     src/MCImport.h

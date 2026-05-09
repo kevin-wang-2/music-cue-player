@@ -22,13 +22,22 @@ class MtcGenerator;  // forward declaration
 // Channel-to-physical-output routing fold matrix.
 // Built from ShowFile::AudioSetup and set on CueList before playback.
 // cue.routing indices are channel indices; the fold maps them to physOut indices.
+//
+// Multi-device extension: physDevice / physLocalCh / devicePhysCount are
+// populated when AudioSetup::devices is non-empty.  Legacy single-device mode
+// leaves all three vectors empty.
 struct ChannelMap {
     int numCh{0};    // number of logical channels (0 = use identity / legacy)
-    int numPhys{0};  // physical output count (= AudioEngine::channels())
+    int numPhys{0};  // total physical output count across all devices
     // fold[ch * numPhys + p] = linear gain for channel ch routing to physOut p.
     std::vector<float> fold;
     // primaryPhys[ch] = argmax_p(fold[ch*numPhys+p]). Used for live fade updates.
     std::vector<int> primaryPhys;
+
+    // Multi-device fields (empty = legacy single-device mode).
+    std::vector<int> physDevice;      // physDevice[p]     = stream index for global physOut p
+    std::vector<int> physLocalCh;     // physLocalCh[p]    = local channel index on that stream
+    std::vector<int> devicePhysCount; // devicePhysCount[d]= physical channel count of stream d
 };
 
 // High-level cue sequencer backed by a shared AudioEngine and Scheduler.
@@ -400,6 +409,10 @@ private:
     void applyRoutingToSource(const Cue& cue, IAudioSource& source,
                                int srcCh, int outCh);
 
+    // Multi-device variant: restricts routing to one device's local physical outputs.
+    void applyRoutingToSourceForDevice(const Cue& cue, IAudioSource& source,
+                                        int srcCh, int deviceIdx);
+
     // Update a live voice's per-output-channel gain (called from fade callbacks).
     // Does NOT modify cue.routing — fade is a live-voice-only multiplier.
     void setCueOutLevelGain(int cueIdx, int outCh, float linGain);
@@ -429,11 +442,29 @@ private:
     struct PlaylistFollowUp { int watchCueIdx; int nextCueIdx; bool activated{false}; };
     std::vector<PlaylistFollowUp> m_playlistFollowUps;
 
+    // Per-cue voice slot tracking.
+    // slotByDevice maps deviceIndex → engine voice slot so that multi-device
+    // playback can schedule independent StreamReaders on different PaStreams.
+    // Legacy / single-device mode uses only deviceIndex=0.
+    // canonicalSlot() returns device-0's slot, or the first available slot.
+    struct CueRuntime {
+        std::unordered_map<int, int> slotByDevice;
+        int canonicalSlot() const {
+            if (slotByDevice.empty()) return -1;
+            auto it = slotByDevice.find(0);
+            return (it != slotByDevice.end()) ? it->second : slotByDevice.begin()->second;
+        }
+        int slotForDevice(int d) const {
+            auto it = slotByDevice.find(d);
+            return (it != slotByDevice.end()) ? it->second : -1;
+        }
+    };
+
     // Protected by m_slotMutex: written by scheduleVoice() / go() (possibly
     // from the scheduler thread), read from any thread.
-    mutable std::mutex m_slotMutex;
-    std::vector<int>   m_lastSlot;
-    std::vector<int>   m_pendingEventId;  // scheduler event ID, -1 = none
+    mutable std::mutex        m_slotMutex;
+    std::vector<CueRuntime>   m_cueRuntime;
+    std::vector<int>          m_pendingEventId;  // scheduler event ID, -1 = none
 
     // Engine frame recorded when a Group cue is fired, plus the arm-base offset
     // that was active at fire time.  Used by cueElapsedSeconds() for group MCs.

@@ -5,7 +5,7 @@
 #include "ShowInfoDialog.h"
 #include "SettingsDialog.h"
 #include "CueTableView.h"
-#include "DeviceDialog.h"
+
 #include "InspectorWidget.h"
 #include "RenumberDialog.h"
 #include "ShowHelpers.h"
@@ -378,11 +378,6 @@ void MainWindow::buildIconBar() {
     hlay->addWidget(btnPanic);
 
     hlay->addStretch();
-
-    // Device button (right-aligned)
-    auto* btnDev = makeIconBtn("⚙", "Audio Device settings…");
-    connect(btnDev, &QToolButton::clicked, this, &MainWindow::onOpenDeviceDialog);
-    hlay->addWidget(btnDev);
 }
 
 QToolButton* MainWindow::makeIconBtn(const QString& icon, const QString& tip,
@@ -465,7 +460,6 @@ void MainWindow::buildMenuBar() {
 
     auto* showMenu = mb->addMenu("&Show");
     showMenu->addAction("&Settings…", this, &MainWindow::onOpenSettings);
-    showMenu->addAction("Audio &Device…", this, &MainWindow::onOpenDeviceDialog);
     showMenu->addAction("Show &Information…", this, [this]() {
         if (!m_showInfoDialog)
             m_showInfoDialog = new ShowInfoDialog(m_model, this);
@@ -603,16 +597,32 @@ void MainWindow::onOpenSettings() {
     m_model->applyOscSettings();
     m_model->dirty = true;
     emit m_model->dirtyChanged(true);
+
+    // Re-initialize engine when multi-device config is present
+    const auto& setup = m_model->sf.audioSetup;
+    if (!setup.devices.empty()) {
+        if (m_model->engineOk) m_model->engine.shutdown();
+        std::vector<mcp::AudioEngine::DeviceSpec> specs;
+        for (const auto& d : setup.devices) {
+            mcp::AudioEngine::DeviceSpec sp;
+            sp.name         = d.name;
+            sp.channelCount = d.channelCount;
+            sp.bufferSize   = d.bufferSize;
+            sp.masterClock  = d.masterClock;
+            specs.push_back(sp);
+        }
+        const int sr = (setup.sampleRate > 0) ? setup.sampleRate
+                     : m_model->sf.engine.sampleRate;
+        m_model->engineOk = m_model->engine.initialize(sr, specs);
+        emit m_model->engineStatusChanged();
+    }
+
     std::string err;
     ShowHelpers::rebuildCueList(*m_model, err);
     m_inspector->setCueIndex(m_model->cues.selectedIndex());
     updateTitle();
 }
 
-void MainWindow::onOpenDeviceDialog() {
-    DeviceDialog dlg(m_model, this);
-    dlg.exec();
-}
 
 void MainWindow::onCueListModified() {
     m_model->dirty = true;

@@ -41,7 +41,6 @@ private slots:
     void onOpenShow();
     void onSaveShow();
     void onSaveShowAs();
-    void onOpenDeviceDialog();
     void onCueListModified();
     void onRowSelected(int idx);
     void onUndo();

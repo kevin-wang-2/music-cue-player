@@ -44,7 +44,7 @@ struct DeviceInfo {
 //   Audio thread — callback: applies pending changes, mixes, advances playheads
 class AudioEngine {
 public:
-    static constexpr int kMaxVoices = 64;
+    static constexpr int kMaxVoices = 128;
 
     AudioEngine();
     ~AudioEngine();
@@ -59,6 +59,19 @@ public:
     // deviceName = "" → use default PortAudio output device.
     bool initialize(int sampleRate = 48000, int channels = 0,
                     const std::string& deviceName = "");
+
+    // Multi-device initialisation.  Each DeviceSpec describes one PortAudio
+    // output stream.  Exactly one entry should have masterClock=true (the one
+    // that drives enginePlayhead); if none is marked the first is used.
+    // All streams share the same sample rate; buffer sizes may differ.
+    struct DeviceSpec {
+        std::string name;          // PortAudio device name; "" = default output
+        int         channelCount{0};  // 0 = auto-detect from device
+        int         bufferSize{0};    // 0 = let PortAudio choose
+        bool        masterClock{false};
+    };
+    bool initialize(int sampleRate, const std::vector<DeviceSpec>& devices);
+
     void shutdown();
     bool isInitialized() const;
 
@@ -69,16 +82,20 @@ public:
 
     // Schedule an in-memory voice. Returns slot ID or -1 if pool is full.
     // The caller must keep `samples` alive until the voice finishes.
-    // `tag`  — arbitrary identifier (e.g., cue index) used for bulk operations.
-    // `gain` — linear amplitude gain applied every sample (1.0 = unity).
+    // `tag`         — arbitrary identifier (e.g., cue index) used for bulk operations.
+    // `gain`        — linear amplitude gain applied every sample (1.0 = unity).
+    // `deviceIndex` — which stream (device) renders this voice; 0 = master/default.
     int scheduleVoice(const float* samples, int64_t totalFrames,
-                      int voiceChannels, int tag = -1, float gain = 1.0f);
+                      int voiceChannels, int tag = -1, float gain = 1.0f,
+                      int deviceIndex = 0);
 
     // Schedule a streaming voice backed by any IAudioSource.
     // The raw pointer must remain valid (kept alive externally) until
     // isVoiceActive(slot) returns false.
+    // `deviceIndex` — which stream (device) renders this voice; 0 = master/default.
     int scheduleStreamingVoice(IAudioSource* reader, int64_t totalFrames,
-                               int voiceChannels, int tag = -1, float gain = 1.0f);
+                               int voiceChannels, int tag = -1, float gain = 1.0f,
+                               int deviceIndex = 0);
 
     // Update the gain of a running voice. Safe to call from the main thread
     // while the audio thread is running (atomic store, no locking).

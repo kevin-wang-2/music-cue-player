@@ -190,11 +190,31 @@ struct ShowFile {
     // Defines named logical channels that sit between cue outputs and the
     // device's physical outputs.  Cue routing indices reference channel indices,
     // not physical output indices.
+    //
+    // Multi-device mode: when devices is non-empty each Channel carries a
+    // deviceIndex + deviceChannel that pins it to a specific physical output on
+    // a specific device.  When devices is empty the legacy single-device path
+    // is used (AudioSetup::Channel::deviceIndex is ignored).
     struct AudioSetup {
+        // ---- Per-device descriptor (multi-device mode only) ----------------
+        struct Device {
+            std::string name;
+            int  channelCount{2};   // number of physical outputs on this device
+            int  bufferSize{512};   // preferred buffer size (frames)
+            bool masterClock{false};// this device is the clock source
+        };
+        // Empty  = legacy single-device mode.
+        std::vector<Device> devices;
+        // Override sample rate for all devices.  0 = inherit EngineHints.sampleRate.
+        int sampleRate{0};
+
         struct Channel {
             std::string name;
-            bool  linkedStereo{false};  // UI hint only — no effect on routing
-            float masterGainDb{0.0f};   // channel master fader (0 = unity)
+            // Multi-device mode: which device and physical output this channel maps to.
+            int  deviceIndex{0};    // index into devices[]; 0 in legacy mode
+            int  deviceChannel{-1}; // physical out on that device; -1 = use channel list index
+            bool linkedStereo{false};  // UI hint only — no effect on routing
+            float masterGainDb{0.0f};  // channel master fader (0 = unity)
             bool  mute{false};
         };
         std::vector<Channel> channels;
@@ -203,6 +223,13 @@ struct ShowFile {
         // Set db <= -144 to explicitly disable the diagonal.
         struct XpEntry { int ch{0}; int out{0}; float db{0.0f}; };
         std::vector<XpEntry> xpEntries;
+
+        // Ensure at most one device has masterClock=true.
+        // If none, assigns masterClock to devices[0] (no-op when devices is empty).
+        void normalizeMaster();
+
+        // Returns the index of the master-clock device, or 0 if none/legacy.
+        int masterDeviceIndex() const;
     };
 
     // ---- Scriptlet library -------------------------------------------------

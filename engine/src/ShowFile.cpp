@@ -6,6 +6,24 @@ using json = nlohmann::json;
 
 namespace mcp {
 
+void ShowFile::AudioSetup::normalizeMaster() {
+    bool found = false;
+    for (auto& d : devices) {
+        if (d.masterClock) {
+            if (found) d.masterClock = false;
+            else       found = true;
+        }
+    }
+    if (!found && !devices.empty())
+        devices[0].masterClock = true;
+}
+
+int ShowFile::AudioSetup::masterDeviceIndex() const {
+    for (int i = 0; i < (int)devices.size(); ++i)
+        if (devices[i].masterClock) return i;
+    return 0;
+}
+
 template<typename T>
 static T jget(const json& j, const char* key, T def) {
     if (!j.contains(key)) return def;
@@ -409,13 +427,29 @@ bool ShowFile::load(const std::filesystem::path& path, std::string& error) {
     audioSetup = {};
     if (root.contains("audioSetup") && root["audioSetup"].is_object()) {
         const auto& as = root["audioSetup"];
+
+        audioSetup.sampleRate = jget<int>(as, "sampleRate", 0);
+
+        if (as.contains("devices") && as["devices"].is_array()) {
+            for (const auto& dj : as["devices"]) {
+                AudioSetup::Device d;
+                d.name         = jget<std::string>(dj, "name",         "");
+                d.channelCount = jget<int>        (dj, "channelCount", 2);
+                d.bufferSize   = jget<int>        (dj, "bufferSize",   512);
+                d.masterClock  = jget<bool>       (dj, "masterClock",  false);
+                audioSetup.devices.push_back(d);
+            }
+        }
+
         if (as.contains("channels") && as["channels"].is_array()) {
             for (const auto& ch : as["channels"]) {
                 AudioSetup::Channel c;
-                c.name         = jget<std::string>(ch, "name",         "");
-                c.linkedStereo = jget<bool>       (ch, "linkedStereo", false);
-                c.masterGainDb = jget<float>      (ch, "masterGainDb", 0.0f);
-                c.mute         = jget<bool>       (ch, "mute",         false);
+                c.name          = jget<std::string>(ch, "name",          "");
+                c.deviceIndex   = jget<int>        (ch, "deviceIndex",   0);
+                c.deviceChannel = jget<int>        (ch, "deviceChannel", -1);
+                c.linkedStereo  = jget<bool>       (ch, "linkedStereo",  false);
+                c.masterGainDb  = jget<float>      (ch, "masterGainDb",  0.0f);
+                c.mute          = jget<bool>       (ch, "mute",          false);
                 audioSetup.channels.push_back(c);
             }
         }
@@ -544,10 +578,26 @@ bool ShowFile::save(const std::filesystem::path& path, std::string& error) const
 
     {
         json as;
+        if (audioSetup.sampleRate != 0)
+            as["sampleRate"] = audioSetup.sampleRate;
+        if (!audioSetup.devices.empty()) {
+            json devArr = json::array();
+            for (const auto& d : audioSetup.devices) {
+                json dj;
+                dj["name"]         = d.name;
+                dj["channelCount"] = d.channelCount;
+                if (d.bufferSize != 512) dj["bufferSize"] = d.bufferSize;
+                if (d.masterClock)       dj["masterClock"] = true;
+                devArr.push_back(dj);
+            }
+            as["devices"] = devArr;
+        }
         json chArr = json::array();
         for (const auto& ch : audioSetup.channels) {
             json cj;
             cj["name"] = ch.name;
+            if (ch.deviceIndex != 0)   cj["deviceIndex"]   = ch.deviceIndex;
+            if (ch.deviceChannel != -1) cj["deviceChannel"] = ch.deviceChannel;
             if (ch.linkedStereo)         cj["linkedStereo"]  = true;
             if (ch.masterGainDb != 0.0f) cj["masterGainDb"]  = ch.masterGainDb;
             if (ch.mute)                 cj["mute"]          = true;
