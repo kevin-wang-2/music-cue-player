@@ -110,8 +110,8 @@ target_compile_options(mcp_qt_ui PRIVATE
 if(APPLE)
     set_target_properties(mcp_qt_ui PROPERTIES
         MACOSX_BUNDLE TRUE
-        MACOSX_BUNDLE_BUNDLE_NAME "MCP"
-        MACOSX_BUNDLE_SHORT_VERSION_STRING "0.1"
+        MACOSX_BUNDLE_BUNDLE_NAME "Music Cue Player"
+        MACOSX_BUNDLE_SHORT_VERSION_STRING "0.1.0"
         MACOSX_BUNDLE_INFO_PLIST "${CMAKE_CURRENT_SOURCE_DIR}/macos/Info.plist.in"
     )
     # Ad-hoc sign after every build so macOS can launch the app
