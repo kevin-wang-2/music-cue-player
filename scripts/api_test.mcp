@@ -1,0 +1,184 @@
+{
+  "mcp_version": "1.0",
+  "show": {
+    "title": "API Test Show"
+  },
+  "engine": {
+    "sampleRate": 48000,
+    "channels": 2
+  },
+  "cueLists": [
+    {
+      "id": "main",
+      "name": "Main",
+      "numericId": 1,
+      "cues": [
+        {
+          "type": "memo",
+          "cueNumber": "0",
+          "name": "── API TEST SHOW ──",
+          "preWait": 0.0
+        },
+        {
+          "type": "audio",
+          "cueNumber": "1",
+          "name": "Audio Cue",
+          "preWait": 0.0,
+          "path": "/Users/kaibinwa/Desktop/click-in/music-cue-player/scripts/A.wav",
+          "level": -6.0,
+          "trim": 0.0
+        },
+        {
+          "type": "audio",
+          "cueNumber": "2",
+          "name": "Audio Cue B",
+          "preWait": 0.0,
+          "path": "/Users/kaibinwa/Desktop/click-in/music-cue-player/scripts/B.wav",
+          "level": 0.0
+        },
+        {
+          "type": "group",
+          "cueNumber": "3",
+          "name": "MC Group (Timeline) — start me for from_bar_beat()",
+          "preWait": 0.0,
+          "groupMode": "timeline",
+          "musicContext": {
+            "enabled": true,
+            "startOffsetSeconds": 0.0,
+            "applyBeforeStart": true,
+            "points": [
+              {
+                "bar": 1,
+                "beat": 1,
+                "bpm": 120.0,
+                "hasTimeSig": true,
+                "timeSigNum": 4,
+                "timeSigDen": 4
+              }
+            ]
+          },
+          "children": [
+            {
+              "type": "audio",
+              "cueNumber": "3.1",
+              "name": "Child A",
+              "preWait": 0.0,
+              "path": "/Users/kaibinwa/Desktop/click-in/music-cue-player/scripts/A.wav",
+              "timelineOffset": 0.0
+            },
+            {
+              "type": "audio",
+              "cueNumber": "3.2",
+              "name": "Child B",
+              "preWait": 0.0,
+              "path": "/Users/kaibinwa/Desktop/click-in/music-cue-player/scripts/B.wav",
+              "timelineOffset": 2.0
+            }
+          ]
+        },
+        {
+          "type": "group",
+          "cueNumber": "4",
+          "name": "Group (Sync)",
+          "preWait": 0.0,
+          "groupMode": "sync",
+          "children": [
+            {
+              "type": "memo",
+              "cueNumber": "4.1",
+              "name": "Sync Child 1",
+              "preWait": 0.0
+            },
+            {
+              "type": "memo",
+              "cueNumber": "4.2",
+              "name": "Sync Child 2",
+              "preWait": 0.0
+            }
+          ]
+        },
+        {
+          "type": "memo",
+          "cueNumber": "5",
+          "name": "Memo A",
+          "preWait": 0.0
+        },
+        {
+          "type": "memo",
+          "cueNumber": "6",
+          "name": "Memo B",
+          "preWait": 0.0
+        },
+        {
+          "type": "memo",
+          "cueNumber": "7",
+          "name": "Memo C",
+          "preWait": 0.0
+        },
+        {
+          "type": "start",
+          "cueNumber": "8",
+          "name": "Start → Audio Cue (1)",
+          "preWait": 0.0,
+          "target": -1,
+          "targetCueNumber": "1"
+        },
+        {
+          "type": "stop",
+          "cueNumber": "9",
+          "name": "Stop → Audio Cue (1)",
+          "preWait": 0.0,
+          "target": -1,
+          "targetCueNumber": "1"
+        },
+        {
+          "type": "goto",
+          "cueNumber": "9.5",
+          "name": "Goto → Memo A (5)",
+          "preWait": 0.0,
+          "target": -1,
+          "targetCueNumber": "5"
+        },
+        {
+          "type": "scriptlet",
+          "cueNumber": "10",
+          "name": "Run API Test",
+          "preWait": 0.0,
+          "scriptletCode": "import mcp.library.api_test as api_test\napi_test.run()"
+        },
+        {
+          "type": "scriptlet",
+          "cueNumber": "11",
+          "name": "Run Adversarial Test",
+          "preWait": 0.0,
+          "scriptletCode": "import mcp.library.adversarial_test as t\nt.run()"
+        }
+      ]
+    },
+    {
+      "id": "secondary",
+      "name": "Secondary",
+      "numericId": 2,
+      "cues": [
+        {
+          "type": "memo",
+          "cueNumber": "S1",
+          "name": "Secondary List Cue A",
+          "preWait": 0.0
+        },
+        {
+          "type": "memo",
+          "cueNumber": "S2",
+          "name": "Secondary List Cue B",
+          "preWait": 0.0
+        },
+        {
+          "type": "memo",
+          "cueNumber": "S3",
+          "name": "Secondary List Cue C",
+          "preWait": 0.0
+        }
+      ]
+    }
+  ]
+}

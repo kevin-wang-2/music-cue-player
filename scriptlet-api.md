@@ -28,7 +28,7 @@
     - [class]Cue: 用python class表示的cue的抽象class（注意setter&getter）
         - 函数：select - select cue
         - 函数：go - goto cue and go
-        - 函数：arm(time) - arm cue to position
+        - 函数：arm(time=None) - arm cue to position（time为mcp.time.Time对象，省略则从头arm）
         - 函数：start - dry start without selecting
         - 函数：stop - stop cue
         - 函数：disarm - disarm cue
@@ -46,11 +46,13 @@
     - [function] on_music_event(quantization, callback): quantization为"1/1", "1/2", "1/4", "1/8", "1/16"，callback里面不注入信息
     - 对应的once和unsubscribe
 
-- [function]alert: 弹出框
-- [function]confirm: 确认框
+- [function]alert(msg): 弹出信息框
+- [function]confirm(msg) → bool: 确认框，用户点Yes返回True
+- [function]file(title='Open File', mode='open', filter='') → str | None: 文件框；mode="open"/"save"/"dir"；取消返回None
+- [function]input(prompt, default='', title='Input') → str | None: 文本输入框；取消返回None
 - [function]panic: panic
 - [function]go: go当前cue
-- [function]select: select一个cue号
+- [function]select(num): select一个cue号
 - [function]get_mc: 返回{"bpm": ..., "time_signature": ..., "beat": ..., "bar": ..., "PPQ": ...}
 - [function]get_state: 返回{"selected_cue": ..., "running_cues": [], "mc_master": ...}
 

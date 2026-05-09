@@ -301,7 +301,8 @@ void CueTableView::setRowStatus(int row) {
     int status = 0;
     if (!c->isLoaded() || m_model->scriptletErrorCues.count(row)) {
         status = 4;
-    } else if (m_model->cues().isCuePlaying(row) || m_model->cues().isFadeActive(row)) {
+    } else if (m_model->cues().isCuePlaying(row) || m_model->cues().isFadeActive(row)
+            || m_model->isScriptletCuePlaying(row)) {
         status = 1;
     } else if (m_model->cues().isCuePending(row)) {
         status = 2;

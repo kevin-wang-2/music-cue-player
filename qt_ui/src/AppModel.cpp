@@ -4,6 +4,11 @@
 #include "engine/Cue.h"
 #include "engine/MusicContext.h"
 
+#include <QDir>
+#include <QFile>
+#include <QFileDialog>
+#include <QFileInfo>
+#include <QInputDialog>
 #include <QMessageBox>
 #include <QVariant>
 
@@ -26,9 +31,10 @@ AppModel::AppModel(QObject* parent)
         emit selectionChanged(cues().selectedIndex());
         emit playbackStateChanged();
     });
-    scriptlet->setSelectCallback([this](const std::string& num) {
+    scriptlet->setSelectCallback([this](const std::string& num) -> bool {
         const int idx = cues().findByCueNumber(num);
-        if (idx >= 0) { cues().setSelectedIndex(idx); emit selectionChanged(idx); }
+        if (idx >= 0) { cues().setSelectedIndex(idx); emit selectionChanged(idx); return true; }
+        return false;
     });
     scriptlet->setAlertCallback([](const std::string& msg) {
         QMessageBox::information(nullptr, "Script", QString::fromStdString(msg));
@@ -43,61 +49,98 @@ AppModel::AppModel(QObject* parent)
     scriptlet->setPanicCallback([this]() {
         panicAll();
     });
+    scriptlet->setFileCallback([](const std::string& title, const std::string& mode, const std::string& filter)
+            -> std::optional<std::string> {
+        const QString qtTitle  = QString::fromStdString(title);
+        const QString qtFilter = filter.empty()
+            ? QString("All Files (*)")
+            : QString::fromStdString(filter);
+        QString path;
+        if (mode == "save") {
+            path = QFileDialog::getSaveFileName(nullptr, qtTitle, {}, qtFilter);
+        } else if (mode == "dir") {
+            path = QFileDialog::getExistingDirectory(nullptr, qtTitle);
+        } else {
+            path = QFileDialog::getOpenFileName(nullptr, qtTitle, {}, qtFilter);
+        }
+        if (path.isEmpty()) return std::nullopt;
+        return path.toStdString();
+    });
+    scriptlet->setInputCallback([](const std::string& prompt, const std::string& defaultVal, const std::string& title)
+            -> std::optional<std::string> {
+        bool ok = false;
+        const QString result = QInputDialog::getText(
+            nullptr,
+            QString::fromStdString(title),
+            QString::fromStdString(prompt),
+            QLineEdit::Normal,
+            QString::fromStdString(defaultVal),
+            &ok);
+        if (!ok) return std::nullopt;
+        return result.toStdString();
+    });
 
-    // --- mcp.cue callbacks ---
-    scriptlet->setCueCountCallback([this]() { return cues().cueCount(); });
+    // Helper: find list index by numeric ID (-1 if not found).
+    // Used by the list-ID-aware scriptlet callbacks below.
+    auto findLi = [this](int listId) -> int {
+        for (int li = 0; li < (int)sf.cueLists.size(); ++li)
+            if (sf.cueLists[li].numericId == listId) return li;
+        return -1;
+    };
 
-    scriptlet->setCueInfoCallback([this](int idx) -> ScriptletCueInfo {
+    // Helper: build ScriptletCueInfo for any list/index combination.
+    auto buildCueInfo = [this](mcp::CueList& cl, int idx) -> ScriptletCueInfo {
         ScriptletCueInfo info;
-        const mcp::Cue* c = cues().cueAt(idx);
+        const mcp::Cue* c = cl.cueAt(idx);
         if (!c) return info;
         info.number       = c->cueNumber;
         info.name         = c->name;
         info.preWait      = c->preWaitSeconds;
         info.autoContinue = c->autoContinue;
         info.autoFollow   = c->autoFollow;
-        info.isPlaying    = cues().isCuePlaying(idx);
-        info.isPending    = cues().isCuePending(idx);
-        info.isArmed      = cues().isArmed(idx);
-        // type string
+        info.isPlaying    = cl.isCuePlaying(idx);
+        info.isPending    = cl.isCuePending(idx);
+        info.isArmed      = cl.isArmed(idx);
         switch (c->type) {
-            case mcp::CueType::Audio:        info.type = "audio";        break;
-            case mcp::CueType::Start:        info.type = "start";        break;
-            case mcp::CueType::Stop:         info.type = "stop";         break;
-            case mcp::CueType::Arm:          info.type = "arm";          break;
-            case mcp::CueType::Fade:         info.type = "fade";         break;
-            case mcp::CueType::Devamp:       info.type = "devamp";       break;
-            case mcp::CueType::Group:        info.type = "group";        break;
-            case mcp::CueType::MusicContext: info.type = "music_context";break;
-            case mcp::CueType::Marker:       info.type = "marker";       break;
-            case mcp::CueType::Network:      info.type = "network";      break;
-            case mcp::CueType::Midi:         info.type = "midi";         break;
-            case mcp::CueType::Timecode:     info.type = "timecode";     break;
-            case mcp::CueType::Goto:         info.type = "goto";         break;
-            case mcp::CueType::Memo:         info.type = "memo";         break;
-            case mcp::CueType::Scriptlet:    info.type = "scriptlet";    break;
+            case mcp::CueType::Audio:        info.type = "audio";         break;
+            case mcp::CueType::Start:        info.type = "start";         break;
+            case mcp::CueType::Stop:         info.type = "stop";          break;
+            case mcp::CueType::Arm:          info.type = "arm";           break;
+            case mcp::CueType::Fade:         info.type = "fade";          break;
+            case mcp::CueType::Devamp:       info.type = "devamp";        break;
+            case mcp::CueType::Group:        info.type = "group";         break;
+            case mcp::CueType::MusicContext: info.type = "music_context"; break;
+            case mcp::CueType::Marker:       info.type = "marker";        break;
+            case mcp::CueType::Network:      info.type = "network";       break;
+            case mcp::CueType::Midi:         info.type = "midi";          break;
+            case mcp::CueType::Timecode:     info.type = "timecode";      break;
+            case mcp::CueType::Goto:         info.type = "goto";          break;
+            case mcp::CueType::Memo:         info.type = "memo";          break;
+            case mcp::CueType::Scriptlet:    info.type = "scriptlet";     break;
         }
-        // Audio fields
         if (c->type == mcp::CueType::Audio) {
             info.path      = c->path;
             info.level     = c->level;
             info.trim      = c->trim;
             info.startTime = c->startTime;
             info.duration  = c->duration;
-            info.playhead  = cues().cuePlayheadFileSeconds(idx);
+            info.playhead  = cl.cuePlayheadFileSeconds(idx);
         }
-        // Control cue target
         if (c->targetIndex >= 0) {
             info.targetIndex = c->targetIndex;
-            const mcp::Cue* t = cues().cueAt(c->targetIndex);
+            const mcp::Cue* t = cl.cueAt(c->targetIndex);
             if (t) info.targetNumber = t->cueNumber;
         }
-        // Scriptlet code
         if (c->type == mcp::CueType::Scriptlet)
             info.code = c->scriptletCode;
         return info;
-    });
+    };
 
+    // --- mcp.cue action callbacks (always operate on the active list) ---
+
+    scriptlet->setCueInfoCallback([this, buildCueInfo](int idx) -> ScriptletCueInfo {
+        return buildCueInfo(cues(), idx);
+    });
     scriptlet->setCueSelectCallback([this](int idx) {
         if (idx >= 0 && idx < cues().cueCount()) {
             cues().setSelectedIndex(idx);
@@ -111,6 +154,11 @@ AppModel::AppModel(QObject* parent)
             emit selectionChanged(cues().selectedIndex());
             emit playbackStateChanged();
         }
+    });
+    scriptlet->setCueStartCallback([this](int idx) {
+        if (idx < 0 || idx >= cues().cueCount()) return;
+        cues().start(idx);
+        emit playbackStateChanged();
     });
     scriptlet->setCueArmCallback([this](int idx, double startOverride) {
         if (idx >= 0 && idx < cues().cueCount())
@@ -134,39 +182,53 @@ AppModel::AppModel(QObject* parent)
         }
     });
 
-    // --- mcp.cue mutation callbacks ---
+    // --- mcp.cue_list.CueList method callbacks (list-ID-aware) ---
 
-    scriptlet->setCueInsertCallback([this](const std::string& type,
-                                           const std::string& number,
-                                           const std::string& name) -> int {
-        if (sf.cueLists.empty()) return -1;
+    scriptlet->setCueListCountCallback([this, findLi](int listId) -> int {
+        const int li = findLi(listId);
+        return (li >= 0) ? m_cueLists[li]->cueCount() : -1;  // -1 = list not found
+    });
+
+    scriptlet->setCueListInfoCallback([this, findLi, buildCueInfo](int listId, int idx) -> ScriptletCueInfo {
+        const int li = findLi(listId);
+        if (li < 0) return {};
+        return buildCueInfo(*m_cueLists[li], idx);
+    });
+
+    scriptlet->setCueListInsertCallback([this, findLi](int listId,
+                                                        const std::string& type,
+                                                        const std::string& number,
+                                                        const std::string& name) -> int {
+        const int li = findLi(listId);
+        if (li < 0) return -1;
         pushUndo();
         mcp::ShowFile::CueData cd;
         cd.type      = type;
         cd.cueNumber = number.empty() ? ShowHelpers::nextCueNumber(sf) : number;
         cd.name      = name;
-        const int beforeIdx = cues().cueCount();  // past-end → appends
-        ShowHelpers::sfInsertBefore(sf, activeListIdx(), beforeIdx, std::move(cd));
+        const int beforeIdx = m_cueLists[li]->cueCount();
+        ShowHelpers::sfInsertBefore(sf, li, beforeIdx, std::move(cd));
         std::string err;
         ShowHelpers::rebuildAllCueLists(*this, err);
         dirty = true;
         emit cueListChanged();
-        const int newIdx = cues().cueCount() - 1;
+        const int newIdx = m_cueLists[li]->cueCount() - 1;
         scriptlet->fireCueInsertedEvent(newIdx);
         return newIdx;
     });
 
-    scriptlet->setCueInsertAtCallback([this](int refIdx,
-                                              const std::string& type,
-                                              const std::string& number,
-                                              const std::string& name) -> int {
-        if (sf.cueLists.empty() || refIdx < 0 || refIdx >= cues().cueCount()) return -1;
+    scriptlet->setCueListInsertAtCallback([this, findLi](int listId, int refIdx,
+                                                          const std::string& type,
+                                                          const std::string& number,
+                                                          const std::string& name) -> int {
+        const int li = findLi(listId);
+        if (li < 0 || refIdx < 0 || refIdx >= m_cueLists[li]->cueCount()) return -1;
         pushUndo();
         mcp::ShowFile::CueData cd;
         cd.type      = type;
         cd.cueNumber = number.empty() ? ShowHelpers::nextCueNumber(sf) : number;
         cd.name      = name;
-        ShowHelpers::sfInsertBefore(sf, activeListIdx(), refIdx + 1, std::move(cd));
+        ShowHelpers::sfInsertBefore(sf, li, refIdx + 1, std::move(cd));
         std::string err;
         ShowHelpers::rebuildAllCueLists(*this, err);
         dirty = true;
@@ -175,43 +237,85 @@ AppModel::AppModel(QObject* parent)
         return refIdx + 1;
     });
 
-    scriptlet->setCueMoveCallback([this](int refIdx, int cueIdx, bool toGroup) {
-        if (sf.cueLists.empty()) return;
-        if (cueIdx < 0 || cueIdx >= cues().cueCount()) return;
-        if (refIdx < 0 || refIdx >= cues().cueCount()) return;
-        if (refIdx == cueIdx) return;
+    scriptlet->setCueListMoveCallback([this, findLi](int listId, int refIdx, int cueIdx, bool toGroup) -> bool {
+        const int li = findLi(listId);
+        if (li < 0) return false;
+        const int cnt = m_cueLists[li]->cueCount();
+        if (cueIdx < 0 || cueIdx >= cnt || refIdx < 0 || refIdx >= cnt || refIdx == cueIdx) return false;
         pushUndo();
-        mcp::ShowFile::CueData cd = ShowHelpers::sfRemoveAt(sf, activeListIdx(), cueIdx);
-        // After removal, indices at > cueIdx shift down by 1.
-        int adjustedRef = (refIdx > cueIdx) ? refIdx - 1 : refIdx;
-        if (toGroup) {
-            ShowHelpers::sfAppendToGroup(sf, activeListIdx(), adjustedRef, std::move(cd));
-        } else {
-            ShowHelpers::sfInsertBefore(sf, activeListIdx(), adjustedRef + 1, std::move(cd));
-        }
+        mcp::ShowFile::CueData cd = ShowHelpers::sfRemoveAt(sf, li, cueIdx);
+        const int adjustedRef = (refIdx > cueIdx) ? refIdx - 1 : refIdx;
+        if (toGroup) ShowHelpers::sfAppendToGroup(sf, li, adjustedRef, std::move(cd));
+        else         ShowHelpers::sfInsertBefore(sf, li, adjustedRef + 1, std::move(cd));
         std::string err;
         ShowHelpers::rebuildAllCueLists(*this, err);
         dirty = true;
         emit cueListChanged();
+        return true;
     });
 
-    scriptlet->setCueDeleteCallback([this](int idx) {
-        if (sf.cueLists.empty() || idx < 0 || idx >= cues().cueCount()) return;
+    scriptlet->setCueListDeleteCallback([this, findLi](int listId, int idx) -> bool {
+        const int li = findLi(listId);
+        if (li < 0 || idx < 0 || idx >= m_cueLists[li]->cueCount()) return false;
         pushUndo();
-        ShowHelpers::sfRemoveAt(sf, activeListIdx(), idx);
-        ShowHelpers::sfFixTargetsAfterRemoval(sf, activeListIdx(), idx);
+        ShowHelpers::sfRemoveAt(sf, li, idx);
+        ShowHelpers::sfFixTargetsAfterRemoval(sf, li, idx);
         std::string err;
         ShowHelpers::rebuildAllCueLists(*this, err);
         dirty = true;
         emit cueListChanged();
+        return true;
     });
 
-    // --- mcp.cue.start callback ---
+    // --- mcp.cue_list module-level CRUD ---
 
-    scriptlet->setCueStartCallback([this](int idx) {
-        if (idx < 0 || idx >= cues().cueCount()) return;
-        cues().start(idx);
-        emit playbackStateChanged();
+    scriptlet->setInsertCueListCallback([this](const std::string& name) -> int {
+        pushUndo();
+        mcp::ShowFile::CueListData cld;
+        cld.name      = name;
+        cld.numericId = sf.nextListId();
+        const int newId = cld.numericId;
+        sf.cueLists.push_back(std::move(cld));
+        std::string err;
+        ShowHelpers::rebuildAllCueLists(*this, err);
+        dirty = true;
+        emit dirtyChanged(true);
+        emit cueListsChanged();
+        return newId;
+    });
+
+    scriptlet->setInsertCueListAtCallback([this, findLi](int refListId, const std::string& name) -> int {
+        const int refLi = findLi(refListId);
+        if (refLi < 0) return -1;
+        pushUndo();
+        mcp::ShowFile::CueListData cld;
+        cld.name      = name;
+        cld.numericId = sf.nextListId();
+        const int newId = cld.numericId;
+        sf.cueLists.insert(sf.cueLists.begin() + refLi + 1, std::move(cld));
+        std::string err;
+        ShowHelpers::rebuildAllCueLists(*this, err);
+        dirty = true;
+        emit dirtyChanged(true);
+        emit cueListsChanged();
+        return newId;
+    });
+
+    scriptlet->setDeleteCueListCallback([this, findLi](int listId) -> bool {
+        const int li = findLi(listId);
+        if (li < 0) return false;  // not found or already deleted
+        if (sf.cueLists.size() <= 1) return false;  // must keep at least one list
+        pushUndo();
+        m_cueLists[li]->panic();
+        sf.cueLists.erase(sf.cueLists.begin() + li);
+        std::string err;
+        ShowHelpers::rebuildAllCueLists(*this, err);
+        const int newActive = std::min(m_activeListIdx, (int)sf.cueLists.size() - 1);
+        setActiveList(newActive);
+        dirty = true;
+        emit dirtyChanged(true);
+        emit cueListsChanged();
+        return true;
     });
 
     // --- mcp.time callbacks ---
@@ -231,7 +335,6 @@ AppModel::AppModel(QObject* parent)
 
     scriptlet->setGetMCCallback([this]() -> ScriptletMCInfo {
         ScriptletMCInfo info;
-        // Find the outermost playing cue that has an MC and no MC-having parent.
         int mcIdx = -1;
         for (int i = 0; i < cues().cueCount(); ++i) {
             const mcp::Cue* c = cues().cueAt(i);
@@ -260,12 +363,9 @@ AppModel::AppModel(QObject* parent)
 
     scriptlet->setGetStateCallback([this]() -> ScriptletStateInfo {
         ScriptletStateInfo state;
-        // selected cue
         state.selectedCue = cues().selectedIndex();
-        // running cues
         for (int i = 0; i < cues().cueCount(); ++i)
             if (cues().isCuePlaying(i)) state.runningCues.push_back(i);
-        // mc master — outermost playing cue with MC and no MC-having parent
         for (int i = 0; i < cues().cueCount(); ++i) {
             const mcp::Cue* c = cues().cueAt(i);
             if (!c || !cues().hasMusicContext(i) || !cues().isCuePlaying(i)) continue;
@@ -276,7 +376,7 @@ AppModel::AppModel(QObject* parent)
         return state;
     });
 
-    // --- Multi-list scripting callbacks ---
+    // --- mcp.cue_list list-info callbacks ---
 
     scriptlet->setListInfoCallback([this]() {
         std::vector<std::pair<int,std::string>> result;
@@ -286,11 +386,6 @@ AppModel::AppModel(QObject* parent)
     });
     scriptlet->setActiveListIdCallback([this]() {
         return sf.cueLists.empty() ? -1 : sf.cueLists[m_activeListIdx].numericId;
-    });
-    scriptlet->setSwitchListCallback([this](int listId) {
-        for (int li = 0; li < (int)sf.cueLists.size(); ++li) {
-            if (sf.cueLists[li].numericId == listId) { setActiveList(li); break; }
-        }
     });
 
     // --- Show Information state ---
@@ -388,21 +483,30 @@ void AppModel::tick() {
     if (wasActive != isActive)
         emit playbackStateChanged();
 
-    // Drain scriptlets from ALL lists (any list can trigger a scriptlet cue).
+    // Drain scriptlets from ALL lists into a local buffer BEFORE running any of them.
+    // Running a scriptlet can invoke insert/delete-cue-list callbacks which call
+    // rebuildAllCueLists() → syncListCount(), mutating m_cueLists and invalidating
+    // any range-for iterator over it.
+    std::vector<std::pair<int,std::string>> pendingScriptlets;
+    for (auto& cl : m_cueLists)
+        for (auto& entry : cl->drainScriptlets())
+            pendingScriptlets.push_back(std::move(entry));
+
     bool needListRefresh = false;
-    for (auto& cl : m_cueLists) {
-        for (const auto& [cueIdx, code] : cl->drainScriptlets()) {
-            const std::string err = scriptlet->run(code);
-            const bool hadError = scriptletErrorCues.count(cueIdx) > 0;
-            if (!err.empty()) {
-                scriptletErrorCues.insert(cueIdx);
-                scriptletErrors[cueIdx] = err;
-            } else {
-                scriptletErrorCues.erase(cueIdx);
-                scriptletErrors.erase(cueIdx);
-            }
-            if ((err.empty()) == hadError) needListRefresh = true;
+    for (const auto& [cueIdx, code] : pendingScriptlets) {
+        if (m_scriptletRunningCues.count(cueIdx)) continue;   // already running this cue
+        m_scriptletRunningCues.insert(cueIdx);
+        const std::string err = scriptlet->run(code);
+        m_scriptletRunningCues.erase(cueIdx);
+        const bool hadError = scriptletErrorCues.count(cueIdx) > 0;
+        if (!err.empty()) {
+            scriptletErrorCues.insert(cueIdx);
+            scriptletErrors[cueIdx] = err;
+        } else {
+            scriptletErrorCues.erase(cueIdx);
+            scriptletErrors.erase(cueIdx);
         }
+        if ((err.empty()) == hadError) needListRefresh = true;
     }
     if (needListRefresh) emit cueListChanged();
 
@@ -463,11 +567,35 @@ void AppModel::applyMidiInput() {
 }
 
 void AppModel::applyScriptletLibrary() {
+    // Start with built-in modules; user entries with the same name take precedence.
     std::vector<std::pair<std::string,std::string>> mods;
-    mods.reserve(sf.scriptletLibrary.entries.size());
-    for (const auto& e : sf.scriptletLibrary.entries)
+    mods.reserve(m_builtinScriptlets.size() + sf.scriptletLibrary.entries.size());
+    for (const auto& e : m_builtinScriptlets)
         mods.emplace_back(e.name, e.code);
+    for (const auto& e : sf.scriptletLibrary.entries) {
+        auto it = std::find_if(mods.begin(), mods.end(),
+            [&](const auto& p){ return p.first == e.name; });
+        if (it != mods.end()) it->second = e.code;   // user overrides built-in
+        else                  mods.emplace_back(e.name, e.code);
+    }
     scriptlet->setLibrary(mods);
+}
+
+void AppModel::loadBuiltinScriptlets(const QString& dir) {
+    m_builtinScriptlets.clear();
+    if (!dir.isEmpty()) {
+        QDir d(dir);
+        const QStringList files = d.entryList({"*.py"}, QDir::Files, QDir::Name);
+        for (const QString& fn : files) {
+            QFile f(d.filePath(fn));
+            if (!f.open(QIODevice::ReadOnly | QIODevice::Text)) continue;
+            mcp::ShowFile::ScriptletLibrary::Entry entry;
+            entry.name = QFileInfo(fn).completeBaseName().toStdString();
+            entry.code = QString::fromUtf8(f.readAll()).toStdString();
+            m_builtinScriptlets.push_back(std::move(entry));
+        }
+    }
+    applyScriptletLibrary();
 }
 
 // ---------------------------------------------------------------------------

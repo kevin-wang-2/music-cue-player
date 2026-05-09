@@ -123,7 +123,21 @@ public:
     // Apply MIDI input: open all ports.
     void applyMidiInput();
     // Sync scriptlet library from sf into the ScriptletEngine.
+    // Merges built-in entries (from scriptlets/ dir) with user entries in sf.
     void applyScriptletLibrary();
+
+    // Returns true if cue[row] in the active list is currently executing as a scriptlet.
+    // Use alongside cues().isCuePlaying() to show running state for scriptlet cues.
+    bool isScriptletCuePlaying(int row) const { return m_scriptletRunningCues.count(row) > 0; }
+
+    // Scan dir for *.py files and load them as built-in library modules.
+    // Built-in modules are always available but never saved to the show file.
+    // User entries in sf with the same name take precedence.
+    void loadBuiltinScriptlets(const QString& dir);
+
+    // Access the currently loaded built-in modules (read-only).
+    const std::vector<mcp::ShowFile::ScriptletLibrary::Entry>& builtinScriptlets() const
+        { return m_builtinScriptlets; }
 
     // Route an incoming MIDI message to matching cue triggers + system controls.
     // Called internally; also exposed for testing.
@@ -158,5 +172,7 @@ signals:
 
 private:
     std::vector<std::unique_ptr<mcp::CueList>> m_cueLists;
-    int m_activeListIdx{0};
+    int  m_activeListIdx{0};
+    std::set<int> m_scriptletRunningCues;   // cue indices currently executing (reentrance guard)
+    std::vector<mcp::ShowFile::ScriptletLibrary::Entry> m_builtinScriptlets;
 };

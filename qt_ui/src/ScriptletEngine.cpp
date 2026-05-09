@@ -4,17 +4,20 @@
 #include <cmath>
 #include <cstring>
 #include <cstdio>
+#include <optional>
 #include <string>
 
 // ---------------------------------------------------------------------------
 // Static callbacks
 
 static std::function<void()>                   s_goCb;
-static std::function<void(const std::string&)> s_selectCb;
+static std::function<bool(const std::string&)> s_selectCb;
 static std::function<void(const std::string&)> s_alertCb;
 static std::function<bool(const std::string&)> s_confirmCb;
 static std::function<void(const std::string&)> s_outputCb;
 static std::function<void()>                   s_panicCb;
+static std::function<std::optional<std::string>(const std::string&, const std::string&, const std::string&)> s_fileCb;
+static std::function<std::optional<std::string>(const std::string&, const std::string&, const std::string&)> s_inputCb;
 
 // --- mcp.error types (created at interpreter init, kept alive globally) ---
 static PyObject* s_errCueNotFound     = nullptr;
@@ -22,7 +25,7 @@ static PyObject* s_errCueType         = nullptr;
 static PyObject* s_errNoMasterContext = nullptr;
 static PyObject* s_errInvalidOp       = nullptr;
 
-static std::function<int()>                              s_cueCountCb;
+// --- mcp.cue active-list action callbacks ---
 static std::function<ScriptletCueInfo(int)>              s_cueInfoCb;
 static std::function<void(int)>                          s_cueSelectCb;
 static std::function<void(int)>                          s_cueGoCb;
@@ -32,15 +35,24 @@ static std::function<void(int)>                          s_cueStopCb;
 static std::function<void(int)>                          s_cueDisarmCb;
 static std::function<void(int, const std::string&)>      s_cueSetNameCb;
 
-static std::function<int(const std::string&, const std::string&, const std::string&)>       s_cueInsertCb;
-static std::function<int(int, const std::string&, const std::string&, const std::string&)>  s_cueInsertAtCb;
-static std::function<void(int, int, bool)>               s_cueMoveCb;
-static std::function<void(int)>                          s_cueDeleteCb;
+// --- mcp.cue_list.CueList method callbacks (list-ID-aware) ---
+static std::function<int(int)>                                                                      s_clCountCb;
+static std::function<ScriptletCueInfo(int, int)>                                                    s_clInfoCb;
+static std::function<int(int, const std::string&, const std::string&, const std::string&)>         s_clInsertCb;
+static std::function<int(int, int, const std::string&, const std::string&, const std::string&)>    s_clInsertAtCb;
+static std::function<bool(int, int, int, bool)>                                                     s_clMoveCb;
+static std::function<bool(int, int)>                                                                s_clDeleteCb;
+
+// --- mcp.cue_list module-level CRUD ---
+static std::function<int(const std::string&)>      s_insertListCb;
+static std::function<int(int, const std::string&)> s_insertListAtCb;
+static std::function<bool(int)>                    s_deleteListCb;
+
+// --- other ---
 static std::function<ScriptletMCInfo()>                  s_getMcCb;
 static std::function<ScriptletStateInfo()>               s_getStateCb;
 static std::function<std::vector<std::pair<int,std::string>>()> s_listInfoCb;
 static std::function<int()>                              s_activeListIdCb;
-static std::function<void(int)>                          s_switchListCb;
 
 static std::function<int()>                              s_getSampleRateCb;
 // (cueIdx, bar, beat) → seconds from cue start, or -1.0 if no MC
@@ -108,21 +120,34 @@ static PyObject* mcp_cue_repr(MCPCueObject* self) {
 
 // --- Methods ----------------------------------------------------------------
 
+static inline bool checkStaleCue(MCPCueObject* self) {
+    if (self->index >= 0) return false;
+    PyObject* exc = s_errCueNotFound ? s_errCueNotFound : PyExc_ValueError;
+    PyErr_SetString(exc, "cue is stale (already deleted)");
+    return true;
+}
+
 static PyObject* mcp_cue_select(MCPCueObject* self, PyObject*) {
+    if (checkStaleCue(self)) return nullptr;
     if (s_cueSelectCb) s_cueSelectCb(self->index);
     Py_RETURN_NONE;
 }
 static PyObject* mcp_cue_go(MCPCueObject* self, PyObject*) {
+    if (checkStaleCue(self)) return nullptr;
     if (s_cueGoCb) s_cueGoCb(self->index);
     Py_RETURN_NONE;
 }
 static PyObject* mcp_cue_start(MCPCueObject* self, PyObject*) {
+    if (checkStaleCue(self)) return nullptr;
     if (s_cueStartCb) s_cueStartCb(self->index);
     Py_RETURN_NONE;
 }
-static PyObject* mcp_cue_arm(MCPCueObject* self, PyObject* args) {
+static PyObject* mcp_cue_arm(MCPCueObject* self, PyObject* args, PyObject* kwargs) {
+    if (checkStaleCue(self)) return nullptr;
+    static const char* kwlist[] = {"time", nullptr};
     PyObject* timeObj = Py_None;
-    if (!PyArg_ParseTuple(args, "|O", &timeObj)) return nullptr;
+    if (!PyArg_ParseTupleAndKeywords(args, kwargs, "|O",
+            const_cast<char**>(kwlist), &timeObj)) return nullptr;
 
     double t = -1.0;
     if (timeObj != Py_None) {
@@ -139,10 +164,12 @@ static PyObject* mcp_cue_arm(MCPCueObject* self, PyObject* args) {
     Py_RETURN_NONE;
 }
 static PyObject* mcp_cue_stop(MCPCueObject* self, PyObject*) {
+    if (checkStaleCue(self)) return nullptr;
     if (s_cueStopCb) s_cueStopCb(self->index);
     Py_RETURN_NONE;
 }
 static PyObject* mcp_cue_disarm(MCPCueObject* self, PyObject*) {
+    if (checkStaleCue(self)) return nullptr;
     if (s_cueDisarmCb) s_cueDisarmCb(self->index);
     Py_RETURN_NONE;
 }
@@ -151,7 +178,7 @@ static PyMethodDef kCueMethods[] = {
     {"select",  (PyCFunction)mcp_cue_select, METH_NOARGS,  "select()  — set as selected cue (cursor only)"},
     {"go",      (PyCFunction)mcp_cue_go,     METH_NOARGS,  "go()  — select this cue and fire it"},
     {"start",   (PyCFunction)mcp_cue_start,  METH_NOARGS,  "start()  — fire without changing selection"},
-    {"arm",     (PyCFunction)mcp_cue_arm,    METH_VARARGS, "arm(time: Time = None)  — pre-buffer from position"},
+    {"arm",     (PyCFunction)mcp_cue_arm,    METH_VARARGS | METH_KEYWORDS, "arm(time: Time = None)  — pre-buffer from position"},
     {"stop",    (PyCFunction)mcp_cue_stop,   METH_NOARGS,  "stop()  — stop all active voices"},
     {"disarm",  (PyCFunction)mcp_cue_disarm, METH_NOARGS,  "disarm()  — release pre-buffered audio"},
     {nullptr}
@@ -197,6 +224,10 @@ static PyObject* mcp_cue_get_name(MCPCueObject* self, void*) {
     return PyUnicode_FromString(i.name.c_str());
 }
 static int mcp_cue_set_name(MCPCueObject* self, PyObject* val, void*) {
+    if (self->index < 0) {
+        PyObject* exc = s_errCueNotFound ? s_errCueNotFound : PyExc_ValueError;
+        PyErr_SetString(exc, "cue is stale (already deleted)"); return -1;
+    }
     if (!val || !PyUnicode_Check(val)) {
         PyErr_SetString(PyExc_TypeError, "name must be a str"); return -1;
     }
@@ -304,9 +335,11 @@ static PyObject* mcp_time_to_min_sec(MCPTimeObject* self, PyObject*) {
     const double sec = self->seconds - min * 60.0;
     return Py_BuildValue("(id)", min, sec);
 }
-static PyObject* mcp_time_to_timecode(MCPTimeObject* self, PyObject* args) {
+static PyObject* mcp_time_to_timecode(MCPTimeObject* self, PyObject* args, PyObject* kwargs) {
+    static const char* kwlist[] = {"fps", nullptr};
     double fps = 25.0;
-    if (!PyArg_ParseTuple(args, "|d", &fps)) return nullptr;
+    if (!PyArg_ParseTupleAndKeywords(args, kwargs, "|d",
+            const_cast<char**>(kwlist), &fps)) return nullptr;
     if (fps <= 0) fps = 25.0;
     const double total = self->seconds;
     const int h = static_cast<int>(total / 3600.0);
@@ -321,7 +354,7 @@ static PyObject* mcp_time_to_timecode(MCPTimeObject* self, PyObject* args) {
 // Forward declarations for static factory methods (defined below makeTimeObject).
 static PyObject* mcp_time_from_sample   (PyObject*, PyObject*);
 static PyObject* mcp_time_from_min_sec  (PyObject*, PyObject*);
-static PyObject* mcp_time_from_timecode (PyObject*, PyObject*);
+static PyObject* mcp_time_from_timecode (PyObject*, PyObject*, PyObject*);
 static PyObject* mcp_time_from_bar_beat (PyObject*, PyObject*);
 
 static PyMethodDef kTimeMethods[] = {
@@ -329,11 +362,11 @@ static PyMethodDef kTimeMethods[] = {
     {"to_seconds",    (PyCFunction)mcp_time_to_seconds,    METH_NOARGS,                  "to_seconds() → float"},
     {"to_samples",    (PyCFunction)mcp_time_to_samples,    METH_NOARGS,                  "to_samples() → int"},
     {"to_min_sec",    (PyCFunction)mcp_time_to_min_sec,    METH_NOARGS,                  "to_min_sec() → (int, float)"},
-    {"to_timecode",   (PyCFunction)mcp_time_to_timecode,   METH_VARARGS,                 "to_timecode(fps=25) → 'HH:MM:SS:FF'"},
+    {"to_timecode",   (PyCFunction)mcp_time_to_timecode,   METH_VARARGS | METH_KEYWORDS, "to_timecode(fps=25) → 'HH:MM:SS:FF'"},
     // Static factory methods (PyType_Ready wraps these in staticmethod descriptors)
     {"from_sample",   (PyCFunction)mcp_time_from_sample,   METH_VARARGS | METH_STATIC,   "from_sample(n) → Time"},
     {"from_min_sec",  (PyCFunction)mcp_time_from_min_sec,  METH_VARARGS | METH_STATIC,   "from_min_sec(min, sec) → Time"},
-    {"from_timecode", (PyCFunction)mcp_time_from_timecode, METH_VARARGS | METH_STATIC,   "from_timecode(tc, fps=25) → Time"},
+    {"from_timecode", (PyCFunction)mcp_time_from_timecode, METH_VARARGS | METH_KEYWORDS | METH_STATIC, "from_timecode(tc, fps=25) → Time"},
     {"from_bar_beat", (PyCFunction)mcp_time_from_bar_beat, METH_VARARGS | METH_STATIC,   "from_bar_beat(bar, beat, cue) → Time"},
     {nullptr}
 };
@@ -359,9 +392,11 @@ static PyObject* mcp_time_from_min_sec(PyObject*, PyObject* args) {
     if (!PyArg_ParseTuple(args, "id", &min, &sec)) return nullptr;
     return makeTimeObject(min * 60.0 + sec);
 }
-static PyObject* mcp_time_from_timecode(PyObject*, PyObject* args) {
+static PyObject* mcp_time_from_timecode(PyObject*, PyObject* args, PyObject* kwargs) {
+    static const char* kwlist[] = {"timecode", "fps", nullptr};
     const char* tc = nullptr; double fps = 25.0;
-    if (!PyArg_ParseTuple(args, "s|d", &tc, &fps)) return nullptr;
+    if (!PyArg_ParseTupleAndKeywords(args, kwargs, "s|d",
+            const_cast<char**>(kwlist), &tc, &fps)) return nullptr;
     if (!tc || fps <= 0) { PyErr_SetString(PyExc_ValueError, "invalid timecode or fps"); return nullptr; }
     // Accept HH:MM:SS:FF or MM:SS:FF
     int a = 0, b = 0, c = 0, d = 0;
@@ -486,92 +521,35 @@ static PyObject* makeCueObject(PyObject* cueMod, int idx) {
 // ---------------------------------------------------------------------------
 // mcp.cue module functions
 
-static PyObject* mcp_cue_list_cues(PyObject* module, PyObject*) {
-    if (!s_cueCountCb || !s_cueInfoCb) return PyList_New(0);
+static PyObject* mcp_cue_get_selected(PyObject* module, PyObject*) {
+    if (!s_getStateCb) Py_RETURN_NONE;
+    const auto state = s_getStateCb();
+    if (state.selectedCue < 0) Py_RETURN_NONE;
+    return makeCueObject(module, state.selectedCue);
+}
 
-    const int count = s_cueCountCb();
-    PyObject* result = PyList_New(count);
+static PyObject* mcp_cue_get_current(PyObject* module, PyObject*) {
+    // "current" == cursor position == selected
+    return mcp_cue_get_selected(module, nullptr);
+}
+
+static PyObject* mcp_cue_get_active(PyObject* module, PyObject*) {
+    if (!s_getStateCb) return PyList_New(0);
+    const auto state = s_getStateCb();
+    PyObject* result = PyList_New(static_cast<Py_ssize_t>(state.runningCues.size()));
     if (!result) return nullptr;
-
-    for (int i = 0; i < count; ++i) {
-        PyObject* obj = makeCueObject(module, i);
-        if (!obj) { Py_DECREF(result); return nullptr; }
-        PyList_SET_ITEM(result, i, obj);
+    for (size_t i = 0; i < state.runningCues.size(); ++i) {
+        PyObject* obj = makeCueObject(module, state.runningCues[i]);
+        if (!obj) { PyErr_Clear(); obj = Py_None; Py_INCREF(obj); }
+        PyList_SET_ITEM(result, static_cast<Py_ssize_t>(i), obj);
     }
     return result;
 }
 
-static PyObject* mcp_cue_insert_cue(PyObject* module, PyObject* args) {
-    const char* type   = nullptr;
-    const char* number = "";
-    const char* name   = "";
-    if (!PyArg_ParseTuple(args, "s|ss", &type, &number, &name)) return nullptr;
-    if (!s_cueInsertCb) { PyErr_SetString(PyExc_RuntimeError, "no insert callback"); return nullptr; }
-
-    const int newIdx = s_cueInsertCb(type   ? type   : "",
-                                      number ? number : "",
-                                      name   ? name   : "");
-    if (newIdx < 0) { PyErr_SetString(PyExc_RuntimeError, "insert_cue failed"); return nullptr; }
-    return makeCueObject(module, newIdx);
-}
-
-static PyObject* mcp_cue_insert_cue_at(PyObject* module, PyObject* args) {
-    PyObject*   refObj = nullptr;
-    const char* type   = nullptr;
-    const char* number = "";
-    const char* name   = "";
-    if (!PyArg_ParseTuple(args, "Os|ss", &refObj, &type, &number, &name)) return nullptr;
-
-    if (!PyObject_IsInstance(refObj, (PyObject*)&MCPCueType)) {
-        PyErr_SetString(PyExc_TypeError, "ref must be a Cue"); return nullptr;
-    }
-    const int refIdx = ((MCPCueObject*)refObj)->index;
-    if (!s_cueInsertAtCb) { PyErr_SetString(PyExc_RuntimeError, "no insert_at callback"); return nullptr; }
-
-    const int newIdx = s_cueInsertAtCb(refIdx,
-                                        type   ? type   : "",
-                                        number ? number : "",
-                                        name   ? name   : "");
-    if (newIdx < 0) { PyErr_SetString(PyExc_RuntimeError, "insert_cue_at failed"); return nullptr; }
-    return makeCueObject(module, newIdx);
-}
-
-static PyObject* mcp_cue_move_cue_at(PyObject* /*module*/, PyObject* args) {
-    PyObject* refObj = nullptr;
-    PyObject* cueObj = nullptr;
-    int       toGroup = 0;
-    if (!PyArg_ParseTuple(args, "OO|p", &refObj, &cueObj, &toGroup)) return nullptr;
-
-    if (!PyObject_IsInstance(refObj, (PyObject*)&MCPCueType)) {
-        PyErr_SetString(PyExc_TypeError, "ref must be a Cue"); return nullptr;
-    }
-    if (!PyObject_IsInstance(cueObj, (PyObject*)&MCPCueType)) {
-        PyErr_SetString(PyExc_TypeError, "cue must be a Cue"); return nullptr;
-    }
-    if (!s_cueMoveCb) { PyErr_SetString(PyExc_RuntimeError, "no move callback"); return nullptr; }
-    s_cueMoveCb(((MCPCueObject*)refObj)->index,
-                ((MCPCueObject*)cueObj)->index,
-                toGroup != 0);
-    Py_RETURN_NONE;
-}
-
-static PyObject* mcp_cue_delete_cue(PyObject* /*module*/, PyObject* arg) {
-    if (!PyObject_IsInstance(arg, (PyObject*)&MCPCueType)) {
-        PyErr_SetString(PyExc_TypeError, "arg must be a Cue"); return nullptr;
-    }
-    const int idx = ((MCPCueObject*)arg)->index;
-    if (!s_cueDeleteCb) { PyErr_SetString(PyExc_RuntimeError, "no delete callback"); return nullptr; }
-    s_cueDeleteCb(idx);
-    ((MCPCueObject*)arg)->index = -1;
-    Py_RETURN_NONE;
-}
-
 static PyMethodDef kCueModuleMethods[] = {
-    {"list_cues",     mcp_cue_list_cues,     METH_NOARGS,  "list_cues() → [Cue]"},
-    {"insert_cue",    mcp_cue_insert_cue,    METH_VARARGS, "insert_cue(type, number='', name='') → Cue"},
-    {"insert_cue_at", mcp_cue_insert_cue_at, METH_VARARGS, "insert_cue_at(ref, type, number='', name='') → Cue"},
-    {"move_cue_at",   mcp_cue_move_cue_at,   METH_VARARGS, "move_cue_at(ref, cue, to_group=False)"},
-    {"delete_cue",    mcp_cue_delete_cue,    METH_O,       "delete_cue(cue)"},
+    {"get_selected_cue", mcp_cue_get_selected, METH_NOARGS, "get_selected_cue() → Cue | None"},
+    {"get_current_cue",  mcp_cue_get_current,  METH_NOARGS, "get_current_cue() → Cue | None"},
+    {"get_active_cues",  mcp_cue_get_active,   METH_NOARGS, "get_active_cues() → [Cue]"},
     {nullptr}
 };
 
@@ -612,6 +590,327 @@ GroupCue    = type('GroupCue',    (Cue,), {'__doc__': 'Group / timeline cue'})
     PyObject* res = PyRun_String(kSubclasses, Py_file_input, modDict, modDict);
     if (res) { Py_DECREF(res); } else { PyErr_Clear(); }
 
+    return mod;
+}
+
+// ---------------------------------------------------------------------------
+// Valid cue type strings accepted by insert_cue / insert_cue_at.
+static bool isValidCueType(const char* t) {
+    static const char* const kTypes[] = {
+        "audio", "memo", "group", "start", "stop", "arm", "devamp",
+        "fade", "timecode", "midi", "network", "goto", "marker", "scriptlet",
+        nullptr
+    };
+    if (!t || !*t) return false;
+    for (int i = 0; kTypes[i]; ++i)
+        if (strcmp(t, kTypes[i]) == 0) return true;
+    return false;
+}
+
+// mcp.cue_list — CueList extension type
+
+typedef struct {
+    PyObject_HEAD
+    int list_id;
+} MCPCueListObject;
+
+static PyObject* mcp_cuelist_new_guard(PyTypeObject*, PyObject*, PyObject*) {
+    PyErr_SetString(PyExc_TypeError,
+        "CueList cannot be instantiated directly; use mcp.cue_list.get_active_cue_list()");
+    return nullptr;
+}
+
+static PyObject* mcp_cuelist_repr(MCPCueListObject* self) {
+    return PyUnicode_FromFormat("<CueList id=%d>", self->list_id);
+}
+
+static PyObject* mcp_cuelist_get_id(MCPCueListObject* self, void*) {
+    return PyLong_FromLong(self->list_id);
+}
+
+// Helper: build a Cue object whose type is resolved via s_clInfoCb (list-aware).
+static PyObject* makeCueObjectForList(PyObject* cueMod, int list_id, int idx) {
+    PyTypeObject* type = &MCPCueType;
+    if (cueMod && s_clInfoCb) {
+        const auto info = s_clInfoCb(list_id, idx);
+        const char* clsName = classForType(info.type);
+        PyObject* cls = PyObject_GetAttrString(cueMod, clsName);
+        if (cls) { type = (PyTypeObject*)cls; Py_DECREF(cls); }
+        else PyErr_Clear();
+    }
+    MCPCueObject* obj = (MCPCueObject*)type->tp_alloc(type, 0);
+    if (!obj) return nullptr;
+    obj->index = idx;
+    return (PyObject*)obj;
+}
+
+// Forward-declare CueList methods so kCueListMethods can reference them before MCPCueListType.
+static PyObject* mcp_cuelist_list_cues    (MCPCueListObject*, PyObject*);
+static PyObject* mcp_cuelist_insert_cue   (MCPCueListObject*, PyObject*, PyObject*);
+static PyObject* mcp_cuelist_insert_cue_at(MCPCueListObject*, PyObject*, PyObject*);
+static PyObject* mcp_cuelist_move_cue_at  (MCPCueListObject*, PyObject*, PyObject*);
+static PyObject* mcp_cuelist_delete_cue   (MCPCueListObject*, PyObject*);
+
+static PyMethodDef kCueListMethods[] = {
+    {"list_cues",     (PyCFunction)mcp_cuelist_list_cues,     METH_NOARGS,                    "list_cues() → [Cue]"},
+    {"insert_cue",    (PyCFunction)mcp_cuelist_insert_cue,    METH_VARARGS | METH_KEYWORDS,   "insert_cue(type, cuenumber='', cuename='') → Cue"},
+    {"insert_cue_at", (PyCFunction)mcp_cuelist_insert_cue_at, METH_VARARGS | METH_KEYWORDS,   "insert_cue_at(ref, type, cuenumber='', cuename='') → Cue"},
+    {"move_cue_at",   (PyCFunction)mcp_cuelist_move_cue_at,   METH_VARARGS | METH_KEYWORDS,   "move_cue_at(ref, cue, to_group=False)"},
+    {"delete_cue",    (PyCFunction)mcp_cuelist_delete_cue,    METH_O,                         "delete_cue(cue)"},
+    {nullptr}
+};
+
+static PyGetSetDef kCueListGetSet[] = {
+    {const_cast<char*>("id"), (getter_func)mcp_cuelist_get_id, nullptr,
+     const_cast<char*>("numeric list ID"), nullptr},
+    {nullptr}
+};
+
+#pragma GCC diagnostic push
+#pragma GCC diagnostic ignored "-Wmissing-field-initializers"
+static PyTypeObject MCPCueListType = {
+    PyVarObject_HEAD_INIT(nullptr, 0)
+    "mcp.cue_list.CueList",
+    sizeof(MCPCueListObject),
+    0, nullptr,
+    0, nullptr, nullptr, nullptr,
+    (reprfunc)mcp_cuelist_repr,
+    nullptr, nullptr, nullptr,
+    nullptr, nullptr, nullptr,
+    nullptr, nullptr, nullptr,
+    Py_TPFLAGS_DEFAULT,
+    "CueList — handle to a cue list (obtain via mcp.cue_list.get_active_cue_list())",
+    nullptr, nullptr, nullptr,
+    0, nullptr, nullptr,
+    kCueListMethods,
+    nullptr,
+    kCueListGetSet,
+    nullptr, nullptr, nullptr, nullptr, 0,
+    nullptr, nullptr,
+    mcp_cuelist_new_guard,
+};
+#pragma GCC diagnostic pop
+
+static PyObject* makeCueListObject(int list_id) {
+    MCPCueListObject* obj = (MCPCueListObject*)MCPCueListType.tp_alloc(&MCPCueListType, 0);
+    if (!obj) return nullptr;
+    obj->list_id = list_id;
+    return (PyObject*)obj;
+}
+
+// CueList method definitions.
+
+static PyObject* mcp_cuelist_list_cues(MCPCueListObject* self, PyObject*) {
+    if (self->list_id < 0) {
+        PyObject* exc = s_errInvalidOp ? s_errInvalidOp : PyExc_RuntimeError;
+        PyErr_SetString(exc, "cue list has been deleted"); return nullptr;
+    }
+    if (!s_clCountCb || !s_clInfoCb) return PyList_New(0);
+    const int count = s_clCountCb(self->list_id);
+    if (count < 0) {
+        PyObject* exc = s_errInvalidOp ? s_errInvalidOp : PyExc_RuntimeError;
+        PyErr_SetString(exc, "cue list has been deleted"); return nullptr;
+    }
+    PyObject* result = PyList_New(count);
+    if (!result) return nullptr;
+    PyObject* cueMod = getCueMod();
+    for (int i = 0; i < count; ++i) {
+        PyObject* obj = makeCueObjectForList(cueMod, self->list_id, i);
+        if (!obj) { Py_DECREF(result); return nullptr; }
+        PyList_SET_ITEM(result, i, obj);
+    }
+    return result;
+}
+
+static PyObject* mcp_cuelist_insert_cue(MCPCueListObject* self, PyObject* args, PyObject* kwargs) {
+    if (self->list_id < 0) {
+        PyObject* exc = s_errInvalidOp ? s_errInvalidOp : PyExc_RuntimeError;
+        PyErr_SetString(exc, "cue list has been deleted"); return nullptr;
+    }
+    static const char* kwlist[] = {"type", "cuenumber", "cuename", nullptr};
+    const char* type   = nullptr;
+    const char* number = "";
+    const char* name   = "";
+    if (!PyArg_ParseTupleAndKeywords(args, kwargs, "s|ss",
+            const_cast<char**>(kwlist), &type, &number, &name)) return nullptr;
+    if (!isValidCueType(type)) {
+        PyObject* exc = s_errCueType ? s_errCueType : PyExc_ValueError;
+        PyErr_Format(exc, "unknown cue type: '%s'", type ? type : ""); return nullptr;
+    }
+    if (!s_clInsertCb) { PyErr_SetString(PyExc_RuntimeError, "no insert callback"); return nullptr; }
+    const int newIdx = s_clInsertCb(self->list_id,
+                                     type   ? type   : "",
+                                     number ? number : "",
+                                     name   ? name   : "");
+    if (newIdx < 0) { PyErr_SetString(PyExc_RuntimeError, "insert_cue failed"); return nullptr; }
+    return makeCueObjectForList(getCueMod(), self->list_id, newIdx);
+}
+
+static PyObject* mcp_cuelist_insert_cue_at(MCPCueListObject* self, PyObject* args, PyObject* kwargs) {
+    if (self->list_id < 0) {
+        PyObject* exc = s_errInvalidOp ? s_errInvalidOp : PyExc_RuntimeError;
+        PyErr_SetString(exc, "cue list has been deleted"); return nullptr;
+    }
+    static const char* kwlist[] = {"ref", "type", "cuenumber", "cuename", nullptr};
+    PyObject*   refObj = nullptr;
+    const char* type   = nullptr;
+    const char* number = "";
+    const char* name   = "";
+    if (!PyArg_ParseTupleAndKeywords(args, kwargs, "Os|ss",
+            const_cast<char**>(kwlist), &refObj, &type, &number, &name)) return nullptr;
+    if (!PyObject_IsInstance(refObj, (PyObject*)&MCPCueType)) {
+        PyErr_SetString(PyExc_TypeError, "ref must be a Cue"); return nullptr;
+    }
+    const int refIdx = ((MCPCueObject*)refObj)->index;
+    if (refIdx < 0) {
+        PyObject* exc = s_errCueNotFound ? s_errCueNotFound : PyExc_ValueError;
+        PyErr_SetString(exc, "ref cue is stale (already deleted)"); return nullptr;
+    }
+    if (!isValidCueType(type)) {
+        PyObject* exc = s_errCueType ? s_errCueType : PyExc_ValueError;
+        PyErr_Format(exc, "unknown cue type: '%s'", type ? type : ""); return nullptr;
+    }
+    if (!s_clInsertAtCb) { PyErr_SetString(PyExc_RuntimeError, "no insert_at callback"); return nullptr; }
+    const int newIdx = s_clInsertAtCb(self->list_id, refIdx,
+                                       type   ? type   : "",
+                                       number ? number : "",
+                                       name   ? name   : "");
+    if (newIdx < 0) { PyErr_SetString(PyExc_RuntimeError, "insert_cue_at failed"); return nullptr; }
+    return makeCueObjectForList(getCueMod(), self->list_id, newIdx);
+}
+
+static PyObject* mcp_cuelist_move_cue_at(MCPCueListObject* self, PyObject* args, PyObject* kwargs) {
+    static const char* kwlist[] = {"ref", "cue", "to_group", nullptr};
+    PyObject* refObj  = nullptr;
+    PyObject* cueObj  = nullptr;
+    int       toGroup = 0;
+    if (!PyArg_ParseTupleAndKeywords(args, kwargs, "OO|p",
+            const_cast<char**>(kwlist), &refObj, &cueObj, &toGroup)) return nullptr;
+    if (!PyObject_IsInstance(refObj, (PyObject*)&MCPCueType)) {
+        PyErr_SetString(PyExc_TypeError, "ref must be a Cue"); return nullptr;
+    }
+    if (!PyObject_IsInstance(cueObj, (PyObject*)&MCPCueType)) {
+        PyErr_SetString(PyExc_TypeError, "cue must be a Cue"); return nullptr;
+    }
+    if (!s_clMoveCb) { PyErr_SetString(PyExc_RuntimeError, "no move callback"); return nullptr; }
+    const int refIdx = ((MCPCueObject*)refObj)->index;
+    const int cueIdx = ((MCPCueObject*)cueObj)->index;
+    if (refIdx < 0) {
+        PyObject* exc = s_errCueNotFound ? s_errCueNotFound : PyExc_ValueError;
+        PyErr_SetString(exc, "ref cue is stale (already deleted)"); return nullptr;
+    }
+    if (cueIdx < 0) {
+        PyObject* exc = s_errCueNotFound ? s_errCueNotFound : PyExc_ValueError;
+        PyErr_SetString(exc, "cue is stale (already deleted)"); return nullptr;
+    }
+    if (!s_clMoveCb(self->list_id, refIdx, cueIdx, toGroup != 0)) {
+        PyObject* exc = s_errInvalidOp ? s_errInvalidOp : PyExc_RuntimeError;
+        PyErr_SetString(exc, "move_cue_at: cue index out of range"); return nullptr;
+    }
+    Py_RETURN_NONE;
+}
+
+static PyObject* mcp_cuelist_delete_cue(MCPCueListObject* self, PyObject* arg) {
+    if (!PyObject_IsInstance(arg, (PyObject*)&MCPCueType)) {
+        PyErr_SetString(PyExc_TypeError, "arg must be a Cue"); return nullptr;
+    }
+    const int idx = ((MCPCueObject*)arg)->index;
+    if (idx < 0) {
+        PyObject* exc = s_errCueNotFound ? s_errCueNotFound : PyExc_ValueError;
+        PyErr_SetString(exc, "cue is stale (already deleted)"); return nullptr;
+    }
+    if (!s_clDeleteCb) { PyErr_SetString(PyExc_RuntimeError, "no delete callback"); return nullptr; }
+    if (!s_clDeleteCb(self->list_id, idx)) {
+        PyObject* exc = s_errCueNotFound ? s_errCueNotFound : PyExc_ValueError;
+        PyErr_SetString(exc, "delete_cue: cue index out of range"); return nullptr;
+    }
+    ((MCPCueObject*)arg)->index = -1;
+    Py_RETURN_NONE;
+}
+
+// mcp.cue_list module-level functions.
+
+static PyObject* py_cue_list_get_active(PyObject*, PyObject*) {
+    if (!s_activeListIdCb) { PyErr_SetString(PyExc_RuntimeError, "no active list callback"); return nullptr; }
+    return makeCueListObject(s_activeListIdCb());
+}
+
+static PyObject* py_cue_list_list(PyObject*, PyObject*) {
+    if (!s_listInfoCb) return PyList_New(0);
+    const auto lists = s_listInfoCb();
+    PyObject* result = PyList_New(static_cast<Py_ssize_t>(lists.size()));
+    if (!result) return nullptr;
+    for (size_t i = 0; i < lists.size(); ++i) {
+        PyObject* obj = makeCueListObject(lists[i].first);
+        if (!obj) { Py_DECREF(result); return nullptr; }
+        PyList_SET_ITEM(result, static_cast<Py_ssize_t>(i), obj);
+    }
+    return result;
+}
+
+static PyObject* py_cue_list_insert(PyObject*, PyObject* args) {
+    const char* name = "";
+    if (!PyArg_ParseTuple(args, "s", &name)) return nullptr;
+    if (!s_insertListCb) { PyErr_SetString(PyExc_RuntimeError, "no insert list callback"); return nullptr; }
+    const int id = s_insertListCb(name ? name : "");
+    if (id < 0) { PyErr_SetString(PyExc_RuntimeError, "insert_cue_list failed"); return nullptr; }
+    return makeCueListObject(id);
+}
+
+static PyObject* py_cue_list_insert_at(PyObject*, PyObject* args) {
+    PyObject*   refObj = nullptr;
+    const char* name   = "";
+    if (!PyArg_ParseTuple(args, "Os", &refObj, &name)) return nullptr;
+    if (!PyObject_IsInstance(refObj, (PyObject*)&MCPCueListType)) {
+        PyErr_SetString(PyExc_TypeError, "ref must be a CueList"); return nullptr;
+    }
+    const int refId = ((MCPCueListObject*)refObj)->list_id;
+    if (!s_insertListAtCb) { PyErr_SetString(PyExc_RuntimeError, "no insert_at list callback"); return nullptr; }
+    const int id = s_insertListAtCb(refId, name ? name : "");
+    if (id < 0) { PyErr_SetString(PyExc_RuntimeError, "insert_cue_list_at failed"); return nullptr; }
+    return makeCueListObject(id);
+}
+
+static PyObject* py_cue_list_delete(PyObject*, PyObject* arg) {
+    if (!PyObject_IsInstance(arg, (PyObject*)&MCPCueListType)) {
+        PyErr_SetString(PyExc_TypeError, "arg must be a CueList"); return nullptr;
+    }
+    const int id = ((MCPCueListObject*)arg)->list_id;
+    if (id < 0) {
+        PyObject* exc = s_errInvalidOp ? s_errInvalidOp : PyExc_RuntimeError;
+        PyErr_SetString(exc, "cue list has already been deleted"); return nullptr;
+    }
+    if (!s_deleteListCb) { PyErr_SetString(PyExc_RuntimeError, "no delete list callback"); return nullptr; }
+    if (!s_deleteListCb(id)) {
+        PyObject* exc = s_errInvalidOp ? s_errInvalidOp : PyExc_RuntimeError;
+        PyErr_SetString(exc, "cue list has already been deleted"); return nullptr;
+    }
+    ((MCPCueListObject*)arg)->list_id = -1;
+    Py_RETURN_NONE;
+}
+
+static PyMethodDef kCueListModuleMethods[] = {
+    {"get_active_cue_list", py_cue_list_get_active,  METH_NOARGS,  "get_active_cue_list() → CueList"},
+    {"list_cue_lists",      py_cue_list_list,         METH_NOARGS,  "list_cue_lists() → [CueList]"},
+    {"insert_cue_list",     py_cue_list_insert,       METH_VARARGS, "insert_cue_list(name) → CueList"},
+    {"insert_cue_list_at",  py_cue_list_insert_at,    METH_VARARGS, "insert_cue_list_at(ref, name) → CueList"},
+    {"delete_cue_list",     py_cue_list_delete,       METH_O,       "delete_cue_list(cue_list)"},
+    {nullptr}
+};
+
+#pragma GCC diagnostic push
+#pragma GCC diagnostic ignored "-Wmissing-field-initializers"
+static PyModuleDef kCueListModuleDef = {
+    PyModuleDef_HEAD_INIT, "mcp.cue_list", "mcp cue-list API", -1, kCueListModuleMethods
+};
+#pragma GCC diagnostic pop
+
+static PyObject* PyInit_mcp_cue_list() {
+    if (PyType_Ready(&MCPCueListType) < 0) return nullptr;
+    PyObject* mod = PyModule_Create(&kCueListModuleDef);
+    if (!mod) return nullptr;
+    Py_INCREF(&MCPCueListType);
+    PyModule_AddObject(mod, "CueList", (PyObject*)&MCPCueListType);
     return mod;
 }
 
@@ -719,7 +1018,10 @@ static PyObject* py_go(PyObject*, PyObject*) { if (s_goCb) s_goCb(); Py_RETURN_N
 static PyObject* py_select(PyObject*, PyObject* args) {
     const char* num = nullptr;
     if (!PyArg_ParseTuple(args, "s", &num)) return nullptr;
-    if (s_selectCb && num) s_selectCb(num);
+    if (s_selectCb && num && !s_selectCb(num)) {
+        PyObject* exc = s_errCueNotFound ? s_errCueNotFound : PyExc_ValueError;
+        PyErr_Format(exc, "no cue with number '%s'", num); return nullptr;
+    }
     Py_RETURN_NONE;
 }
 static PyObject* py_alert(PyObject*, PyObject* args) {
@@ -735,6 +1037,38 @@ static PyObject* py_confirm(PyObject*, PyObject* args) {
     Py_RETURN_FALSE;
 }
 static PyObject* py_panic(PyObject*, PyObject*) { if (s_panicCb) s_panicCb(); Py_RETURN_NONE; }
+
+static PyObject* py_file(PyObject*, PyObject* args, PyObject* kwargs) {
+    static const char* kwlist[] = {"title", "mode", "filter", nullptr};
+    const char* title  = "Open File";
+    const char* mode   = "open";
+    const char* filter = "";
+    if (!PyArg_ParseTupleAndKeywords(args, kwargs, "|sss",
+            const_cast<char**>(kwlist), &title, &mode, &filter))
+        return nullptr;
+    if (!s_fileCb) Py_RETURN_NONE;
+    auto result = s_fileCb(title ? title : "Open File",
+                            mode   ? mode   : "open",
+                            filter ? filter : "");
+    if (!result.has_value()) Py_RETURN_NONE;
+    return PyUnicode_FromString(result->c_str());
+}
+
+static PyObject* py_input(PyObject*, PyObject* args, PyObject* kwargs) {
+    static const char* kwlist[] = {"prompt", "default", "title", nullptr};
+    const char* prompt     = "";
+    const char* defaultVal = "";
+    const char* title      = "Input";
+    if (!PyArg_ParseTupleAndKeywords(args, kwargs, "s|ss",
+            const_cast<char**>(kwlist), &prompt, &defaultVal, &title))
+        return nullptr;
+    if (!s_inputCb) Py_RETURN_NONE;
+    auto result = s_inputCb(prompt     ? prompt     : "",
+                             defaultVal ? defaultVal : "",
+                             title      ? title      : "Input");
+    if (!result.has_value()) Py_RETURN_NONE;
+    return PyUnicode_FromString(result->c_str());
+}
 
 static PyObject* py_get_mc(PyObject*, PyObject*) {
     PyObject* d = PyDict_New();
@@ -797,45 +1131,19 @@ static PyObject* py_get_state(PyObject*, PyObject*) {
     return d;
 }
 
-static PyObject* py_list_lists(PyObject*, PyObject*) {
-    if (!s_listInfoCb) return PyList_New(0);
-    const auto lists = s_listInfoCb();
-    PyObject* result = PyList_New(static_cast<Py_ssize_t>(lists.size()));
-    if (!result) return nullptr;
-    for (size_t i = 0; i < lists.size(); ++i) {
-        PyObject* d = PyDict_New();
-        PyObject* id   = PyLong_FromLong(lists[i].first);
-        PyObject* name = PyUnicode_FromString(lists[i].second.c_str());
-        PyDict_SetItemString(d, "id",   id);
-        PyDict_SetItemString(d, "name", name);
-        Py_DECREF(id); Py_DECREF(name);
-        PyList_SET_ITEM(result, static_cast<Py_ssize_t>(i), d);
-    }
-    return result;
-}
-
-static PyObject* py_get_active_list(PyObject*, PyObject*) {
-    return PyLong_FromLong(s_activeListIdCb ? s_activeListIdCb() : -1);
-}
-
-static PyObject* py_switch_list(PyObject*, PyObject* args) {
-    int listId;
-    if (!PyArg_ParseTuple(args, "i", &listId)) return nullptr;
-    if (s_switchListCb) s_switchListCb(listId);
-    Py_RETURN_NONE;
-}
-
 static PyMethodDef kMcpMethods[] = {
-    {"go",              py_go,              METH_NOARGS,  "go()"},
-    {"select",          py_select,          METH_VARARGS, "select(num)"},
-    {"alert",           py_alert,           METH_VARARGS, "alert(msg)"},
-    {"confirm",         py_confirm,         METH_VARARGS, "confirm(msg) → bool"},
-    {"panic",           py_panic,           METH_NOARGS,  "panic()"},
-    {"get_mc",          py_get_mc,          METH_NOARGS,  "get_mc() → dict"},
-    {"get_state",       py_get_state,       METH_NOARGS,  "get_state() → dict"},
-    {"list_lists",      py_list_lists,      METH_NOARGS,  "list_lists() → [{id, name}]"},
-    {"get_active_list", py_get_active_list, METH_NOARGS,  "get_active_list() → int"},
-    {"switch_list",     py_switch_list,     METH_VARARGS, "switch_list(list_id)"},
+    {"go",        py_go,      METH_NOARGS,                    "go()"},
+    {"select",    py_select,  METH_VARARGS,                   "select(num)"},
+    {"alert",     py_alert,   METH_VARARGS,                   "alert(msg)"},
+    {"confirm",   py_confirm, METH_VARARGS,                   "confirm(msg) → bool"},
+    {"panic",     py_panic,   METH_NOARGS,                    "panic()"},
+    {"file",      (PyCFunction)py_file,  METH_VARARGS | METH_KEYWORDS,
+                  "file(title='Open File', mode='open', filter='') → str | None\n"
+                  "mode: 'open' | 'save' | 'dir'"},
+    {"input",     (PyCFunction)py_input, METH_VARARGS | METH_KEYWORDS,
+                  "input(prompt, default='', title='Input') → str | None"},
+    {"get_mc",    py_get_mc,  METH_NOARGS,                    "get_mc() → dict"},
+    {"get_state", py_get_state, METH_NOARGS,                  "get_state() → dict"},
     {nullptr, nullptr, 0, nullptr}
 };
 
@@ -858,10 +1166,11 @@ static PyObject* PyInit_mcp() {
         PyModule_AddObject(mod, std::strrchr(name, '.') + 1, sub);  // steals
     };
 
-    registerSub("mcp.cue",   PyInit_mcp_cue());
-    registerSub("mcp.event", PyInit_mcp_event());
-    registerSub("mcp.time",  PyInit_mcp_time());
-    registerSub("mcp.error", PyInit_mcp_error());
+    registerSub("mcp.cue",      PyInit_mcp_cue());
+    registerSub("mcp.cue_list", PyInit_mcp_cue_list());
+    registerSub("mcp.event",    PyInit_mcp_event());
+    registerSub("mcp.time",     PyInit_mcp_time());
+    registerSub("mcp.error",    PyInit_mcp_error());
 
     return mod;
 }
@@ -879,13 +1188,14 @@ ScriptletEngine::~ScriptletEngine() {
 }
 
 void ScriptletEngine::setGoCallback      (std::function<void()> cb)                    { s_goCb        = std::move(cb); }
-void ScriptletEngine::setSelectCallback  (std::function<void(const std::string&)> cb)  { s_selectCb    = std::move(cb); }
+void ScriptletEngine::setSelectCallback  (std::function<bool(const std::string&)> cb)  { s_selectCb    = std::move(cb); }
 void ScriptletEngine::setAlertCallback   (std::function<void(const std::string&)> cb)  { s_alertCb     = std::move(cb); }
 void ScriptletEngine::setConfirmCallback (std::function<bool(const std::string&)> cb)  { s_confirmCb   = std::move(cb); }
 void ScriptletEngine::setOutputCallback  (std::function<void(const std::string&)> cb)  { s_outputCb    = std::move(cb); }
 void ScriptletEngine::setPanicCallback   (std::function<void()> cb)                    { s_panicCb     = std::move(cb); }
+void ScriptletEngine::setFileCallback    (std::function<std::optional<std::string>(const std::string&, const std::string&, const std::string&)> cb) { s_fileCb  = std::move(cb); }
+void ScriptletEngine::setInputCallback   (std::function<std::optional<std::string>(const std::string&, const std::string&, const std::string&)> cb) { s_inputCb = std::move(cb); }
 
-void ScriptletEngine::setCueCountCallback  (std::function<int()> cb)                              { s_cueCountCb   = std::move(cb); }
 void ScriptletEngine::setCueInfoCallback   (std::function<ScriptletCueInfo(int)> cb)              { s_cueInfoCb    = std::move(cb); }
 void ScriptletEngine::setCueSelectCallback (std::function<void(int)> cb)                          { s_cueSelectCb  = std::move(cb); }
 void ScriptletEngine::setCueGoCallback     (std::function<void(int)> cb)                          { s_cueGoCb      = std::move(cb); }
@@ -895,19 +1205,24 @@ void ScriptletEngine::setCueStopCallback   (std::function<void(int)> cb)        
 void ScriptletEngine::setCueDisarmCallback (std::function<void(int)> cb)                          { s_cueDisarmCb  = std::move(cb); }
 void ScriptletEngine::setCueSetNameCallback(std::function<void(int, const std::string&)> cb)      { s_cueSetNameCb = std::move(cb); }
 
-void ScriptletEngine::setCueInsertCallback  (std::function<int(const std::string&, const std::string&, const std::string&)> cb)      { s_cueInsertCb   = std::move(cb); }
-void ScriptletEngine::setCueInsertAtCallback(std::function<int(int, const std::string&, const std::string&, const std::string&)> cb) { s_cueInsertAtCb = std::move(cb); }
-void ScriptletEngine::setCueMoveCallback    (std::function<void(int, int, bool)> cb)                                                  { s_cueMoveCb     = std::move(cb); }
-void ScriptletEngine::setCueDeleteCallback  (std::function<void(int)> cb)                                                             { s_cueDeleteCb   = std::move(cb); }
-void ScriptletEngine::setGetMCCallback      (std::function<ScriptletMCInfo()> cb)                                                     { s_getMcCb       = std::move(cb); }
-void ScriptletEngine::setGetStateCallback   (std::function<ScriptletStateInfo()> cb)                                                  { s_getStateCb    = std::move(cb); }
+void ScriptletEngine::setCueListCountCallback   (std::function<int(int)> cb)                                                                          { s_clCountCb    = std::move(cb); }
+void ScriptletEngine::setCueListInfoCallback    (std::function<ScriptletCueInfo(int, int)> cb)                                                        { s_clInfoCb     = std::move(cb); }
+void ScriptletEngine::setCueListInsertCallback  (std::function<int(int, const std::string&, const std::string&, const std::string&)> cb)              { s_clInsertCb   = std::move(cb); }
+void ScriptletEngine::setCueListInsertAtCallback(std::function<int(int, int, const std::string&, const std::string&, const std::string&)> cb)         { s_clInsertAtCb = std::move(cb); }
+void ScriptletEngine::setCueListMoveCallback    (std::function<bool(int, int, int, bool)> cb)                                                         { s_clMoveCb     = std::move(cb); }
+void ScriptletEngine::setCueListDeleteCallback  (std::function<bool(int, int)> cb)                                                                    { s_clDeleteCb   = std::move(cb); }
 
-void ScriptletEngine::setGetSampleRateCallback    (std::function<int()> cb)                       { s_getSampleRateCb     = std::move(cb); }
-void ScriptletEngine::setMusicalToSecondsCallback (std::function<double(int, int, int)> cb)       { s_musicalToSecondsCb  = std::move(cb); }
+void ScriptletEngine::setInsertCueListCallback  (std::function<int(const std::string&)> cb)       { s_insertListCb   = std::move(cb); }
+void ScriptletEngine::setInsertCueListAtCallback(std::function<int(int, const std::string&)> cb)  { s_insertListAtCb = std::move(cb); }
+void ScriptletEngine::setDeleteCueListCallback  (std::function<bool(int)> cb)                     { s_deleteListCb   = std::move(cb); }
+
+void ScriptletEngine::setGetMCCallback       (std::function<ScriptletMCInfo()> cb)                { s_getMcCb            = std::move(cb); }
+void ScriptletEngine::setGetStateCallback    (std::function<ScriptletStateInfo()> cb)             { s_getStateCb         = std::move(cb); }
+void ScriptletEngine::setGetSampleRateCallback(std::function<int()> cb)                           { s_getSampleRateCb    = std::move(cb); }
+void ScriptletEngine::setMusicalToSecondsCallback(std::function<double(int, int, int)> cb)        { s_musicalToSecondsCb = std::move(cb); }
 
 void ScriptletEngine::setListInfoCallback    (std::function<std::vector<std::pair<int,std::string>>()> cb) { s_listInfoCb     = std::move(cb); }
-void ScriptletEngine::setActiveListIdCallback(std::function<int()>     cb)                                 { s_activeListIdCb = std::move(cb); }
-void ScriptletEngine::setSwitchListCallback  (std::function<void(int)> cb)                                 { s_switchListCb   = std::move(cb); }
+void ScriptletEngine::setActiveListIdCallback(std::function<int()> cb)                                     { s_activeListIdCb = std::move(cb); }
 
 // ---------------------------------------------------------------------------
 // Event firing

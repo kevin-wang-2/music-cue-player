@@ -42,6 +42,28 @@
 #include <QVBoxLayout>
 #include <filesystem>
 
+// ── Built-in scriptlets directory ─────────────────────────────────────────
+
+static QString findScriptletsDir() {
+    const QString appDir = QCoreApplication::applicationDirPath();
+    // Production .app bundle: Contents/MacOS → Contents/Resources/scriptlets
+    {
+        QDir d(appDir + "/../Resources/scriptlets");
+        if (d.exists()) return d.canonicalPath();
+    }
+    // Dev build: build/bin/app.app/Contents/MacOS → project-root/scriptlets (5 up)
+    {
+        QDir d(appDir + "/../../../../../scriptlets");
+        if (d.exists()) return d.canonicalPath();
+    }
+    // Flat layout: scriptlets/ next to binary
+    {
+        QDir d(appDir + "/scriptlets");
+        if (d.exists()) return d.canonicalPath();
+    }
+    return {};
+}
+
 // ── style constants ────────────────────────────────────────────────────────
 
 static const char* kGoBarStyle = R"(
@@ -177,7 +199,9 @@ MainWindow::MainWindow(AppModel* model, QWidget* parent)
     // Start external trigger infrastructure
     m_model->applyMidiInput();
     m_model->applyOscSettings();
-    m_model->applyScriptletLibrary();
+    // Load built-in scriptlets from scriptlets/ dir (merged with show's user entries).
+    m_model->loadBuiltinScriptlets(findScriptletsDir());
+    // applyScriptletLibrary() is called inside loadBuiltinScriptlets.
 
     // App-level event filter for per-cue hotkey triggers
     qApp->installEventFilter(this);

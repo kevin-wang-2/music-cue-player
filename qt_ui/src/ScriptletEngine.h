@@ -1,5 +1,6 @@
 #pragma once
 #include <functional>
+#include <optional>
 #include <string>
 #include <vector>
 #include <utility>
@@ -47,53 +48,54 @@ public:
 
     // --- Basic action callbacks ---
     void setGoCallback     (std::function<void()>                      cb);
-    void setSelectCallback (std::function<void(const std::string&)>    cb);  // select by cue-number string
+    void setSelectCallback (std::function<bool(const std::string&)>    cb);  // select by cue-number string; returns false if not found
     void setAlertCallback  (std::function<void(const std::string&)>    cb);
     void setConfirmCallback(std::function<bool(const std::string&)>    cb);  // returns true if user confirmed
     void setOutputCallback (std::function<void(const std::string&)>    cb);  // stdout/stderr capture
     void setPanicCallback  (std::function<void()>                      cb);
+    // mode: "open" | "save" | "dir"; returns selected path or nullopt if cancelled
+    void setFileCallback   (std::function<std::optional<std::string>(const std::string& title,
+                                                                      const std::string& mode,
+                                                                      const std::string& filter)> cb);
+    // returns entered text or nullopt if cancelled
+    void setInputCallback  (std::function<std::optional<std::string>(const std::string& prompt,
+                                                                      const std::string& defaultVal,
+                                                                      const std::string& title)>  cb);
 
-    // --- mcp.cue read callbacks ---
-    void setCueCountCallback  (std::function<int()>                           cb);
+    // --- mcp.cue action callbacks (active-list) ---
     void setCueInfoCallback   (std::function<ScriptletCueInfo(int)>           cb);
-    void setCueSelectCallback (std::function<void(int)>                       cb);  // set cursor to idx
-    void setCueGoCallback     (std::function<void(int)>                       cb);  // select idx then go
-    void setCueArmCallback    (std::function<void(int, double)>               cb);  // arm(idx, startOverride)
+    void setCueSelectCallback (std::function<void(int)>                       cb);
+    void setCueGoCallback     (std::function<void(int)>                       cb);
+    void setCueStartCallback  (std::function<void(int)>                       cb);
+    void setCueArmCallback    (std::function<void(int, double)>               cb);
     void setCueStopCallback   (std::function<void(int)>                       cb);
     void setCueDisarmCallback (std::function<void(int)>                       cb);
     void setCueSetNameCallback(std::function<void(int, const std::string&)>   cb);
 
-    // --- mcp.cue mutation callbacks ---
-    // insert_cue(type, number, name) → returns new flat index, or -1 on failure
-    void setCueInsertCallback   (std::function<int(const std::string&, const std::string&, const std::string&)> cb);
-    // insert_cue_at(refIdx, type, number, name) → returns new flat index, or -1 on failure
-    void setCueInsertAtCallback (std::function<int(int, const std::string&, const std::string&, const std::string&)> cb);
-    // move_cue_at(refIdx, cueIdx, toGroup)
-    void setCueMoveCallback     (std::function<void(int, int, bool)>          cb);
-    // delete_cue(cueIdx)
-    void setCueDeleteCallback   (std::function<void(int)>                     cb);
+    // --- mcp.cue_list.CueList method callbacks (list-ID-aware) ---
+    void setCueListCountCallback   (std::function<int(int listId)>                                                                          cb);
+    void setCueListInfoCallback    (std::function<ScriptletCueInfo(int listId, int flatIdx)>                                                cb);
+    void setCueListInsertCallback  (std::function<int(int listId, const std::string&, const std::string&, const std::string&)>             cb);
+    void setCueListInsertAtCallback(std::function<int(int listId, int refIdx, const std::string&, const std::string&, const std::string&)> cb);
+    void setCueListMoveCallback    (std::function<bool(int listId, int refIdx, int cueIdx, bool toGroup)>                                  cb);
+    void setCueListDeleteCallback  (std::function<bool(int listId, int flatIdx)>                                                           cb);
 
-    // --- mcp.cue.start callback ---
-    void setCueStartCallback(std::function<void(int)> cb);
+    // --- mcp.cue_list module-level CRUD ---
+    void setInsertCueListCallback  (std::function<int(const std::string& name)>              cb);
+    void setInsertCueListAtCallback(std::function<int(int refListId, const std::string&)>    cb);
+    void setDeleteCueListCallback  (std::function<bool(int listId)>                          cb);
 
     // --- mcp.time callbacks ---
-    // Returns the audio engine sample rate (Hz).
-    void setGetSampleRateCallback(std::function<int()> cb);
-    // (cueIdx, bar, beat) → seconds from cue start, or -1.0 if no MC.
-    void setMusicalToSecondsCallback(std::function<double(int, int, int)> cb);
+    void setGetSampleRateCallback   (std::function<int()>                    cb);
+    void setMusicalToSecondsCallback(std::function<double(int, int, int)>    cb);
 
-    // --- mcp.get_mc() callback ---
-    void setGetMCCallback(std::function<ScriptletMCInfo()> cb);
-    // --- mcp.get_state() callback ---
+    // --- mcp.get_mc() / mcp.get_state() ---
+    void setGetMCCallback   (std::function<ScriptletMCInfo()>    cb);
     void setGetStateCallback(std::function<ScriptletStateInfo()> cb);
 
-    // --- multi-list callbacks ---
-    // list_lists() → [(numericId, name), ...]
+    // --- mcp.cue_list multi-list info ---
     void setListInfoCallback    (std::function<std::vector<std::pair<int,std::string>>()> cb);
-    // get_active_list() → numericId of the currently active list
-    void setActiveListIdCallback(std::function<int()>       cb);
-    // switch_list(numericId) — change the active list
-    void setSwitchListCallback  (std::function<void(int)>   cb);
+    void setActiveListIdCallback(std::function<int()> cb);
 
     // --- mcp.event fire methods (called from AppModel on events) ---
     void fireCueFiredEvent   (int idx);

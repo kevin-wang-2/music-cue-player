@@ -82,8 +82,22 @@ void ScriptletLibraryDialog::refreshList() {
     m_loading = true;
     const int prevRow = m_list->currentRow();
     m_list->clear();
+
+    // Built-in entries at the top — visually distinct, read-only.
+    const auto& builtins = m_model->builtinScriptlets();
+    m_builtinCount = static_cast<int>(builtins.size());
+    for (const auto& e : builtins) {
+        auto* item = new QListWidgetItem(
+            QString::fromStdString(e.name) + " [built-in]");
+        item->setForeground(QColor("#888888"));
+        item->setToolTip("Loaded from the scriptlets/ directory — read-only");
+        m_list->addItem(item);
+    }
+
+    // User entries below.
     for (const auto& e : m_model->sf.scriptletLibrary.entries)
         m_list->addItem(QString::fromStdString(e.name));
+
     if (prevRow >= 0 && prevRow < m_list->count())
         m_list->setCurrentRow(prevRow);
     else if (m_list->count() > 0)
@@ -92,18 +106,32 @@ void ScriptletLibraryDialog::refreshList() {
     onSelectionChanged();
 }
 
+bool ScriptletLibraryDialog::isBuiltinRow(int row) const {
+    return row >= 0 && row < m_builtinCount;
+}
+
+int ScriptletLibraryDialog::userEntryIdx(int row) const {
+    const int idx = row - m_builtinCount;
+    return (idx >= 0 && idx < (int)m_model->sf.scriptletLibrary.entries.size())
+        ? idx : -1;
+}
+
 int ScriptletLibraryDialog::currentEntryIndex() const {
     return m_list->currentRow();
 }
 
 void ScriptletLibraryDialog::onSelectionChanged() {
-    const int idx = currentEntryIndex();
-    const bool valid = (idx >= 0 && idx < (int)m_model->sf.scriptletLibrary.entries.size());
-    m_btnRemove->setEnabled(valid);
-    m_btnRename->setEnabled(valid);
-    m_editor->setEnabled(valid);
+    const int row = currentEntryIndex();
+    const bool builtin = isBuiltinRow(row);
+    const int  uid     = userEntryIdx(row);
+    const bool userValid = (uid >= 0);
+    const bool anyValid  = builtin || userValid;
 
-    if (!valid) {
+    m_btnRemove->setEnabled(userValid);
+    m_btnRename->setEnabled(userValid);
+    m_editor->setEnabled(anyValid);
+
+    if (!anyValid) {
         m_loading = true;
         m_editor->setCode({});
         m_editor->setContext({});
@@ -111,18 +139,26 @@ void ScriptletLibraryDialog::onSelectionChanged() {
         return;
     }
 
-    const auto& entry = m_model->sf.scriptletLibrary.entries[idx];
     m_loading = true;
-    m_editor->setContext(QString::fromStdString("lib_" + entry.name));
-    m_editor->setCode(QString::fromStdString(entry.code));
+    if (builtin) {
+        const auto& entry = m_model->builtinScriptlets()[row];
+        m_editor->setContext(QString::fromStdString("lib_builtin_" + entry.name));
+        m_editor->setCode(QString::fromStdString(entry.code));
+    } else {
+        const auto& entry = m_model->sf.scriptletLibrary.entries[uid];
+        m_editor->setContext(QString::fromStdString("lib_" + entry.name));
+        m_editor->setCode(QString::fromStdString(entry.code));
+    }
+    // Prevent editing built-in code (make the widget look readonly).
+    m_editor->setEnabled(!builtin);
     m_loading = false;
 }
 
 void ScriptletLibraryDialog::saveCurrentCode(const QString& code) {
     if (m_loading) return;
-    const int idx = currentEntryIndex();
-    if (idx < 0 || idx >= (int)m_model->sf.scriptletLibrary.entries.size()) return;
-    m_model->sf.scriptletLibrary.entries[idx].code = code.toStdString();
+    const int uid = userEntryIdx(currentEntryIndex());
+    if (uid < 0) return;   // built-in or nothing selected — never write
+    m_model->sf.scriptletLibrary.entries[uid].code = code.toStdString();
     m_model->applyScriptletLibrary();
     m_model->dirty = true;
     emit m_model->dirtyChanged(true);
@@ -159,22 +195,23 @@ void ScriptletLibraryDialog::onAdd() {
     emit m_model->dirtyChanged(true);
 
     refreshList();
+    // New user entry is always appended at the end (after built-ins).
     m_list->setCurrentRow(m_list->count() - 1);
 }
 
 void ScriptletLibraryDialog::onRemove() {
-    const int idx = currentEntryIndex();
-    if (idx < 0 || idx >= (int)m_model->sf.scriptletLibrary.entries.size()) return;
+    const int uid = userEntryIdx(currentEntryIndex());
+    if (uid < 0) return;
 
     const QString name = QString::fromStdString(
-        m_model->sf.scriptletLibrary.entries[idx].name);
+        m_model->sf.scriptletLibrary.entries[uid].name);
     if (QMessageBox::question(this, "Remove Module",
             QString("Remove library module '%1'?").arg(name),
             QMessageBox::Yes | QMessageBox::No) != QMessageBox::Yes)
         return;
 
     m_model->sf.scriptletLibrary.entries.erase(
-        m_model->sf.scriptletLibrary.entries.begin() + idx);
+        m_model->sf.scriptletLibrary.entries.begin() + uid);
     m_model->applyScriptletLibrary();
     m_model->dirty = true;
     emit m_model->dirtyChanged(true);
@@ -182,11 +219,11 @@ void ScriptletLibraryDialog::onRemove() {
 }
 
 void ScriptletLibraryDialog::onRename() {
-    const int idx = currentEntryIndex();
-    if (idx < 0 || idx >= (int)m_model->sf.scriptletLibrary.entries.size()) return;
+    const int uid = userEntryIdx(currentEntryIndex());
+    if (uid < 0) return;
 
     const QString oldName = QString::fromStdString(
-        m_model->sf.scriptletLibrary.entries[idx].name);
+        m_model->sf.scriptletLibrary.entries[uid].name);
     bool ok = false;
     QString newName = QInputDialog::getText(
         this, "Rename Module", "New name:", QLineEdit::Normal, oldName, &ok);
@@ -199,19 +236,27 @@ void ScriptletLibraryDialog::onRename() {
             "Module name must be a valid Python identifier.");
         return;
     }
+    // Check against both user entries and built-in names.
     for (int i = 0; i < (int)m_model->sf.scriptletLibrary.entries.size(); ++i) {
-        if (i != idx &&
+        if (i != uid &&
             QString::fromStdString(m_model->sf.scriptletLibrary.entries[i].name) == newName) {
             QMessageBox::warning(this, "Duplicate Name",
                 QString("A module named '%1' already exists.").arg(newName));
             return;
         }
     }
+    for (const auto& e : m_model->builtinScriptlets()) {
+        if (QString::fromStdString(e.name) == newName) {
+            QMessageBox::warning(this, "Duplicate Name",
+                QString("'%1' is a built-in module name.").arg(newName));
+            return;
+        }
+    }
 
-    m_model->sf.scriptletLibrary.entries[idx].name = newName.toStdString();
+    m_model->sf.scriptletLibrary.entries[uid].name = newName.toStdString();
     m_model->applyScriptletLibrary();
     m_model->dirty = true;
     emit m_model->dirtyChanged(true);
     refreshList();
-    m_list->setCurrentRow(idx);
+    m_list->setCurrentRow(m_builtinCount + uid);
 }
