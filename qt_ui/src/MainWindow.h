@@ -8,6 +8,7 @@ class AppModel;
 class CueListPanel;
 class CueTableView;
 class InspectorWidget;
+class MissingMediaDialog;
 class ProjectStatusDialog;
 class ScriptletLibraryDialog;
 class ShowInfoDialog;
@@ -45,6 +46,7 @@ private slots:
     void onSaveShow();
     void onSaveShowAs();
     void onCollectAllFiles();
+    void onMissingMedia();
     void onCueListModified();
     void onRowSelected(int idx);
     void onUndo();
@@ -63,6 +65,9 @@ private:
 
     bool confirmDirty();
     void loadShowFile(const QString& path);
+    void checkMissingMedia();   // auto-opens MissingMediaDialog if any files are absent
+    void saveUiState();         // capture current panel state into sf.uiHints (call before save)
+    void loadUiState();         // apply sf.uiHints to the UI (call after load)
     void updateTitle();
     void updateCueInfo();     // refresh name/notes in GoBar
     void showToast(const QString& msg, int ms = 2500);
@@ -71,6 +76,7 @@ private:
     CueTableView*         m_cueTable{nullptr};
     InspectorWidget*      m_inspector{nullptr};
     CueListPanel*         m_listPanel{nullptr};
+    MissingMediaDialog*     m_missingMediaDialog{nullptr};
     ProjectStatusDialog*    m_statusDialog{nullptr};
     ScriptletLibraryDialog* m_libraryDialog{nullptr};
     ShowInfoDialog*         m_showInfoDialog{nullptr};
@@ -90,4 +96,6 @@ private:
     QAction* m_actSave{nullptr};
     QAction* m_actUndo{nullptr};
     QAction* m_actRedo{nullptr};
+    QAction* m_actInspector{nullptr};
+    QAction* m_actListPanel{nullptr};
 };

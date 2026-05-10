@@ -64,6 +64,7 @@ private:
     QString targetLabel(int cueIdx) const;
     QString durationLabel(int cueIdx) const;
     void   insertAudioCueForPath(const QString& path, int beforeRow);
+    void   replaceAudioForRow(int row, const QString& absPath);
     void   addCueOfType(const QString& type, int beforeRow, int autoTarget = -1);
     void   deleteRows(const std::vector<int>& rows);
 
@@ -90,8 +91,10 @@ private:
     // m_dropInsertRow: row before which to draw insertion line (row reorder).
     //                  equals rowCount() = after last row.
     // m_dropInsideGroup: true = indicator is inside m_dropGroupRow; false = normal insert.
+    // m_dropReplaceRow: row to outline when a URL drag would replace its audio (not insert).
     int  m_dropTargetRow{-1};
     int  m_dropInsertRow{-1};
     bool m_dropInsideGroup{false};
     int  m_dropGroupRow{-1};
+    int  m_dropReplaceRow{-1};
 };

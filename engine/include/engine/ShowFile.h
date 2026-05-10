@@ -2,6 +2,7 @@
 
 #include "TriggerData.h"
 #include <filesystem>
+#include <map>
 #include <string>
 #include <vector>
 #include <cstdint>
@@ -239,6 +240,24 @@ struct ShowFile {
         int masterDeviceIndex() const;
     };
 
+    // ---- UI hints ----------------------------------------------------------
+    // Opaque key–value store for frontend UI state (panel visibility, sizes, etc.).
+    // The engine never interprets the values — it just round-trips them through
+    // the "ui_hints" JSON key so the frontend can persist layout across sessions.
+    struct UiHints {
+        std::map<std::string, std::string> data;
+
+        std::string get(const std::string& key, const std::string& def = "") const {
+            auto it = data.find(key);
+            return it != data.end() ? it->second : def;
+        }
+        void set(const std::string& key, std::string value) {
+            data[key] = std::move(value);
+        }
+        bool empty() const { return data.empty(); }
+        void clear()       { data.clear(); }
+    };
+
     // ---- Scriptlet library -------------------------------------------------
     // Named Python modules available as `import mcp.library.<name>` in scriptlets.
     struct ScriptletLibrary {
@@ -260,6 +279,7 @@ struct ShowFile {
     OscServerSettings        oscServer;
     ScriptletLibrary         scriptletLibrary;
     std::vector<CueListData> cueLists;
+    UiHints                  uiHints;   // frontend-only; engine round-trips without reading
 
     // ---- Helpers -----------------------------------------------------------
 

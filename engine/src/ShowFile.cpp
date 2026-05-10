@@ -573,6 +573,13 @@ bool ShowFile::load(const std::filesystem::path& path, std::string& error) {
         }
     }
     assignListIds();
+
+    uiHints.clear();
+    if (root.contains("ui_hints") && root["ui_hints"].is_object()) {
+        for (auto& [k, v] : root["ui_hints"].items())
+            if (v.is_string()) uiHints.set(k, v.get<std::string>());
+    }
+
     return true;
 }
 
@@ -713,6 +720,13 @@ bool ShowFile::save(const std::filesystem::path& path, std::string& error) const
         clArr.push_back(cl);
     }
     root["cueLists"] = clArr;
+
+    if (!uiHints.empty()) {
+        json hints = json::object();
+        for (const auto& [k, v] : uiHints.data)
+            hints[k] = v;
+        root["ui_hints"] = hints;
+    }
 
     std::ofstream f(path);
     if (!f) { error = "cannot write '" + path.string() + "'"; return false; }

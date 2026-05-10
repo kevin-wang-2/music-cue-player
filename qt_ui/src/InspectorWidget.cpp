@@ -19,6 +19,7 @@
 #include "engine/Timecode.h"
 
 #include <algorithm>
+#include <filesystem>
 #include <optional>
 #include <QCheckBox>
 #include <QComboBox>
@@ -40,8 +41,113 @@
 #include <QRegularExpression>
 #include <QScrollArea>
 #include <QSpinBox>
+#include <QDragEnterEvent>
+#include <QDropEvent>
+#include <QFrame>
+#include <QMimeData>
+#include <QMouseEvent>
+#include <QPainter>
 #include <QTabWidget>
+#include <QUrl>
 #include <QVBoxLayout>
+
+// ── AudioPathWidget ────────────────────────────────────────────────────────
+// Clickable, droppable label that shows an audio file path.
+// Uses std::function callbacks to avoid Q_OBJECT on a local class.
+class AudioPathWidget : public QFrame {
+public:
+    std::function<void(const QString&)> onPathChanged;
+
+    explicit AudioPathWidget(QWidget* parent = nullptr) : QFrame(parent) {
+        setAcceptDrops(true);
+        setCursor(Qt::PointingHandCursor);
+        setFrameShape(QFrame::StyledPanel);
+        setFrameShadow(QFrame::Sunken);
+        setSizePolicy(QSizePolicy::Expanding, QSizePolicy::Fixed);
+        setMinimumHeight(26);
+        setStyleSheet(
+            "AudioPathWidget { background:#0e0e0e; border:1px solid #333; border-radius:3px; }"
+            "AudioPathWidget[hover=true] { border-color:#5a8ad0; background:#141a22; }"
+        );
+
+        auto* lay = new QHBoxLayout(this);
+        lay->setContentsMargins(6, 2, 6, 2);
+        m_label = new QLabel(this);
+        m_label->setStyleSheet("color:#bbb; background:transparent;");
+        m_label->setTextInteractionFlags(Qt::NoTextInteraction);
+        lay->addWidget(m_label, 1);
+
+        auto* icon = new QLabel("📂", this);
+        icon->setStyleSheet("color:#666; background:transparent; font-size:11px;");
+        lay->addWidget(icon);
+    }
+
+    void setPath(const QString& absPath) {
+        m_path = absPath;
+        const QString fname = QString::fromStdString(
+            std::filesystem::path(absPath.toStdString()).filename().string());
+        m_label->setText(fname.isEmpty() ? "(no file)" : fname);
+        setToolTip(absPath);
+    }
+
+    const QString& currentPath() const { return m_path; }
+
+protected:
+    void mousePressEvent(QMouseEvent* ev) override {
+        if (ev->button() != Qt::LeftButton) return;
+        const QString p = QFileDialog::getOpenFileName(
+            this, "Replace Audio File",
+            m_path.isEmpty() ? QString() : QString::fromStdString(
+                std::filesystem::path(m_path.toStdString()).parent_path().string()),
+            "Audio Files (*.wav *.aif *.aiff *.mp3 *.flac *.ogg *.m4a *.aac *.caf "
+            "*.opus *.wv *.ape);;All Files (*)");
+        if (!p.isEmpty() && onPathChanged) onPathChanged(p);
+    }
+
+    void enterEvent(QEnterEvent*) override {
+        setProperty("hover", true);
+        style()->unpolish(this); style()->polish(this);
+    }
+    void leaveEvent(QEvent*) override {
+        setProperty("hover", false);
+        style()->unpolish(this); style()->polish(this);
+    }
+
+    void dragEnterEvent(QDragEnterEvent* ev) override {
+        if (ev->mimeData()->hasUrls()) {
+            ev->acceptProposedAction();
+            setProperty("hover", true);
+            style()->unpolish(this); style()->polish(this);
+        }
+    }
+    void dragLeaveEvent(QDragLeaveEvent*) override {
+        setProperty("hover", false);
+        style()->unpolish(this); style()->polish(this);
+    }
+    void dropEvent(QDropEvent* ev) override {
+        setProperty("hover", false);
+        style()->unpolish(this); style()->polish(this);
+        static const QStringList kAudioExts = {
+            ".wav",".aif",".aiff",".mp3",".flac",".ogg",".m4a",".aac",".caf",".opus",".wv",".ape"
+        };
+        for (const QUrl& url : ev->mimeData()->urls()) {
+            if (!url.isLocalFile()) continue;
+            const QString p = url.toLocalFile();
+            const QString lp = p.toLower();
+            for (const auto& ext : kAudioExts) {
+                if (lp.endsWith(ext)) {
+                    if (onPathChanged) onPathChanged(p);
+                    ev->acceptProposedAction();
+                    return;
+                }
+            }
+        }
+    }
+
+private:
+    QLabel*  m_label{nullptr};
+    QString  m_path;
+};
 
 // ── style helpers ──────────────────────────────────────────────────────────
 
@@ -118,6 +224,19 @@ void InspectorWidget::buildBasicTab() {
     m_spinDurationBasic->setDecimals(3);
     m_spinDurationBasic->setSuffix(" s");
     m_spinDurationBasic->setSpecialValueText("(to end)");
+
+    // Audio file path row — only visible for Audio cues
+    m_audioPathWidget = new AudioPathWidget;
+    static_cast<AudioPathWidget*>(m_audioPathWidget)->onPathChanged =
+        [this](const QString& p) { replaceAudioFile(p); };
+    // Wrap in a QWidget so we can hide the whole form row cleanly
+    m_audioFileRow = new QWidget;
+    {
+        auto* lay = new QHBoxLayout(m_audioFileRow);
+        lay->setContentsMargins(0, 0, 0, 0);
+        lay->addWidget(m_audioPathWidget);
+    }
+    form->addRow("File:", m_audioFileRow);
 
     form->addRow("Cue #:",    m_editNum);
     form->addRow("Name:",     m_editName);
@@ -945,6 +1064,9 @@ void InspectorWidget::loadBasic() {
     m_chkAutoCont->setEnabled(en);
     m_chkAutoFollow->setEnabled(en);
 
+    const bool isAudio = c && c->type == mcp::CueType::Audio;
+    m_audioFileRow->setVisible(isAudio);
+
     if (!c) {
         m_editNum->clear(); m_editName->clear();
         m_spinPreWait->setValue(0.0);
@@ -953,6 +1075,16 @@ void InspectorWidget::loadBasic() {
         m_chkAutoFollow->setChecked(false);
         return;
     }
+
+    if (isAudio) {
+        namespace fs = std::filesystem;
+        const fs::path base(m_model->baseDir);
+        fs::path p(c->path);
+        if (p.is_relative() && !m_model->baseDir.empty()) p = base / p;
+        static_cast<AudioPathWidget*>(m_audioPathWidget)->setPath(
+            QString::fromStdString(p.string()));
+    }
+
     m_editNum->setText(QString::fromStdString(c->cueNumber));
     m_editName->setText(QString::fromStdString(c->name));
     m_spinPreWait->setValue(c->preWaitSeconds);
@@ -992,6 +1124,36 @@ void InspectorWidget::loadBasic() {
         refreshMarkerTargetCombo();
         refreshMarkerMkIdxCombo();
     }
+}
+
+void InspectorWidget::replaceAudioFile(const QString& newAbsPath) {
+    if (m_cueIdx < 0) return;
+    const mcp::Cue* c = m_model->cues().cueAt(m_cueIdx);
+    if (!c || c->type != mcp::CueType::Audio) return;
+
+    m_model->pushUndo();
+
+    namespace fs = std::filesystem;
+    const fs::path base(m_model->baseDir);
+    fs::path np(newAbsPath.toStdString());
+    std::error_code ec;
+    fs::path rel = fs::relative(np, base, ec);
+    const std::string relStr = rel.string();
+    std::string pathToStore = (!ec && relStr.find("..") == std::string::npos)
+                              ? relStr : np.string();
+
+    auto* sfCue = ShowHelpers::sfCueAt(m_model->sf, m_model->activeListIdx(), m_cueIdx);
+    if (!sfCue) return;
+    sfCue->path = pathToStore;
+
+    std::string err;
+    ShowHelpers::rebuildAllCueLists(*m_model, err);
+    m_model->dirty = true;
+
+    // Update the path widget immediately (show the resolved absolute path)
+    static_cast<AudioPathWidget*>(m_audioPathWidget)->setPath(newAbsPath);
+
+    emit cueEdited();
 }
 
 void InspectorWidget::loadTrim() {

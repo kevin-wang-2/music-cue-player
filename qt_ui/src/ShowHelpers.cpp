@@ -1086,7 +1086,89 @@ static bool transcodeToWav(const std::string& src, const std::string& dst,
     return true;
 }
 
+// ─── Missing media helpers ────────────────────────────────────────────────────
+
+// Find an audio/media cue by both its cue number AND its current stored path.
+// Matching on both fields is necessary because:
+//  • Cue numbers may be empty or duplicated across the list.
+//  • The path uniquely identifies which physical cue we need to fix when numbers collide.
+static mcp::ShowFile::CueData* findMediaCueForFix(
+    std::vector<mcp::ShowFile::CueData>& cues,
+    const std::string& cueNum, const std::string& originalPath)
+{
+    for (auto& cd : cues) {
+        if (cd.cueNumber == cueNum && cd.path == originalPath) return &cd;
+        if (!cd.children.empty())
+            if (auto* p = findMediaCueForFix(cd.children, cueNum, originalPath)) return p;
+    }
+    return nullptr;
+}
+
 // ─── public API ──────────────────────────────────────────────────────────────
+
+// Walk all cues (any type) that have a non-empty path field.
+// More generic than walkAudioCues — picks up future media cue types automatically.
+static void walkMediaCues(
+    const std::vector<mcp::ShowFile::CueData>& cues,
+    const std::function<void(const mcp::ShowFile::CueData&)>& fn)
+{
+    for (const auto& cd : cues) {
+        if (!cd.path.empty()) fn(cd);
+        if (!cd.children.empty()) walkMediaCues(cd.children, fn);
+    }
+}
+
+std::vector<MissingEntry> findMissingMedia(const AppModel& m) {
+    namespace fs = std::filesystem;
+    std::vector<MissingEntry> result;
+    const fs::path base(m.baseDir);
+
+    for (int li = 0; li < (int)m.sf.cueLists.size(); ++li) {
+        const auto& cl = m.sf.cueLists[(size_t)li];
+        walkMediaCues(cl.cues, [&](const mcp::ShowFile::CueData& cd) {
+            fs::path p(cd.path);
+            fs::path abs = p.is_relative() ? base / p : p;
+            if (!fs::exists(abs)) {
+                MissingEntry e;
+                e.listIdx      = li;
+                e.cueType      = cd.type;
+                e.cueNumber    = cd.cueNumber;
+                e.cueName      = cd.name;
+                e.originalPath = cd.path;
+                e.resolvedPath = abs.string();
+                result.push_back(std::move(e));
+            }
+        });
+    }
+    return result;
+}
+
+void applyMediaFixes(AppModel& m, const std::vector<MissingEntry>& fixes) {
+    namespace fs = std::filesystem;
+    const fs::path base(m.baseDir);
+
+    for (const auto& fix : fixes) {
+        if (fix.newPath.empty()) continue;
+        if (fix.listIdx >= (int)m.sf.cueLists.size()) continue;
+        auto& cl = m.sf.cueLists[(size_t)fix.listIdx];
+        auto* cd = findMediaCueForFix(cl.cues, fix.cueNumber, fix.originalPath);
+        if (!cd) continue;
+
+        // Store relative if the file is within baseDir, absolute otherwise
+        fs::path np(fix.newPath);
+        std::error_code ec;
+        fs::path rel = fs::relative(np, base, ec);
+        const std::string relStr = rel.string();
+        if (!ec && relStr.find("..") == std::string::npos)
+            cd->path = relStr;
+        else
+            cd->path = np.string();
+    }
+
+    std::string err;
+    rebuildAllCueLists(m, err);
+    m.dirty = true;
+}
 
 int countAudioCues(const AppModel& m) {
     int n = 0;

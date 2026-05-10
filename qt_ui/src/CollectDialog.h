@@ -7,7 +7,7 @@ class QCheckBox;
 class QComboBox;
 class QGroupBox;
 
-struct AppModel;
+class AppModel;
 
 // ─── CollectDialog ────────────────────────────────────────────────────────────
 // Shows collection options. On accept, runs collectAllFiles() with a progress

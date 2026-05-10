@@ -1,6 +1,7 @@
 #include "MainWindow.h"
 #include "AppModel.h"
 #include "CollectDialog.h"
+#include "MissingMediaDialog.h"
 #include "CueListPanel.h"
 #include "ProjectStatusDialog.h"
 #include "ScriptletLibraryDialog.h"
@@ -37,6 +38,7 @@
 #include <QMimeData>
 #include <QResizeEvent>
 #include <QSplitter>
+#include <QFileOpenEvent>
 #include <QTimer>
 #include <QToolButton>
 #include <QUrl>
@@ -528,6 +530,7 @@ void MainWindow::buildMenuBar() {
         m_libraryDialog->raise();
         m_libraryDialog->activateWindow();
     });
+    showMenu->addAction("&Missing Media…", this, &MainWindow::onMissingMedia);
     showMenu->addSeparator();
 
     auto* actPanic = showMenu->addAction("Panic", this, [this]() {
@@ -536,13 +539,22 @@ void MainWindow::buildMenuBar() {
     });
     actPanic->setShortcut(QKeySequence(Qt::Key_Escape));
 
-    // View menu — sidebar toggle
+    // View menu — panel toggles
     auto* viewMenu = mb->addMenu("&View");
-    auto* actLists = viewMenu->addAction("&Cue Lists Sidebar");
-    actLists->setCheckable(true);
-    actLists->setChecked(false);
-    actLists->setShortcut(QKeySequence(Qt::CTRL | Qt::Key_L));
-    connect(actLists, &QAction::toggled, this, [this](bool on) {
+
+    m_actInspector = viewMenu->addAction("&Inspector");
+    m_actInspector->setCheckable(true);
+    m_actInspector->setChecked(true);  // open by default
+    m_actInspector->setShortcut(QKeySequence(Qt::CTRL | Qt::Key_I));
+    connect(m_actInspector, &QAction::toggled, this, [this](bool on) {
+        m_inspector->setVisible(on);
+    });
+
+    m_actListPanel = viewMenu->addAction("&Cue Lists Sidebar");
+    m_actListPanel->setCheckable(true);
+    m_actListPanel->setChecked(false);
+    m_actListPanel->setShortcut(QKeySequence(Qt::CTRL | Qt::Key_L));
+    connect(m_actListPanel, &QAction::toggled, this, [this](bool on) {
         m_listPanel->setVisible(on);
     });
 }
@@ -629,6 +641,7 @@ void MainWindow::onOpenShow() {
 
 void MainWindow::onSaveShow() {
     if (m_model->showPath.empty()) { onSaveShowAs(); return; }
+    saveUiState();
     ShowHelpers::syncSfFromCues(*m_model);
     ShowHelpers::saveShow(*m_model);
     updateTitle();
@@ -647,6 +660,29 @@ void MainWindow::onSaveShowAs() {
 void MainWindow::onCollectAllFiles() {
     CollectDialog dlg(m_model, this);
     dlg.exec();
+}
+
+void MainWindow::onMissingMedia() {
+    if (!m_missingMediaDialog) {
+        m_missingMediaDialog = new MissingMediaDialog(m_model, this);
+        connect(m_missingMediaDialog, &MissingMediaDialog::mediaFixed, this, [this]() {
+            m_cueTable->refresh();
+            m_inspector->setCueIndex(-1);
+            updateTitle();
+        });
+    }
+    m_missingMediaDialog->refresh();
+    m_missingMediaDialog->show();
+    m_missingMediaDialog->raise();
+    m_missingMediaDialog->activateWindow();
+}
+
+void MainWindow::checkMissingMedia() {
+    const auto missing = ShowHelpers::findMissingMedia(*m_model);
+    if (missing.empty()) return;
+    showToast(QString("%1 missing media file(s) — see Show → Missing Media")
+                  .arg((int)missing.size()), 5000);
+    onMissingMedia();
 }
 
 void MainWindow::onOpenSettings() {
@@ -844,6 +880,13 @@ void MainWindow::resizeEvent(QResizeEvent* ev) {
 }
 
 bool MainWindow::eventFilter(QObject* obj, QEvent* ev) {
+    if (ev->type() == QEvent::FileOpen) {
+        const QString path = static_cast<QFileOpenEvent*>(ev)->file();
+        if (!path.isEmpty() && path.endsWith(".mcp", Qt::CaseInsensitive)) {
+            if (confirmDirty()) loadShowFile(path);
+            return true;
+        }
+    }
     if (ev->type() != QEvent::KeyPress)
         return QMainWindow::eventFilter(obj, ev);
 
@@ -901,6 +944,51 @@ bool MainWindow::confirmDirty() {
         QMessageBox::Discard | QMessageBox::Cancel) == QMessageBox::Discard;
 }
 
+void MainWindow::saveUiState() {
+    auto& h = m_model->sf.uiHints;
+    h.set("inspector.visible",  m_inspector->isVisible()  ? "1" : "0");
+    h.set("listPanel.visible",  m_listPanel->isVisible()  ? "1" : "0");
+    h.set("showInfo.visible",   (m_showInfoDialog  && m_showInfoDialog->isVisible())  ? "1" : "0");
+    h.set("projectStatus.visible", (m_statusDialog && m_statusDialog->isVisible())   ? "1" : "0");
+    const QList<int> sizes = m_splitter->sizes();
+    if (sizes.size() >= 2)
+        h.set("inspector.height", std::to_string(sizes[1]));
+}
+
+void MainWindow::loadUiState() {
+    const auto& h = m_model->sf.uiHints;
+
+    const bool inspVis   = h.get("inspector.visible",      "1") != "0";
+    const bool panelVis  = h.get("listPanel.visible",      "0") != "0";
+    const bool infoVis   = h.get("showInfo.visible",       "0") != "0";
+    const bool statusVis = h.get("projectStatus.visible",  "0") != "0";
+
+    // Drive through the actions so the checkmarks stay in sync.
+    m_actInspector->setChecked(inspVis);
+    m_actListPanel->setChecked(panelVis);
+
+    const std::string heightStr = h.get("inspector.height", "");
+    if (!heightStr.empty() && inspVis) {
+        try {
+            const int h2 = std::stoi(heightStr);
+            if (h2 > 0) {
+                const int total = m_splitter->sizes()[0] + m_splitter->sizes()[1];
+                m_splitter->setSizes({total - h2, h2});
+            }
+        } catch (...) {}
+    }
+
+    if (infoVis) {
+        if (!m_showInfoDialog) m_showInfoDialog = new ShowInfoDialog(m_model, this);
+        m_showInfoDialog->show();
+    }
+    if (statusVis) {
+        if (!m_statusDialog) m_statusDialog = new ProjectStatusDialog(m_model, this);
+        m_statusDialog->refreshWarnings();
+        m_statusDialog->show();
+    }
+}
+
 void MainWindow::loadShowFile(const QString& path) {
     std::string err;
     if (!m_model->sf.load(path.toStdString(), err)) {
@@ -917,12 +1005,14 @@ void MainWindow::loadShowFile(const QString& path) {
     ShowHelpers::rebuildAllCueLists(*m_model, err);
     m_cueTable->refresh();
     m_inspector->setCueIndex(-1);
+    loadUiState();
     updateCueInfo();
     updateTitle();
     m_actSave->setEnabled(false);
     if (m_libraryDialog) m_libraryDialog->refreshList();
     showToast("Loaded: " + QString::fromStdString(
         std::filesystem::path(path.toStdString()).filename().string()));
+    checkMissingMedia();
 }
 
 void MainWindow::updateTitle() {

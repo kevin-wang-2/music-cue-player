@@ -37,6 +37,8 @@ set(QT_UI_SOURCES
     src/ShowHelpers.cpp
     src/CollectDialog.h
     src/CollectDialog.cpp
+    src/MissingMediaDialog.h
+    src/MissingMediaDialog.cpp
     src/AppModel.h
     src/AppModel.cpp
     src/SettingsDialog.h

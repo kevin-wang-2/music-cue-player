@@ -15,6 +15,7 @@ class SyncGroupView;
 
 class QCheckBox;
 class QComboBox;
+class QFrame;
 class QDoubleSpinBox;
 class QGridLayout;
 class QGroupBox;
@@ -118,6 +119,8 @@ private:
     QWidget*     m_mcPage{nullptr};
     QWidget*     m_markerPage{nullptr};
 
+    void replaceAudioFile(const QString& newAbsPath);
+
     // Basic tab controls
     QLineEdit*    m_editNum{nullptr};
     QLineEdit*    m_editName{nullptr};
@@ -133,6 +136,9 @@ private:
     // Arm-specific
     QWidget*      m_armGroup{nullptr};
     QDoubleSpinBox* m_spinArmStart{nullptr};
+    // Audio-cue-specific (basic tab)
+    QWidget*      m_audioFileRow{nullptr};   // the form row widget (shown only for audio)
+    QFrame*       m_audioPathWidget{nullptr}; // clickable/droppable path display
     // Marker-cue-specific (lives in Marker tab)
     QComboBox*  m_comboMarkerTargetList{nullptr};  // which list to target
     QComboBox*  m_comboMarkerTarget{nullptr};

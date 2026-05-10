@@ -5,13 +5,23 @@
 #include <string>
 
 // Forward declarations to avoid including AppModel.h here
-struct AppModel;
+class AppModel;
 
 struct CollectOptions {
     std::string destDir;
     bool        convertToWav = false;
     int         sampleRate   = 48000;
     int         bitDepth     = 24;   // 16, 24, or 32 (float)
+};
+
+struct MissingEntry {
+    int         listIdx{0};
+    std::string cueType;       // "audio", "video", etc. — for display
+    std::string cueNumber;
+    std::string cueName;
+    std::string originalPath;  // as stored in SF (relative or absolute)
+    std::string resolvedPath;  // absolute path that was checked and not found
+    std::string newPath;       // absolute replacement path; empty = unresolved
 };
 
 namespace ShowHelpers {
@@ -39,6 +49,13 @@ void setCueNumberChecked(AppModel& model, int index, const std::string& num);
 
 // Count audio cues across all lists (for progress reporting).
 int  countAudioCues(const AppModel& model);
+
+// Find all audio cues whose files do not exist on disk.
+std::vector<MissingEntry> findMissingMedia(const AppModel& model);
+
+// Write resolved newPath values back into the SF, then rebuild cue lists.
+// Entries with empty newPath are skipped. Sets model.dirty = true.
+void applyMediaFixes(AppModel& model, const std::vector<MissingEntry>& fixes);
 
 // Copy (or convert) all referenced audio files into opts.destDir/audio/,
 // rewrite paths to relative, and save a copy of the show file in opts.destDir.

@@ -22,6 +22,7 @@
 #include <QPen>
 #include <QUrl>
 #include <filesystem>
+#include <numeric>
 
 // ── helpers ────────────────────────────────────────────────────────────────
 
@@ -492,7 +493,18 @@ void CueTableView::paintEvent(QPaintEvent* ev) {
         }
     }
 
-    if (m_dropTargetRow >= 0 && m_dropTargetRow < rowCount()) {
+    if (m_dropReplaceRow >= 0 && m_dropReplaceRow < rowCount()) {
+        // Full-row outline: indicates the dragged audio file will REPLACE this cue's media.
+        QPainter p(viewport());
+        const QRect topR = visualRect(model()->index(m_dropReplaceRow, 0));
+        const QRect botR = visualRect(model()->index(m_dropReplaceRow, columnCount() - 1));
+        const QRect rowR(topR.left(), topR.top(),
+                         botR.right() - topR.left(),
+                         botR.bottom() - topR.top());
+        p.setPen(QPen(QColor(0xff, 0xff, 0xff), 2));
+        p.setBrush(QColor(0xff, 0xff, 0xff, 30));
+        p.drawRect(rowR.adjusted(1, 1, -2, -2));
+    } else if (m_dropTargetRow >= 0 && m_dropTargetRow < rowCount()) {
         // Outline only the Target cell
         QPainter p(viewport());
         const QRect r = visualRect(model()->index(m_dropTargetRow, ColTarget));
@@ -696,9 +708,46 @@ void CueTableView::dragEnterEvent(QDragEnterEvent* ev) {
 void CueTableView::dragMoveEvent(QDragMoveEvent* ev) {
     if (ev->mimeData()->hasUrls()) {
         ev->acceptProposedAction();
-        if (m_dropTargetRow != -1 || m_dropInsertRow != -1) {
-            m_dropTargetRow = -1;
-            m_dropInsertRow = -1;
+
+        const QPoint pt      = ev->position().toPoint();
+        const int hoverRow   = rowAt(pt.y());
+
+        // Detect single audio file drag so we can show replace vs. insert feedback.
+        bool isSingleAudio = false;
+        const auto& urls = ev->mimeData()->urls();
+        if (urls.size() == 1 && urls.first().isLocalFile()) {
+            const QString lp = urls.first().toLocalFile().toLower();
+            isSingleAudio = lp.endsWith(".wav") || lp.endsWith(".aiff") || lp.endsWith(".aif")
+                || lp.endsWith(".mp3") || lp.endsWith(".flac") || lp.endsWith(".ogg")
+                || lp.endsWith(".m4a") || lp.endsWith(".aac") || lp.endsWith(".caf")
+                || lp.endsWith(".opus") || lp.endsWith(".wv")  || lp.endsWith(".ape");
+        }
+
+        int newReplaceRow = -1;
+        int newInsertRow  = -1;
+
+        if (isSingleAudio && hoverRow >= 0) {
+            const mcp::Cue* hc = m_model->cues().cueAt(hoverRow);
+            if (hc && hc->type == mcp::CueType::Audio) {
+                newReplaceRow = hoverRow;   // replace mode — no insert line
+            } else {
+                const QRect r = visualRect(model()->index(hoverRow, 0));
+                newInsertRow  = (pt.y() >= r.center().y()) ? hoverRow + 1 : hoverRow;
+            }
+        } else {
+            if (hoverRow < 0) {
+                newInsertRow = rowCount();
+            } else {
+                const QRect r = visualRect(model()->index(hoverRow, 0));
+                newInsertRow  = (pt.y() >= r.center().y()) ? hoverRow + 1 : hoverRow;
+            }
+        }
+
+        if (newReplaceRow != m_dropReplaceRow || newInsertRow != m_dropInsertRow
+                || m_dropTargetRow != -1) {
+            m_dropTargetRow  = -1;
+            m_dropReplaceRow = newReplaceRow;
+            m_dropInsertRow  = newInsertRow;
             viewport()->update();
         }
         return;
@@ -782,6 +831,7 @@ void CueTableView::dragLeaveEvent(QDragLeaveEvent* ev) {
     m_dropInsertRow   = -1;
     m_dropInsideGroup = false;
     m_dropGroupRow    = -1;
+    m_dropReplaceRow  = -1;
     viewport()->update();
     QTableWidget::dragLeaveEvent(ev);
 }
@@ -792,25 +842,41 @@ void CueTableView::dropEvent(QDropEvent* ev) {
     m_dropInsertRow   = -1;
     m_dropInsideGroup = false;
     m_dropGroupRow    = -1;
+    m_dropReplaceRow  = -1;
     setDropIndicatorShown(true);
 
     if (ev->mimeData()->hasUrls()) {
-        // OS file drop — determine insertion row
-        int insertBefore = rowAt(ev->position().toPoint().y());
-        if (insertBefore < 0) insertBefore = rowCount();
-
         const auto urls = ev->mimeData()->urls();
+
+        // Collect audio-file URLs only
+        QStringList audioPaths;
         for (const QUrl& url : urls) {
             if (!url.isLocalFile()) continue;
-            const QString path = url.toLocalFile();
-            const QString lp = path.toLower();
+            const QString p  = url.toLocalFile();
+            const QString lp = p.toLower();
             if (lp.endsWith(".wav") || lp.endsWith(".aiff") || lp.endsWith(".aif")
                 || lp.endsWith(".mp3") || lp.endsWith(".flac") || lp.endsWith(".ogg")
-                || lp.endsWith(".m4a") || lp.endsWith(".caf"))
-            {
-                insertAudioCueForPath(path, insertBefore);
-                ++insertBefore;
+                || lp.endsWith(".m4a") || lp.endsWith(".aac") || lp.endsWith(".caf")
+                || lp.endsWith(".opus") || lp.endsWith(".wv")  || lp.endsWith(".ape"))
+                audioPaths << p;
+        }
+
+        // Single file dropped ON an existing audio cue → replace its media
+        const int hoverRow = rowAt(ev->position().toPoint().y());
+        if (audioPaths.size() == 1 && hoverRow >= 0) {
+            const mcp::Cue* hc = m_model->cues().cueAt(hoverRow);
+            if (hc && hc->type == mcp::CueType::Audio) {
+                replaceAudioForRow(hoverRow, audioPaths.first());
+                ev->acceptProposedAction();
+                return;
             }
+        }
+
+        // Otherwise insert new audio cues
+        int insertBefore = hoverRow < 0 ? rowCount() : hoverRow;
+        for (const QString& path : audioPaths) {
+            insertAudioCueForPath(path, insertBefore);
+            ++insertBefore;
         }
         ev->acceptProposedAction();
         return;
@@ -908,50 +974,133 @@ void CueTableView::dropEvent(QDropEvent* ev) {
         }
     }
 
-    // ── Row reorder ──────────────────────────────────────────────────────────
+    // ── Row reorder (multi-select) ───────────────────────────────────────────
+    // Collect all selected rows, sorted ascending.
+    std::vector<int> selSorted;
+    for (const auto& mi : selectionModel()->selectedRows())
+        selSorted.push_back(mi.row());
+    std::sort(selSorted.begin(), selSorted.end());
+
+    // Filter to top-level selected rows (skip rows whose ancestor is also selected).
+    std::set<int> selSet(selSorted.begin(), selSorted.end());
+    std::vector<int> topLevel;
+    for (int r : selSorted) {
+        const mcp::Cue* c = m_model->cues().cueAt(r);
+        bool skip = false;
+        for (int p = c ? c->parentIndex : -1; p >= 0; ) {
+            if (selSet.count(p)) { skip = true; break; }
+            const mcp::Cue* pc = m_model->cues().cueAt(p);
+            p = pc ? pc->parentIndex : -1;
+        }
+        if (!skip) topLevel.push_back(r);
+    }
+    if (topLevel.empty()) { ev->ignore(); return; }
+
+    // Pre-compute flat block size for each top-level row (group = 1 + all descendants).
+    std::vector<int> blockSizes;
+    for (int r : topLevel) {
+        const mcp::Cue* c = m_model->cues().cueAt(r);
+        blockSizes.push_back(1 + (c && c->type == mcp::CueType::Group ? c->childCount : 0));
+    }
+    const int totalMoved = std::accumulate(blockSizes.begin(), blockSizes.end(), 0);
+
+    // Destination row (in the original flat numbering).
     int dstRow;
     if (!dropIdx.isValid()) {
         dstRow = rowCount();
     } else {
         const QRect r = visualRect(dropIdx);
-        dstRow = dropIdx.row();
-        if (pt.y() >= r.center().y()) ++dstRow;
+        dstRow = dropIdx.row() + (pt.y() >= r.center().y() ? 1 : 0);
     }
 
-    if (dstRow == srcRow || dstRow == srcRow + 1) { ev->ignore(); return; }
+    // Noop: dstRow falls within or immediately after an existing block boundary
+    // such that the result would be identical to the current order.
+    {
+        bool noop = (dstRow == topLevel.front());  // drop onto start of first block
+        if (!noop) {
+            // Also noop if dstRow == end of last block (no movement).
+            noop = (dstRow == topLevel.back() + blockSizes.back());
+        }
+        if (!noop) {
+            // Noop if dstRow falls strictly inside any block (can't insert there).
+            for (size_t i = 0; i < topLevel.size(); ++i) {
+                if (dstRow > topLevel[i] && dstRow < topLevel[i] + blockSizes[i]) {
+                    noop = true; break;
+                }
+            }
+        }
+        if (noop) { ev->ignore(); return; }
+    }
+
+    // Compute adjusted insertion point after hypothetical removal of all blocks.
+    int adjustedDst = dstRow;
+    for (size_t i = 0; i < topLevel.size(); ++i) {
+        if (topLevel[i] + blockSizes[i] <= dstRow)
+            adjustedDst -= blockSizes[i];
+    }
+    adjustedDst = std::max(0, adjustedDst);
+
     if (m_model->sf.cueLists.empty()) { ev->ignore(); return; }
-
     m_model->pushUndo();
-    auto cd = ShowHelpers::sfRemoveAt(m_model->sf, m_model->activeListIdx(), srcRow);
-    if (cd.type.empty()) { ev->ignore(); return; }  // invalid index
 
-    // Count exact flat size of the removed block (1 for non-group; 1+all_descendants for group).
-    std::function<int(const mcp::ShowFile::CueData&)> countBlock;
-    countBlock = [&](const mcp::ShowFile::CueData& c) -> int {
-        int n = 1;
-        for (const auto& child : c.children) n += countBlock(child);
-        return n;
-    };
-    const int blockSize = countBlock(cd);
+    // Remove top-level blocks back-to-front so earlier indices stay valid.
+    std::vector<mcp::ShowFile::CueData> removed;
+    for (int i = (int)topLevel.size() - 1; i >= 0; --i) {
+        auto cd = ShowHelpers::sfRemoveAt(m_model->sf, m_model->activeListIdx(), topLevel[i]);
+        if (!cd.type.empty()) removed.push_back(std::move(cd));
+    }
+    std::reverse(removed.begin(), removed.end());  // restore original forward order
 
-    // Adjust dstRow for the removal: if dstRow > srcRow, insertion point shifts up
-    // by the number of flat elements removed.
-    int ins = dstRow;
-    if (dstRow > srcRow) ins = std::max(srcRow, dstRow - blockSize);
-    ins = std::max(0, ins);
+    // Re-insert all blocks at adjustedDst in order.
+    int ins = adjustedDst;
+    for (size_t i = 0; i < removed.size(); ++i) {
+        ShowHelpers::sfInsertBefore(m_model->sf, m_model->activeListIdx(), ins, removed[i]);
+        ins += blockSizes[i];
+    }
 
-    ShowHelpers::sfInsertBefore(m_model->sf, m_model->activeListIdx(), ins, std::move(cd));
+    // Fix stale target flat-indices in SF for the multi-block move.
+    // Build a mapping: old flat index → new flat index.
+    {
+        const int srcListId = m_model->sf.cueLists[
+            static_cast<size_t>(m_model->activeListIdx())].numericId;
 
-    // Fix stale target flat-indices in ALL lists' SF caused by the reorder.
-    ShowHelpers::sfFixTargetsForReorder(m_model->sf, m_model->activeListIdx(),
-                                        srcRow, blockSize, dstRow);
+        auto mapIdx = [&](int T) -> int {
+            if (T < 0) return T;
+            // Check if T is inside one of the moved blocks.
+            int cumulative = 0;
+            for (size_t i = 0; i < topLevel.size(); ++i) {
+                if (T >= topLevel[i] && T < topLevel[i] + blockSizes[i])
+                    return adjustedDst + cumulative + (T - topLevel[i]);
+                cumulative += blockSizes[i];
+            }
+            // T is not in any moved block — compute compressed index.
+            int movedBefore = 0;
+            for (size_t i = 0; i < topLevel.size(); ++i) {
+                if (topLevel[i] + blockSizes[i] <= T) movedBefore += blockSizes[i];
+            }
+            const int compressed = T - movedBefore;
+            return (compressed >= adjustedDst) ? compressed + totalMoved : compressed;
+        };
+
+        for (auto& cl : m_model->sf.cueLists) {
+            std::function<void(std::vector<mcp::ShowFile::CueData>&)> fix;
+            fix = [&](std::vector<mcp::ShowFile::CueData>& cues) {
+                for (auto& cdata : cues) {
+                    const bool refersToSrc = (cdata.targetListId == srcListId ||
+                        (cdata.targetListId == -1 && cl.numericId == srcListId));
+                    if (refersToSrc && cdata.target >= 0)
+                        cdata.target = mapIdx(cdata.target);
+                    if (!cdata.children.empty()) fix(cdata.children);
+                }
+            };
+            fix(cl.cues);
+        }
+    }
 
     std::string err;
     ShowHelpers::rebuildAllCueLists(*m_model, err);
     ShowHelpers::syncAllSfFromCues(*m_model);
-    m_selRow = ins;
-    // Qt::IgnoreAction prevents startDrag's clearOrRemove() from deleting
-    // the source row after we've already refreshed the widget.
+    m_selRow = adjustedDst;
     ev->setDropAction(Qt::IgnoreAction);
     ev->accept();
     emit rowSelected(m_selRow);
@@ -1195,6 +1344,39 @@ void CueTableView::onCellChanged(int row, int col) {
 }
 
 // ── mutation helpers ───────────────────────────────────────────────────────
+
+void CueTableView::replaceAudioForRow(int row, const QString& absPath) {
+    m_model->pushUndo();
+
+    namespace fs = std::filesystem;
+    const fs::path base(m_model->baseDir);
+    fs::path np(absPath.toStdString());
+    std::string pathToStore;
+    if (!m_model->baseDir.empty()) {
+        try {
+            const auto rel = fs::relative(np, base);
+            const std::string relStr = rel.string();
+            pathToStore = (relStr.find("..") == std::string::npos) ? relStr : np.string();
+        } catch (...) {
+            pathToStore = np.string();
+        }
+    } else {
+        pathToStore = np.string();
+    }
+
+    auto* sfCue = ShowHelpers::sfCueAt(m_model->sf, m_model->activeListIdx(), row);
+    if (!sfCue) return;
+    sfCue->path = pathToStore;
+
+    std::string err;
+    ShowHelpers::rebuildAllCueLists(*m_model, err);
+    m_model->dirty = true;
+
+    m_selRow = row;
+    refresh();
+    emit rowSelected(row);   // so inspector reloads the updated path
+    emit cueListModified();
+}
 
 void CueTableView::insertAudioCueForPath(const QString& path, int beforeRow) {
     if (m_model->sf.cueLists.empty())
