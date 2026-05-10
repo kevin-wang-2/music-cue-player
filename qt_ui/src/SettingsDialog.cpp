@@ -225,6 +225,20 @@ SettingsDialog::SettingsDialog(AppModel* model, QWidget* parent)
         }
     }
 
+    // Explicitly initialize the diagonal crosspoint (0 dB) for any missing entries.
+    // This ensures every cell is explicit so user edits are never silently discarded.
+    {
+        const int nCh   = static_cast<int>(m_audioSetup.channels.size());
+        const int nPhys = totalPhysOutputs();
+        for (int i = 0; i < std::min(nCh, nPhys); ++i) {
+            bool found = false;
+            for (const auto& xe : m_audioSetup.xpEntries)
+                if (xe.ch == i && xe.out == i) { found = true; break; }
+            if (!found)
+                m_audioSetup.xpEntries.push_back({i, i, 0.0f});
+        }
+    }
+
     auto* outer = new QVBoxLayout(this);
     outer->setContentsMargins(0, 0, 0, 12);
     outer->setSpacing(0);
@@ -266,6 +280,7 @@ SettingsDialog::SettingsDialog(AppModel* model, QWidget* parent)
         syncDevicesFromTable();
         syncChannelsFromTable();
         syncXpFromGrid();
+        syncOutputFromTable();
         syncNetworkFromTable();
         syncMidiFromTable();
         syncOscFromUI();
@@ -299,6 +314,7 @@ void SettingsDialog::buildAudioPage() {
     buildDevicesTab();
     buildChannelsTab();
     buildXpTab();
+    buildOutputTab();
 
     m_stack->addWidget(page);
 }
@@ -535,14 +551,17 @@ void SettingsDialog::buildChannelsTab() {
     toolbar->addStretch();
     vlay->addLayout(toolbar);
 
-    // Col 0: Name | Col 1: Device (hidden in legacy) | Col 2: Stereo Link | Col 3: Master dB | Col 4: Mute
-    m_chanTable = new QTableWidget(0, 5, page);
-    m_chanTable->setHorizontalHeaderLabels({"Name", "Device", "Stereo Link", "Master (dB)", "Mute"});
+    // Col 0: Name | Col 1: Device (hidden in legacy) | Col 2: Stereo Link | Col 3: Master dB | Col 4: Mute | Col 5: Phase⌀ | Col 6: Delay | Col 7: Unit
+    m_chanTable = new QTableWidget(0, 8, page);
+    m_chanTable->setHorizontalHeaderLabels({"Name", "Device", "Stereo Link", "Master (dB)", "Mute", "Phase ⌀", "Delay", "Unit"});
     m_chanTable->horizontalHeader()->setSectionResizeMode(0, QHeaderView::Stretch);
     m_chanTable->horizontalHeader()->setSectionResizeMode(1, QHeaderView::ResizeToContents);
     m_chanTable->horizontalHeader()->setSectionResizeMode(2, QHeaderView::ResizeToContents);
     m_chanTable->horizontalHeader()->setSectionResizeMode(3, QHeaderView::ResizeToContents);
     m_chanTable->horizontalHeader()->setSectionResizeMode(4, QHeaderView::ResizeToContents);
+    m_chanTable->horizontalHeader()->setSectionResizeMode(5, QHeaderView::ResizeToContents);
+    m_chanTable->horizontalHeader()->setSectionResizeMode(6, QHeaderView::ResizeToContents);
+    m_chanTable->horizontalHeader()->setSectionResizeMode(7, QHeaderView::ResizeToContents);
     m_chanTable->verticalHeader()->setSectionResizeMode(QHeaderView::Fixed);
     m_chanTable->verticalHeader()->setDefaultSectionSize(26);
     m_chanTable->setSelectionBehavior(QAbstractItemView::SelectRows);
@@ -637,6 +656,49 @@ void SettingsDialog::rebuildChannelsTable() {
                 m_chanTable->setSpan(i, 4, 2, 1);
             }
         }
+
+        // Col 5: Phase ⌀ — individual per channel (separate for stereo L/R)
+        {
+            auto* phaseChk = new QCheckBox;
+            phaseChk->setChecked(ch.phaseInvert);
+            phaseChk->setToolTip("Invert polarity of this output channel");
+            auto* phaseCell = new QWidget;
+            auto* phaseLay = new QHBoxLayout(phaseCell);
+            phaseLay->setAlignment(Qt::AlignCenter);
+            phaseLay->setContentsMargins(0, 0, 0, 0);
+            phaseLay->addWidget(phaseChk);
+            m_chanTable->setCellWidget(i, 5, phaseCell);
+        }
+
+        // Cols 6 & 7: Delay + Unit — shared for stereo (master spans 2 rows)
+        if (!isSlave) {
+            const bool inSamp = ch.delayInSamples;
+            auto* delaySpin = new QDoubleSpinBox;
+            delaySpin->setDecimals(inSamp ? 0 : 2);
+            delaySpin->setSingleStep(inSamp ? 1.0 : 0.1);
+            delaySpin->setRange(0.0, inSamp ? (mcp::AudioEngine::kMaxDelaySamples - 1) : 1000.0);
+            delaySpin->setValue(inSamp ? ch.delaySamples : ch.delayMs);
+            delaySpin->setStyleSheet("background:#252525;color:#ddd;border:none;padding:1px 2px;");
+            m_chanTable->setCellWidget(i, 6, delaySpin);
+
+            auto* unitCb = new QComboBox;
+            unitCb->addItem("ms");
+            unitCb->addItem("samp");
+            unitCb->setCurrentIndex(inSamp ? 1 : 0);
+            connect(unitCb, QOverload<int>::of(&QComboBox::currentIndexChanged),
+                    this, [delaySpin](int idx) {
+                const bool toSamp = (idx == 1);
+                delaySpin->setDecimals(toSamp ? 0 : 2);
+                delaySpin->setSingleStep(toSamp ? 1.0 : 0.1);
+                delaySpin->setRange(0.0, toSamp ? (mcp::AudioEngine::kMaxDelaySamples - 1) : 1000.0);
+            });
+            m_chanTable->setCellWidget(i, 7, unitCb);
+
+            if (isMaster) {
+                m_chanTable->setSpan(i, 6, 2, 1);
+                m_chanTable->setSpan(i, 7, 2, 1);
+            }
+        }
     }
 }
 
@@ -679,6 +741,11 @@ void SettingsDialog::syncChannelsFromTable() {
                 c.deviceIndex = cb->currentIndex();
         }
 
+        // Phase ⌀ — individual per channel
+        if (auto* cell = m_chanTable->cellWidget(i, 5))
+            if (auto* chk = cell->findChild<QCheckBox*>())
+                c.phaseInvert = chk->isChecked();
+
         if (!isSlave) {
             if (auto* cell = m_chanTable->cellWidget(i, 2))
                 if (auto* chk = cell->findChild<QCheckBox*>())
@@ -688,11 +755,27 @@ void SettingsDialog::syncChannelsFromTable() {
             if (auto* cell = m_chanTable->cellWidget(i, 4))
                 if (auto* chk = cell->findChild<QCheckBox*>())
                     c.mute = chk->isChecked();
+
+            const auto* unitCb  = qobject_cast<QComboBox*>(m_chanTable->cellWidget(i, 7));
+            const auto* delaySp = qobject_cast<QDoubleSpinBox*>(m_chanTable->cellWidget(i, 6));
+            if (unitCb && delaySp) {
+                c.delayInSamples = (unitCb->currentIndex() == 1);
+                if (c.delayInSamples) {
+                    c.delaySamples = static_cast<int>(delaySp->value());
+                    c.delayMs      = 0.0;
+                } else {
+                    c.delayMs      = delaySp->value();
+                    c.delaySamples = 0;
+                }
+            }
         } else {
             const auto& master = m_audioSetup.channels[static_cast<size_t>(i - 1)];
-            c.linkedStereo = false;
-            c.masterGainDb = master.masterGainDb;
-            c.mute         = master.mute;
+            c.linkedStereo   = false;
+            c.masterGainDb   = master.masterGainDb;
+            c.mute           = master.mute;
+            c.delayInSamples = master.delayInSamples;
+            c.delayMs        = master.delayMs;
+            c.delaySamples   = master.delaySamples;
         }
     }
 }
@@ -719,6 +802,7 @@ void SettingsDialog::buildXpTab() {
 }
 
 void SettingsDialog::rebuildXpGrid() {
+    if (!m_xpCells.empty()) syncXpFromGrid();  // preserve current edits before rebuild
     delete m_xpContent;
     m_xpCells.clear();
 
@@ -807,8 +891,7 @@ void SettingsDialog::rebuildXpGrid() {
                     "QLineEdit:focus{border-color:#2a6ab8;}");
                 auto xpVal = findXp(ch, p);
                 if (xpVal.has_value()) cell->setText(fmtDb(*xpVal));
-                else if (ch == p)     cell->setPlaceholderText("0.0");
-                else                  cell->setPlaceholderText("-inf");
+                else                   cell->setPlaceholderText("-inf");
                 // Validate on commit: empty or non-numeric → "-inf"
                 connect(cell, &QLineEdit::editingFinished, cell, [cell]() {
                     const QString t = cell->text().trimmed();
@@ -855,11 +938,135 @@ void SettingsDialog::syncXpFromGrid() {
             auto* cell = m_xpCells[static_cast<size_t>(ch)][static_cast<size_t>(p)];
             if (!cell || !cell->isEnabled()) continue;  // skip disabled (off-device) cells
             const QString txt = cell->text().trimmed();
-            if (txt.isEmpty()) continue;
+            if (txt.isEmpty()) {
+                // Diagonal empty = user explicitly muted that route; off-diagonal empty = implicit -inf (skip)
+                if (ch == p) m_audioSetup.xpEntries.push_back({ch, p, kInfDb});
+                continue;
+            }
             float db = parseDb(txt, ch == p ? 0.0f : kInfDb);
-            bool isDefault = (ch == p) ? (std::abs(db) < 0.001f) : (db <= kInfDb);
+            // Only off-diagonal -inf is treated as "default" (not stored).
+            // Diagonal entries are always stored explicitly so they survive save/reload.
+            bool isDefault = (ch != p) && (db <= kInfDb);
             if (!isDefault)
                 m_audioSetup.xpEntries.push_back({ch, p, db});
+        }
+    }
+}
+
+// ── Output DSP tab ─────────────────────────────────────────────────────────
+
+void SettingsDialog::buildOutputTab() {
+    auto* page = new QWidget;
+    auto* vlay = new QVBoxLayout(page);
+    vlay->setContentsMargins(8, 8, 8, 8);
+    vlay->setSpacing(8);
+
+    auto* hint = new QLabel(
+        "Per-physical-output DSP applied after channel processing. "
+        "Phase and delay combine with channel DSP (phase XOR'd, delays summed).");
+    hint->setStyleSheet("color:#777;font-size:11px;");
+    hint->setWordWrap(true);
+    vlay->addWidget(hint);
+
+    m_outTable = new QTableWidget(0, 4, page);
+    m_outTable->setHorizontalHeaderLabels({"Output", "Phase ⌀", "Delay", "Unit"});
+    m_outTable->horizontalHeader()->setSectionResizeMode(0, QHeaderView::Stretch);
+    m_outTable->horizontalHeader()->setSectionResizeMode(1, QHeaderView::ResizeToContents);
+    m_outTable->horizontalHeader()->setSectionResizeMode(2, QHeaderView::ResizeToContents);
+    m_outTable->horizontalHeader()->setSectionResizeMode(3, QHeaderView::ResizeToContents);
+    m_outTable->verticalHeader()->setSectionResizeMode(QHeaderView::Fixed);
+    m_outTable->verticalHeader()->setDefaultSectionSize(26);
+    m_outTable->setSelectionBehavior(QAbstractItemView::SelectRows);
+    m_outTable->setEditTriggers(QAbstractItemView::NoEditTriggers);
+    vlay->addWidget(m_outTable, 1);
+
+    rebuildOutputTable();
+
+    m_audioTabs->addTab(page, "Output");
+}
+
+void SettingsDialog::rebuildOutputTable() {
+    if (!m_outTable) return;
+    m_outTable->setRowCount(0);
+
+    const int numPhys = totalPhysOutputs();
+    const bool multiDev = !m_audioSetup.devices.empty();
+
+    m_audioSetup.physOutDsp.resize(static_cast<size_t>(numPhys));
+
+    int globalIdx = 0;
+    for (int d = 0; d < (multiDev ? (int)m_audioSetup.devices.size() : 1); ++d) {
+        const int chCount = multiDev ? m_audioSetup.devices[static_cast<size_t>(d)].channelCount
+                                     : numPhys;
+        for (int lp = 0; lp < chCount; ++lp, ++globalIdx) {
+            const int row = globalIdx;
+            m_outTable->insertRow(row);
+
+            const auto& dsp = m_audioSetup.physOutDsp[static_cast<size_t>(globalIdx)];
+
+            QString label = multiDev ? QString("D%1.%2").arg(d + 1).arg(lp + 1)
+                                     : QString("Out %1").arg(lp + 1);
+            auto* lbl = new QLabel(label);
+            lbl->setStyleSheet("color:#ccc;padding:1px 6px;");
+            m_outTable->setCellWidget(row, 0, lbl);
+
+            auto* phaseChk = new QCheckBox;
+            phaseChk->setChecked(dsp.phaseInvert);
+            phaseChk->setToolTip("Invert polarity of this physical output");
+            auto* phaseCell = new QWidget;
+            auto* phaseLay = new QHBoxLayout(phaseCell);
+            phaseLay->setAlignment(Qt::AlignCenter);
+            phaseLay->setContentsMargins(0, 0, 0, 0);
+            phaseLay->addWidget(phaseChk);
+            m_outTable->setCellWidget(row, 1, phaseCell);
+
+            const bool inSamp = dsp.delayInSamples;
+            auto* delaySpin = new QDoubleSpinBox;
+            delaySpin->setDecimals(inSamp ? 0 : 2);
+            delaySpin->setSingleStep(inSamp ? 1.0 : 0.1);
+            delaySpin->setRange(0.0, inSamp ? (mcp::AudioEngine::kMaxDelaySamples - 1) : 1000.0);
+            delaySpin->setValue(inSamp ? dsp.delaySamples : dsp.delayMs);
+            delaySpin->setStyleSheet("background:#252525;color:#ddd;border:none;padding:1px 2px;");
+            m_outTable->setCellWidget(row, 2, delaySpin);
+
+            auto* unitCb = new QComboBox;
+            unitCb->addItem("ms");
+            unitCb->addItem("samp");
+            unitCb->setCurrentIndex(inSamp ? 1 : 0);
+            connect(unitCb, QOverload<int>::of(&QComboBox::currentIndexChanged),
+                    this, [delaySpin](int idx) {
+                const bool toSamp = (idx == 1);
+                delaySpin->setDecimals(toSamp ? 0 : 2);
+                delaySpin->setSingleStep(toSamp ? 1.0 : 0.1);
+                delaySpin->setRange(0.0, toSamp ? (mcp::AudioEngine::kMaxDelaySamples - 1) : 1000.0);
+            });
+            m_outTable->setCellWidget(row, 3, unitCb);
+        }
+    }
+}
+
+void SettingsDialog::syncOutputFromTable() {
+    if (!m_outTable) return;
+    const int rows = m_outTable->rowCount();
+    m_audioSetup.physOutDsp.resize(static_cast<size_t>(rows));
+    for (int i = 0; i < rows; ++i) {
+        auto& dsp = m_audioSetup.physOutDsp[static_cast<size_t>(i)];
+
+        if (auto* cell = m_outTable->cellWidget(i, 1))
+            if (auto* chk = cell->findChild<QCheckBox*>())
+                dsp.phaseInvert = chk->isChecked();
+
+        const auto* unitCb  = qobject_cast<QComboBox*>(m_outTable->cellWidget(i, 3));
+        const auto* delaySp = qobject_cast<QDoubleSpinBox*>(m_outTable->cellWidget(i, 2));
+        if (unitCb && delaySp) {
+            dsp.delayInSamples = (unitCb->currentIndex() == 1);
+            if (dsp.delayInSamples) {
+                dsp.delaySamples = static_cast<int>(delaySp->value());
+                dsp.delayMs      = 0.0;
+            } else {
+                dsp.delayMs      = delaySp->value();
+                dsp.delaySamples = 0;
+            }
         }
     }
 }

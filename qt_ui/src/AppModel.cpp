@@ -562,6 +562,63 @@ void AppModel::applyOscSettings() {
     oscServer.applySettings(sf.oscServer);
 }
 
+void AppModel::applyOutputDsp() {
+    if (!engineOk) return;
+    const int sr = engine.sampleRate();
+
+    const int nCh = static_cast<int>(sf.audioSetup.channels.size());
+    int nPhys = 0;
+    if (sf.audioSetup.devices.empty()) {
+        nPhys = engineOk ? engine.channels() : 2;
+    } else {
+        for (const auto& d : sf.audioSetup.devices) nPhys += d.channelCount;
+    }
+    nPhys = std::max(nPhys, static_cast<int>(sf.audioSetup.physOutDsp.size()));
+
+    std::vector<mcp::AudioEngine::OutputDsp> config(static_cast<size_t>(nPhys));
+
+    // Effective crosspoint gain for (ch → out): uses explicit xpEntries, falls back to diagonal default.
+    static constexpr float kSilent = -143.0f;
+    auto xpGain = [&](int ch, int out) -> float {
+        for (const auto& xe : sf.audioSetup.xpEntries)
+            if (xe.ch == ch && xe.out == out) return xe.db;
+        return (ch == out) ? 0.0f : -144.0f;
+    };
+
+    // For each physical output, accumulate channel DSP from all channels routed to it.
+    for (int p = 0; p < nPhys; ++p) {
+        bool first = true;
+        for (int ch = 0; ch < nCh; ++ch) {
+            if (xpGain(ch, p) <= kSilent) continue;
+            const auto& c = sf.audioSetup.channels[static_cast<size_t>(ch)];
+            const int delay = c.delayInSamples
+                ? c.delaySamples
+                : static_cast<int>(c.delayMs * sr / 1000.0 + 0.5);
+            if (first) {
+                config[static_cast<size_t>(p)].phaseInvert  = c.phaseInvert;
+                config[static_cast<size_t>(p)].delaySamples = delay;
+                first = false;
+            } else {
+                config[static_cast<size_t>(p)].phaseInvert ^= c.phaseInvert;
+                config[static_cast<size_t>(p)].delaySamples += delay;
+            }
+        }
+    }
+
+    // Merge physOut DSP on top (XOR phase, add delay).
+    const int nPhysDsp = static_cast<int>(sf.audioSetup.physOutDsp.size());
+    for (int p = 0; p < nPhys && p < nPhysDsp; ++p) {
+        const auto& pd = sf.audioSetup.physOutDsp[static_cast<size_t>(p)];
+        config[static_cast<size_t>(p)].phaseInvert ^= pd.phaseInvert;
+        const int pDelay = pd.delayInSamples
+            ? pd.delaySamples
+            : static_cast<int>(pd.delayMs * sr / 1000.0 + 0.5);
+        config[static_cast<size_t>(p)].delaySamples += pDelay;
+    }
+
+    engine.setOutputDsp(std::move(config));
+}
+
 void AppModel::applyMidiInput() {
     midiIn.openAll();
 }

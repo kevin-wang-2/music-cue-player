@@ -715,6 +715,7 @@ void MainWindow::onOpenSettings() {
         m_model->engineOk = m_model->engine.initialize(sr, specs);
         emit m_model->engineStatusChanged();
     }
+    m_model->applyOutputDsp();
 
     std::string err;
     ShowHelpers::rebuildAllCueLists(*m_model, err);
@@ -1000,6 +1001,7 @@ void MainWindow::loadShowFile(const QString& path) {
     m_model->baseDir  = std::filesystem::path(m_model->showPath).parent_path().string();
     m_model->dirty    = false;
     m_model->applyOscSettings();
+    m_model->applyOutputDsp();
     m_model->applyScriptletLibrary();
     ShowHelpers::normalizeListRefs(m_model->sf);  // resolve any -1 list refs from older files
     ShowHelpers::rebuildAllCueLists(*m_model, err);

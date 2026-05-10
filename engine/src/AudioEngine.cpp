@@ -74,6 +74,14 @@ struct DeviceStream {
 // ---------------------------------------------------------------------------
 // Impl
 // ---------------------------------------------------------------------------
+// Per-output-channel DSP config (phase + delay), stored in a double-buffer.
+// Main thread writes the inactive buffer then atomically swaps the active index.
+// Callback reads the active buffer without locking.
+struct OutDspSlot {
+    bool phaseInvert{false};
+    int  delaySamples{0};
+};
+
 struct AudioEngineImpl {
     // heap-allocated entries; addresses stable for the lifetime of the engine.
     std::vector<std::unique_ptr<DeviceStream>> streams;
@@ -90,6 +98,16 @@ struct AudioEngineImpl {
     std::atomic<bool>    softPanicActive{false};
     std::atomic<int64_t> softPanicStartFrame{0};
     std::atomic<int64_t> softPanicEndFrame{0};
+
+    // Output DSP — double-buffered for lock-free main-thread updates.
+    // Index [0/1] flips atomically; callback reads active, main writes inactive.
+    std::vector<OutDspSlot> dspBuf[2];       // [globalOutCh]
+    std::atomic<int>        dspBufIdx{0};    // which buffer is active
+
+    // Delay rings — pre-allocated at initialize(); never resized afterwards.
+    static constexpr int kDelayMask = AudioEngine::kMaxDelaySamples - 1;
+    std::vector<std::vector<float>> delayRings;  // [globalOutCh][kMaxDelaySamples]
+    std::vector<int>                delayWrPos;  // [globalOutCh]
 
     int masterIdx() const {
         for (int i = 0; i < (int)streams.size(); ++i)
@@ -180,6 +198,39 @@ static int paDeviceCallback(const void* /*input*/, void* output,
                     out[f * ds.outChannels + ch] += src[f * v.channels + ch] * gain;
             if (toRead < static_cast<int64_t>(frameCount))
                 v.active.store(false, std::memory_order_release);
+        }
+    }
+
+    // Per-output-channel DSP: phase inversion and delay.
+    // Compute this stream's base in the global output-channel index.
+    {
+        int globalBase = 0;
+        for (int si = 0; si < cbd->streamIndex; ++si)
+            globalBase += impl->streams[static_cast<size_t>(si)]->outChannels;
+
+        const auto& dsp = impl->dspBuf[impl->dspBufIdx.load(std::memory_order_acquire)];
+        for (int c = 0; c < ds.outChannels; ++c) {
+            const int gi = globalBase + c;
+            if (gi >= (int)dsp.size()) break;
+            const bool inv   = dsp[static_cast<size_t>(gi)].phaseInvert;
+            const int  delay = dsp[static_cast<size_t>(gi)].delaySamples;
+            if (!inv && delay <= 0) continue;
+
+            auto& ring = impl->delayRings[static_cast<size_t>(gi)];
+            auto& wp   = impl->delayWrPos[static_cast<size_t>(gi)];
+            if (ring.empty()) continue;
+
+            for (unsigned long f = 0; f < frameCount; ++f) {
+                float s = out[f * static_cast<unsigned long>(ds.outChannels) + static_cast<unsigned long>(c)];
+                ring[static_cast<size_t>(wp)] = s;
+                if (delay > 0) {
+                    const int rp = (wp - delay + AudioEngine::kMaxDelaySamples) & AudioEngineImpl::kDelayMask;
+                    s = ring[static_cast<size_t>(rp)];
+                }
+                wp = (wp + 1) & AudioEngineImpl::kDelayMask;
+                if (inv) s = -s;
+                out[f * static_cast<unsigned long>(ds.outChannels) + static_cast<unsigned long>(c)] = s;
+            }
         }
     }
 
@@ -335,6 +386,18 @@ bool AudioEngine::initialize(int sampleRate, int channels, const std::string& de
         return false;
     }
 
+    // Allocate per-output-channel DSP resources.
+    {
+        int totalOut = 0;
+        for (const auto& ds : m_impl->streams) totalOut += ds->outChannels;
+        m_impl->delayRings.assign(static_cast<size_t>(totalOut),
+                                  std::vector<float>(kMaxDelaySamples, 0.0f));
+        m_impl->delayWrPos.assign(static_cast<size_t>(totalOut), 0);
+        m_impl->dspBuf[0].assign(static_cast<size_t>(totalOut), OutDspSlot{});
+        m_impl->dspBuf[1].assign(static_cast<size_t>(totalOut), OutDspSlot{});
+        m_impl->dspBufIdx.store(0, std::memory_order_relaxed);
+    }
+
     m_impl->initialized = true;
     m_impl->lastError.clear();
     return true;
@@ -385,6 +448,18 @@ bool AudioEngine::initialize(int sampleRate, const std::vector<DeviceSpec>& devi
             m_impl->lastError = Pa_GetErrorText(err);
             closeAllStreams(m_impl.get()); Pa_Terminate(); return false;
         }
+    }
+
+    // Allocate per-output-channel DSP resources.
+    {
+        int totalOut = 0;
+        for (const auto& ds : m_impl->streams) totalOut += ds->outChannels;
+        m_impl->delayRings.assign(static_cast<size_t>(totalOut),
+                                  std::vector<float>(kMaxDelaySamples, 0.0f));
+        m_impl->delayWrPos.assign(static_cast<size_t>(totalOut), 0);
+        m_impl->dspBuf[0].assign(static_cast<size_t>(totalOut), OutDspSlot{});
+        m_impl->dspBuf[1].assign(static_cast<size_t>(totalOut), OutDspSlot{});
+        m_impl->dspBufIdx.store(0, std::memory_order_relaxed);
     }
 
     m_impl->initialized = true;
@@ -524,5 +599,21 @@ int64_t AudioEngine::bufferPlayheadFrames() const {
 }
 
 const std::string& AudioEngine::lastError() const { return m_impl->lastError; }
+
+void AudioEngine::setOutputDsp(std::vector<OutputDsp> config) {
+    // Write to the inactive buffer, then atomically swap the active index.
+    const int inactive = 1 - m_impl->dspBufIdx.load(std::memory_order_relaxed);
+    const int n = std::min(static_cast<int>(config.size()),
+                           static_cast<int>(m_impl->dspBuf[inactive].size()));
+    for (int i = 0; i < n; ++i) {
+        m_impl->dspBuf[inactive][static_cast<size_t>(i)].phaseInvert  = config[static_cast<size_t>(i)].phaseInvert;
+        m_impl->dspBuf[inactive][static_cast<size_t>(i)].delaySamples =
+            std::min(config[static_cast<size_t>(i)].delaySamples, kMaxDelaySamples - 1);
+    }
+    // Zero out any trailing slots not covered by the new config.
+    for (int i = n; i < (int)m_impl->dspBuf[inactive].size(); ++i)
+        m_impl->dspBuf[inactive][static_cast<size_t>(i)] = OutDspSlot{};
+    m_impl->dspBufIdx.store(inactive, std::memory_order_release);
+}
 
 } // namespace mcp

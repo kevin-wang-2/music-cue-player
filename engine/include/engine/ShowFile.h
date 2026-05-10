@@ -224,6 +224,12 @@ struct ShowFile {
             bool linkedStereo{false};  // UI hint only — no effect on routing
             float masterGainDb{0.0f};  // channel master fader (0 = unity)
             bool  mute{false};
+            // DSP — applied post-crosspoint, per logical channel.
+            // For stereo pairs phase is independent; delay is shared (use master's value).
+            bool   phaseInvert{false};
+            bool   delayInSamples{false};  // false = ms mode, true = samples mode
+            double delayMs{0.0};
+            int    delaySamples{0};
         };
         std::vector<Channel> channels;
         // Sparse crosspoint: channel[ch] → physOut[out], dB.
@@ -231,6 +237,15 @@ struct ShowFile {
         // Set db <= -144 to explicitly disable the diagonal.
         struct XpEntry { int ch{0}; int out{0}; float db{0.0f}; };
         std::vector<XpEntry> xpEntries;
+
+        // DSP per physical output (applied after channel DSP; combined before engine).
+        struct PhysOutDsp {
+            bool   phaseInvert{false};
+            bool   delayInSamples{false};
+            double delayMs{0.0};
+            int    delaySamples{0};
+        };
+        std::vector<PhysOutDsp> physOutDsp;  // index = global physical output
 
         // Ensure at most one device has masterClock=true.
         // If none, assigns masterClock to devices[0] (no-op when devices is empty).

@@ -1406,6 +1406,15 @@ void CueTableView::insertAudioCueForPath(const QString& path, int beforeRow) {
 
     std::string err;
     ShowHelpers::rebuildAllCueLists(*m_model, err);
+
+    // Explicitly initialize diagonal crosspoint for the new audio cue so the
+    // inspector grid always shows "0.0" on first display — no lazy defaults.
+    if (const mcp::Cue* c = m_model->cues().cueAt(beforeRow)) {
+        const int srcCh = c->audioFile.isLoaded() ? c->audioFile.metadata().channels : 1;
+        const int outCh = m_model->channelCount();
+        m_model->cues().initCueRouting(beforeRow, srcCh, outCh);
+    }
+
     m_selRow = beforeRow;
     emit rowSelected(m_selRow);
     emit cueListModified();

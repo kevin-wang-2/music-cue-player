@@ -25,7 +25,7 @@ class QWidget;
 // Multi-section settings dialog.
 //
 // Left sidebar (QListWidget) switches between sections:
-//   Audio    — Devices tab + Channels tab + Crosspoint tab
+//   Audio    — Devices tab + Channels tab + Crosspoint tab + Output tab
 //   Network  — Network Output tab + OSC Server tab
 //   MIDI     — MIDI Output tab
 //   Controls — MIDI Learn tab + OSC tab (system action bindings)
@@ -62,13 +62,16 @@ private:
     void buildDevicesTab();
     void buildChannelsTab();
     void buildXpTab();
+    void buildOutputTab();
     void rebuildDevicesTable();
     void rebuildMasterCombo();
     void rebuildChannelsTable();
     void rebuildXpGrid();
+    void rebuildOutputTable();
     void syncDevicesFromTable();
     void syncChannelsFromTable();
     void syncXpFromGrid();
+    void syncOutputFromTable();
     void updateAudioWarnings();
     int  totalPhysOutputs() const;
 
@@ -125,6 +128,9 @@ private:
     QWidget*      m_xpContent{nullptr};
     QGridLayout*  m_xpGrid{nullptr};
     std::vector<std::vector<QLineEdit*>> m_xpCells;
+
+    // Audio section — output DSP tab
+    QTableWidget* m_outTable{nullptr};
 
     // Network section
     QTabWidget*   m_networkTabs{nullptr};

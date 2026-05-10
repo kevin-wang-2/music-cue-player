@@ -120,6 +120,8 @@ public:
 
     // Apply OscServerSettings from sf and (re)start the OSC server.
     void applyOscSettings();
+    // Push channel + physout DSP settings from sf to the engine.
+    void applyOutputDsp();
     // Apply MIDI input: open all ports.
     void applyMidiInput();
     // Sync scriptlet library from sf into the ScriptletEngine.

@@ -457,6 +457,10 @@ bool ShowFile::load(const std::filesystem::path& path, std::string& error) {
                 c.linkedStereo  = jget<bool>       (ch, "linkedStereo",  false);
                 c.masterGainDb  = jget<float>      (ch, "masterGainDb",  0.0f);
                 c.mute          = jget<bool>       (ch, "mute",          false);
+                c.phaseInvert   = jget<bool>       (ch, "phaseInvert",   false);
+                c.delayInSamples= jget<bool>       (ch, "delayInSamples",false);
+                c.delayMs       = jget<double>     (ch, "delayMs",       0.0);
+                c.delaySamples  = jget<int>        (ch, "delaySamples",  0);
                 audioSetup.channels.push_back(c);
             }
         }
@@ -467,6 +471,16 @@ bool ShowFile::load(const std::filesystem::path& path, std::string& error) {
                 e.out = jget<int>  (xe, "out", 0);
                 e.db  = jget<float>(xe, "db",  0.0f);
                 audioSetup.xpEntries.push_back(e);
+            }
+        }
+        if (as.contains("physOutDsp") && as["physOutDsp"].is_array()) {
+            for (const auto& pj : as["physOutDsp"]) {
+                AudioSetup::PhysOutDsp p;
+                p.phaseInvert   = jget<bool>  (pj, "phaseInvert",   false);
+                p.delayInSamples= jget<bool>  (pj, "delayInSamples",false);
+                p.delayMs       = jget<double>(pj, "delayMs",        0.0);
+                p.delaySamples  = jget<int>   (pj, "delaySamples",   0);
+                audioSetup.physOutDsp.push_back(p);
             }
         }
     }
@@ -617,6 +631,10 @@ bool ShowFile::save(const std::filesystem::path& path, std::string& error) const
             if (ch.linkedStereo)         cj["linkedStereo"]  = true;
             if (ch.masterGainDb != 0.0f) cj["masterGainDb"]  = ch.masterGainDb;
             if (ch.mute)                 cj["mute"]          = true;
+            if (ch.phaseInvert)          cj["phaseInvert"]   = true;
+            if (ch.delayInSamples)       cj["delayInSamples"]= true;
+            if (ch.delayMs != 0.0)       cj["delayMs"]       = ch.delayMs;
+            if (ch.delaySamples != 0)    cj["delaySamples"]  = ch.delaySamples;
             chArr.push_back(cj);
         }
         as["channels"] = chArr;
@@ -628,6 +646,24 @@ bool ShowFile::save(const std::filesystem::path& path, std::string& error) const
                 xpArr.push_back(ej);
             }
             as["xpEntries"] = xpArr;
+        }
+        {
+            bool anyPhysDsp = false;
+            for (const auto& p : audioSetup.physOutDsp)
+                if (p.phaseInvert || p.delayMs != 0.0 || p.delaySamples != 0)
+                    { anyPhysDsp = true; break; }
+            if (anyPhysDsp) {
+                json pArr = json::array();
+                for (const auto& p : audioSetup.physOutDsp) {
+                    json pj;
+                    if (p.phaseInvert)    pj["phaseInvert"]   = true;
+                    if (p.delayInSamples) pj["delayInSamples"]= true;
+                    if (p.delayMs != 0.0) pj["delayMs"]       = p.delayMs;
+                    if (p.delaySamples != 0) pj["delaySamples"] = p.delaySamples;
+                    pArr.push_back(pj);
+                }
+                as["physOutDsp"] = pArr;
+            }
         }
         root["audioSetup"] = as;
     }

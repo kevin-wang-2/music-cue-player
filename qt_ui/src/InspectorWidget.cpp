@@ -1332,8 +1332,9 @@ void InspectorWidget::rebuildLevelsForCue() {
                     if (s < (int)c->routing.xpoint.size()
                         && o < (int)c->routing.xpoint[s].size())
                         xp = c->routing.xpoint[s][o];
-                    else if (s == o)
-                        xp = 0.0f;  // engine default: unspecified diagonal = 0 dB
+                    // No lazy fallback: setCueXpoint always initializes diagonal explicitly.
+                    // Brand-new cues (xpoint empty) fall through to cell->clear() below,
+                    // and the first edit via editingFinished will initialize properly.
 
                     auto* cell = makeXpCell();
                     if (xp.has_value())

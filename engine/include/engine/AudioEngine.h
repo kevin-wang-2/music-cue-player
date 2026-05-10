@@ -129,6 +129,20 @@ public:
     // for the single-device case; exposed separately for future multi-device use.
     int64_t bufferPlayheadFrames() const;
 
+    // --- Output DSP ---------------------------------------------------------
+
+    // DSP applied per physical output channel, post-mix, in the audio callback.
+    // `config[i]` applies to global output channel i (sequential across streams).
+    // Can be called at any time; takes effect within one callback buffer.
+    struct OutputDsp {
+        bool phaseInvert{false};
+        int  delaySamples{0};    // 0 = no delay; clamped to kMaxDelaySamples-1
+    };
+    void setOutputDsp(std::vector<OutputDsp> config);
+
+    // Maximum supported delay in samples (power of 2 for fast ring indexing).
+    static constexpr int kMaxDelaySamples = 131072;  // ~2.73 s at 48 kHz
+
     const std::string& lastError() const;
 
 private:

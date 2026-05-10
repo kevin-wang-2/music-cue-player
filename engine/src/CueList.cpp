@@ -734,8 +734,19 @@ void CueList::setCueOutLevel(int i, int outCh, float dB) {
 void CueList::setCueXpoint(int i, int srcCh, int outCh, std::optional<float> dB) {
     if (i < 0 || i >= cueCount() || srcCh < 0 || outCh < 0) return;
     auto& r = m_cues[i].routing;
-    if (srcCh >= (int)r.xpoint.size())
+
+    // Grow the row vector; explicitly initialize the diagonal (0 dB) for each new row
+    // so that adding an off-diagonal entry never silently leaves the diagonal as nullopt.
+    if (srcCh >= (int)r.xpoint.size()) {
+        const int oldCount = static_cast<int>(r.xpoint.size());
         r.xpoint.resize(static_cast<size_t>(srcCh + 1));
+        for (int s = oldCount; s <= srcCh; ++s) {
+            auto& newRow = r.xpoint[static_cast<size_t>(s)];
+            newRow.resize(static_cast<size_t>(s + 1), std::nullopt);
+            newRow[static_cast<size_t>(s)] = 0.0f;
+        }
+    }
+
     auto& row = r.xpoint[static_cast<size_t>(srcCh)];
     if (outCh >= (int)row.size())
         row.resize(static_cast<size_t>(outCh + 1), std::nullopt);
