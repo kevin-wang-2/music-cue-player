@@ -20,7 +20,9 @@ PROJECT_ROOT="$(cd "$SCRIPT_DIR/.." && pwd)"
 APP_NAME="Music Cue Player"
 APP_VERSION="0.1.0"
 BINARY_NAME="mcp_qt_ui"
-BUNDLE_NAME="${BINARY_NAME}.app"
+# CMake names the bundle after the target; we rename it for end-users.
+CMAKE_BUNDLE_NAME="${BINARY_NAME}.app"
+BUNDLE_NAME="${APP_NAME}.app"
 
 PYTHON_VER="3.13"
 PYTHON_BREW="/opt/homebrew/opt/python@${PYTHON_VER}"
@@ -79,7 +81,14 @@ else
     step "Skipping build (--skip-build)"
 fi
 
-[ -d "$APP_BUNDLE" ] || die "App bundle not found: $APP_BUNDLE"
+# Rename CMake's mcp_qt_ui.app → "Music Cue Player.app" (user-facing name)
+CMAKE_APP="$BUILD_DIR/bin/$CMAKE_BUNDLE_NAME"
+if [ -d "$CMAKE_APP" ]; then
+    rm -rf "$APP_BUNDLE"
+    mv "$CMAKE_APP" "$APP_BUNDLE"
+elif [ ! -d "$APP_BUNDLE" ]; then
+    die "App bundle not found (expected $CMAKE_APP or $APP_BUNDLE)"
+fi
 
 # ── 3. Qt deployment ──────────────────────────────────────────────────────────
 step "macdeployqt"
@@ -91,7 +100,9 @@ step "Bundling Python.framework (stripped)"
 
 PYTHON_DEST="$FRAMEWORKS_DIR/Python.framework"
 rm -rf "$PYTHON_DEST"
-cp -R "$PYTHON_FRAMEWORK_SRC" "$PYTHON_DEST"
+# ditto handles macOS xattrs and symlinks correctly (cp -R fails on Python.framework)
+ditto "$PYTHON_FRAMEWORK_SRC" "$PYTHON_DEST"
+chmod -R u+w "$PYTHON_DEST"
 
 # Strip directories that are never needed at runtime
 PY_LIB="$PYTHON_DEST/Versions/$PYTHON_VER/lib/python${PYTHON_VER}"
@@ -129,15 +140,18 @@ SIZE_AFTER=$(du -sh "$PYTHON_DEST" 2>/dev/null | cut -f1)
 echo "  Python.framework: $SIZE_BEFORE (source) → $SIZE_AFTER (stripped)"
 
 # ── 5. Bundle remaining native dylibs ─────────────────────────────────────────
-step "Bundling native dylibs (PortAudio, libsndfile, libsamplerate, FFmpeg)"
+step "Bundling native dylibs (PortAudio, libsndfile, libsamplerate, FFmpeg, RtMidi)"
+# RtMidi is built via CMake FetchContent — its dylib lives in _deps/rtmidi-build.
+# Add that directory as an extra search path so dylibbundler can resolve it.
 # At this point Python's rpath is already fixed, so dylibbundler won't touch it.
-# We only ignore the Python brew path explicitly to be safe.
+RTMIDI_BUILD_DIR="$BUILD_DIR/_deps/rtmidi-build"
 dylibbundler \
-    --overwrite-dir \
+    --overwrite-files \
     --bundle-deps \
     --fix-file "$BINARY" \
     --dest-dir "$FRAMEWORKS_DIR" \
     --install-path @executable_path/../Frameworks/ \
+    --search-path "$RTMIDI_BUILD_DIR" \
     --ignore "$PYTHON_BREW"
 
 # ── 6. scriptlets → Resources ─────────────────────────────────────────────────
