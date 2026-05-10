@@ -1,10 +1,18 @@
 #pragma once
 
 #include "engine/ShowFile.h"
+#include <functional>
 #include <string>
 
 // Forward declarations to avoid including AppModel.h here
 struct AppModel;
+
+struct CollectOptions {
+    std::string destDir;
+    bool        convertToWav = false;
+    int         sampleRate   = 48000;
+    int         bitDepth     = 24;   // 16, 24, or 32 (float)
+};
 
 namespace ShowHelpers {
 
@@ -28,6 +36,18 @@ void syncSfFromCues(AppModel& model, int listIdx = -1);
 void syncAllSfFromCues(AppModel& model);
 void saveShow(AppModel& model);
 void setCueNumberChecked(AppModel& model, int index, const std::string& num);
+
+// Count audio cues across all lists (for progress reporting).
+int  countAudioCues(const AppModel& model);
+
+// Copy (or convert) all referenced audio files into opts.destDir/audio/,
+// rewrite paths to relative, and save a copy of the show file in opts.destDir.
+// progress(filename) is called once per file just before it is processed.
+// Returns true if all files succeeded; partial failures are appended to err.
+bool collectAllFiles(AppModel& model,
+                     const CollectOptions& opts,
+                     std::function<void(const std::string& filename)> progress,
+                     std::string& err);
 
 // Navigate the nested ShowFile cue tree by flat engine index.
 // DFS pre-order matches the engine flat list built by rebuildCueList.

@@ -13,6 +13,11 @@ endif()
 find_package(Python3 COMPONENTS Development REQUIRED)
 message(STATUS "Found Python3 ${Python3_VERSION} — ${Python3_EXECUTABLE}")
 
+# ShowHelpers.cpp uses libsndfile + libsamplerate for audio collection/conversion.
+find_package(PkgConfig REQUIRED)
+pkg_check_modules(SNDFILE    REQUIRED sndfile)
+pkg_check_modules(SAMPLERATE REQUIRED samplerate)
+
 # Prefer Qt6; fall back to Qt5 if not found
 find_package(Qt6 QUIET COMPONENTS Core Widgets Network)
 if(Qt6_FOUND)
@@ -30,6 +35,8 @@ set(QT_UI_SOURCES
     src/main.cpp
     src/ShowHelpers.h
     src/ShowHelpers.cpp
+    src/CollectDialog.h
+    src/CollectDialog.cpp
     src/AppModel.h
     src/AppModel.cpp
     src/SettingsDialog.h
@@ -86,6 +93,8 @@ target_include_directories(mcp_qt_ui PRIVATE
     ${CMAKE_CURRENT_SOURCE_DIR}/src
     ${CMAKE_SOURCE_DIR}/engine/include
     ${Python3_INCLUDE_DIRS}
+    ${SNDFILE_INCLUDE_DIRS}
+    ${SAMPLERATE_INCLUDE_DIRS}
 )
 
 target_link_libraries(mcp_qt_ui PRIVATE

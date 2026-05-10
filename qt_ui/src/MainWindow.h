@@ -44,6 +44,7 @@ private slots:
     void onOpenShow();
     void onSaveShow();
     void onSaveShowAs();
+    void onCollectAllFiles();
     void onCueListModified();
     void onRowSelected(int idx);
     void onUndo();

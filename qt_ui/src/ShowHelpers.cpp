@@ -1,6 +1,7 @@
 #include "ShowHelpers.h"
 #include "AppModel.h"
 
+#include "engine/AudioDecoder.h"
 #include "engine/AudioMath.h"
 #include "engine/FadeData.h"
 #include "engine/Timecode.h"
@@ -10,7 +11,12 @@
 #include <cstdio>
 #include <filesystem>
 #include <functional>
+#include <map>
+#include <set>
 #include <unordered_map>
+
+#include <sndfile.h>
+#include <samplerate.h>
 
 namespace ShowHelpers {
 
@@ -983,6 +989,214 @@ void setCueNumberChecked(AppModel& m, int index, const std::string& num) {
     }
     m.cues().setCueCueNumber(index, num);
     syncSfFromCues(m);
+}
+
+// ─────────────────────────────────────────────────────────────────────────────
+// Collect All Files helpers
+// ─────────────────────────────────────────────────────────────────────────────
+
+// Walk all CueData trees and call fn(cd) for every audio cue.
+static void walkAudioCues(
+    std::vector<mcp::ShowFile::CueData>& cues,
+    const std::function<void(mcp::ShowFile::CueData&)>& fn)
+{
+    for (auto& cd : cues) {
+        if (cd.type == "audio") fn(cd);
+        if (!cd.children.empty()) walkAudioCues(cd.children, fn);
+    }
+}
+
+static void walkAudioCuesConst(
+    const std::vector<mcp::ShowFile::CueData>& cues,
+    const std::function<void(const mcp::ShowFile::CueData&)>& fn)
+{
+    for (const auto& cd : cues) {
+        if (cd.type == "audio") fn(cd);
+        if (!cd.children.empty()) walkAudioCuesConst(cd.children, fn);
+    }
+}
+
+// Transcode src to a WAV file at dst. If targetSr matches the source sample
+// rate, no resampling is performed. Returns false and fills err on failure.
+static bool transcodeToWav(const std::string& src, const std::string& dst,
+                            int targetSr, int bitDepth, std::string& err)
+{
+    std::string decErr;
+    auto dec = mcp::AudioDecoder::open(src, decErr);
+    if (!dec) { err = decErr; return false; }
+
+    const int srcSr = dec->nativeSampleRate();
+    const int ch    = dec->nativeChannels();
+
+    SF_INFO out{};
+    out.samplerate = targetSr;
+    out.channels   = ch;
+    out.format     = SF_FORMAT_WAV;
+    switch (bitDepth) {
+        case 16: out.format |= SF_FORMAT_PCM_16; break;
+        case 24: out.format |= SF_FORMAT_PCM_24; break;
+        default: out.format |= SF_FORMAT_FLOAT;  break;
+    }
+
+    SNDFILE* sf = sf_open(dst.c_str(), SFM_WRITE, &out);
+    if (!sf) { err = sf_strerror(nullptr); return false; }
+
+    constexpr int kChunk = 4096;
+
+    if (srcSr == targetSr) {
+        std::vector<float> buf(static_cast<size_t>(kChunk * ch));
+        int64_t got;
+        while ((got = dec->readFloat(buf.data(), kChunk)) > 0)
+            sf_writef_float(sf, buf.data(), static_cast<sf_count_t>(got));
+    } else {
+        const double ratio = static_cast<double>(targetSr) / srcSr;
+        int srcErr = 0;
+        SRC_STATE* resampler = src_new(SRC_SINC_BEST_QUALITY, ch, &srcErr);
+        if (!resampler) {
+            sf_close(sf);
+            err = src_strerror(srcErr);
+            return false;
+        }
+
+        const int outChunk = static_cast<int>(kChunk * ratio) + 64;
+        std::vector<float> inBuf (static_cast<size_t>(kChunk   * ch));
+        std::vector<float> outBuf(static_cast<size_t>(outChunk * ch));
+
+        SRC_DATA sd{};
+        sd.src_ratio     = ratio;
+        sd.data_in       = inBuf.data();
+        sd.data_out      = outBuf.data();
+        sd.output_frames = outChunk;
+
+        bool eof = false;
+        while (!eof) {
+            const int64_t got = dec->readFloat(inBuf.data(), kChunk);
+            eof = (got < kChunk);
+            sd.input_frames  = got;
+            sd.end_of_input  = eof ? 1 : 0;
+            src_process(resampler, &sd);
+            if (sd.output_frames_gen > 0)
+                sf_writef_float(sf, outBuf.data(),
+                                static_cast<sf_count_t>(sd.output_frames_gen));
+        }
+        src_delete(resampler);
+    }
+
+    sf_close(sf);
+    return true;
+}
+
+// ─── public API ──────────────────────────────────────────────────────────────
+
+int countAudioCues(const AppModel& m) {
+    int n = 0;
+    for (const auto& cl : m.sf.cueLists)
+        walkAudioCuesConst(cl.cues, [&](const mcp::ShowFile::CueData&) { ++n; });
+    return n;
+}
+
+bool collectAllFiles(AppModel& m,
+                     const CollectOptions& opts,
+                     std::function<void(const std::string& filename)> progress,
+                     std::string& err)
+{
+    namespace fs = std::filesystem;
+
+    const fs::path destDir(opts.destDir);
+    const fs::path audioDir = destDir / "audio";
+
+    try {
+        fs::create_directories(audioDir);
+    } catch (const std::exception& e) {
+        err = std::string("Cannot create destination: ") + e.what();
+        return false;
+    }
+
+    // Deep-copy the ShowFile so we can rewrite paths without touching the live model.
+    mcp::ShowFile sf = m.sf;
+    const fs::path baseDir(m.baseDir);
+
+    // srcAbs → relative dest path (deduplication map)
+    std::map<std::string, std::string> srcToRel;
+    std::set<std::string>              usedNames;
+    bool anyFailed = false;
+
+    auto resolveAbs = [&](const std::string& raw) -> fs::path {
+        fs::path p(raw);
+        return p.is_relative() ? baseDir / p : p;
+    };
+
+    auto uniqueRelPath = [&](const fs::path& srcAbs) -> std::string {
+        const std::string key = srcAbs.string();
+        auto it = srcToRel.find(key);
+        if (it != srcToRel.end()) return it->second;
+
+        const std::string stem = srcAbs.stem().string();
+        const std::string ext  = opts.convertToWav ? ".wav" : srcAbs.extension().string();
+        std::string name = stem + ext;
+        if (usedNames.count(name)) {
+            int n = 2;
+            while (usedNames.count(stem + "_" + std::to_string(n) + ext)) ++n;
+            name = stem + "_" + std::to_string(n) + ext;
+        }
+        usedNames.insert(name);
+        const std::string rel = "audio/" + name;
+        srcToRel[key] = rel;
+        return rel;
+    };
+
+    for (auto& cl : sf.cueLists) {
+        walkAudioCues(cl.cues, [&](mcp::ShowFile::CueData& cd) {
+            if (cd.path.empty()) return;
+
+            const fs::path srcAbs  = resolveAbs(cd.path);
+            const std::string rel  = uniqueRelPath(srcAbs);
+            const fs::path dstFile = destDir / rel;
+
+            progress(srcAbs.filename().string());
+
+            // Only process each source file once.
+            if (!fs::exists(dstFile)) {
+                std::string fileErr;
+                bool ok = false;
+                if (opts.convertToWav) {
+                    ok = transcodeToWav(srcAbs.string(), dstFile.string(),
+                                        opts.sampleRate, opts.bitDepth, fileErr);
+                } else {
+                    try {
+                        fs::copy_file(srcAbs, dstFile, fs::copy_options::overwrite_existing);
+                        ok = true;
+                    } catch (const std::exception& e) {
+                        fileErr = e.what();
+                    }
+                }
+                if (!ok) {
+                    if (!err.empty()) err += '\n';
+                    err += srcAbs.filename().string() + ": " + fileErr;
+                    anyFailed = true;
+                    return;  // leave cd.path unchanged on failure
+                }
+            }
+
+            cd.path = rel;  // rewrite to relative
+        });
+    }
+
+    // Determine output show filename.
+    const std::string showName = m.showPath.empty()
+        ? "show"
+        : fs::path(m.showPath).stem().string();
+    const std::string outShowPath = (destDir / (showName + ".mcp")).string();
+
+    std::string saveErr;
+    sf.save(outShowPath, saveErr);
+    if (!saveErr.empty()) {
+        if (!err.empty()) err += '\n';
+        err += "Save show file: " + saveErr;
+        return false;
+    }
+
+    return !anyFailed;
 }
 
 } // namespace ShowHelpers

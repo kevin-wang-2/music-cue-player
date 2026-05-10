@@ -1,5 +1,6 @@
 #include "MainWindow.h"
 #include "AppModel.h"
+#include "CollectDialog.h"
 #include "CueListPanel.h"
 #include "ProjectStatusDialog.h"
 #include "ScriptletLibraryDialog.h"
@@ -482,6 +483,8 @@ void MainWindow::buildMenuBar() {
     mkAct(fileMenu, "Save &As…",
           QKeySequence(Qt::CTRL | Qt::SHIFT | Qt::Key_S),
           this, &MainWindow::onSaveShowAs);
+    mkAct(fileMenu, "Collect All Files…", {},
+          this, &MainWindow::onCollectAllFiles);
     fileMenu->addSeparator();
     mkAct(fileMenu, "&Quit", QKeySequence::Quit, qApp, &QApplication::quit);
 
@@ -639,6 +642,11 @@ void MainWindow::onSaveShowAs() {
     m_model->showPath = path.toStdString();
     m_model->baseDir  = std::filesystem::path(m_model->showPath).parent_path().string();
     onSaveShow();
+}
+
+void MainWindow::onCollectAllFiles() {
+    CollectDialog dlg(m_model, this);
+    dlg.exec();
 }
 
 void MainWindow::onOpenSettings() {
