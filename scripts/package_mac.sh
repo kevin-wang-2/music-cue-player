@@ -19,10 +19,8 @@ PROJECT_ROOT="$(cd "$SCRIPT_DIR/.." && pwd)"
 
 APP_NAME="Music Cue Player"
 APP_VERSION="0.1.0"
-BINARY_NAME="mcp_qt_ui"
-# CMake names the bundle after the target; we rename it for end-users.
-CMAKE_BUNDLE_NAME="${BINARY_NAME}.app"
 BUNDLE_NAME="${APP_NAME}.app"
+BINARY_NAME="${APP_NAME}"   # CMake OUTPUT_NAME → binary has same name as bundle
 
 PYTHON_VER="3.13"
 PYTHON_BREW="/opt/homebrew/opt/python@${PYTHON_VER}"
@@ -81,14 +79,7 @@ else
     step "Skipping build (--skip-build)"
 fi
 
-# Rename CMake's mcp_qt_ui.app → "Music Cue Player.app" (user-facing name)
-CMAKE_APP="$BUILD_DIR/bin/$CMAKE_BUNDLE_NAME"
-if [ -d "$CMAKE_APP" ]; then
-    rm -rf "$APP_BUNDLE"
-    mv "$CMAKE_APP" "$APP_BUNDLE"
-elif [ ! -d "$APP_BUNDLE" ]; then
-    die "App bundle not found (expected $CMAKE_APP or $APP_BUNDLE)"
-fi
+[ -d "$APP_BUNDLE" ] || die "App bundle not found: $APP_BUNDLE"
 
 # ── 3. Qt deployment ──────────────────────────────────────────────────────────
 step "macdeployqt"

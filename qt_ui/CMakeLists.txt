@@ -118,6 +118,7 @@ target_compile_options(mcp_qt_ui PRIVATE
 # macOS: set bundle info and enable Retina HiDPI
 if(APPLE)
     set_target_properties(mcp_qt_ui PROPERTIES
+        OUTPUT_NAME "Music Cue Player"
         MACOSX_BUNDLE TRUE
         MACOSX_BUNDLE_BUNDLE_NAME "Music Cue Player"
         MACOSX_BUNDLE_SHORT_VERSION_STRING "0.1.0"
