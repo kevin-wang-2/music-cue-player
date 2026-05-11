@@ -10,12 +10,10 @@ class AppModel;
 class QCheckBox;
 class QComboBox;
 class QDoubleSpinBox;
-class QGridLayout;
 class QLabel;
 class QLineEdit;
 class QListWidget;
 class QPushButton;
-class QScrollArea;
 class QSpinBox;
 class QStackedWidget;
 class QTabWidget;
@@ -25,7 +23,7 @@ class QWidget;
 // Multi-section settings dialog.
 //
 // Left sidebar (QListWidget) switches between sections:
-//   Audio    — Devices tab + Channels tab + Crosspoint tab + Output tab
+//   Audio    — Devices tab + Channels tab + Output tab
 //   Network  — Network Output tab + OSC Server tab
 //   MIDI     — MIDI Output tab
 //   Controls — MIDI Learn tab + OSC tab (system action bindings)
@@ -36,7 +34,6 @@ class SettingsDialog : public QDialog {
 public:
     explicit SettingsDialog(AppModel* model, QWidget* parent = nullptr);
 
-    mcp::ShowFile::AudioSetup      audioResult()    const { return m_audioSetup; }
     mcp::ShowFile::NetworkSetup    networkResult()  const { return m_networkSetup; }
     mcp::ShowFile::MidiSetup       midiResult()     const { return m_midiSetup; }
     mcp::OscServerSettings         oscResult()      const { return m_oscSettings; }
@@ -61,16 +58,13 @@ private:
     void buildAudioPage();
     void buildDevicesTab();
     void buildChannelsTab();
-    void buildXpTab();
     void buildOutputTab();
     void rebuildDevicesTable();
     void rebuildMasterCombo();
     void rebuildChannelsTable();
-    void rebuildXpGrid();
     void rebuildOutputTable();
     void syncDevicesFromTable();
     void syncChannelsFromTable();
-    void syncXpFromGrid();
     void syncOutputFromTable();
     void updateAudioWarnings();
     int  totalPhysOutputs() const;
@@ -100,7 +94,7 @@ private:
     int       m_numPhys{2};
     std::vector<mcp::DeviceInfo> m_paDevices;  // cached PA device list
 
-    mcp::ShowFile::AudioSetup      m_audioSetup;
+    mcp::ShowFile::AudioSetup      m_audioSetupSnapshot;  // saved on open, restored on cancel
     mcp::ShowFile::NetworkSetup    m_networkSetup;
     mcp::ShowFile::MidiSetup       m_midiSetup;
     mcp::OscServerSettings         m_oscSettings;
@@ -122,12 +116,6 @@ private:
     QTableWidget* m_chanTable{nullptr};
     QPushButton*  m_btnAddChan{nullptr};
     QPushButton*  m_btnRemoveChan{nullptr};
-
-    // Audio section — crosspoint tab
-    QScrollArea*  m_xpScroll{nullptr};
-    QWidget*      m_xpContent{nullptr};
-    QGridLayout*  m_xpGrid{nullptr};
-    std::vector<std::vector<QLineEdit*>> m_xpCells;
 
     // Audio section — output DSP tab
     QTableWidget* m_outTable{nullptr};
