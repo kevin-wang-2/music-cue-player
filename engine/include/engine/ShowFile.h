@@ -3,6 +3,7 @@
 #include "TriggerData.h"
 #include <filesystem>
 #include <map>
+#include <optional>
 #include <string>
 #include <vector>
 #include <cstdint>
@@ -83,6 +84,15 @@ struct ShowFile {
 
         // Scriptlet cues
         std::string scriptletCode;      // Python source code to execute
+
+        // Snapshot cues
+        int         snapshotId{-1};     // stable snapshot ID to recall; -1 = none
+
+        // Automation cues
+        std::string automationPath;          // parameter path, e.g. "/mixer/0/fader"
+        double      automationDuration{5.0}; // total cue duration (seconds)
+        struct AutomationPoint { double time{0.0}; double value{0.0}; bool isHandle{false}; };
+        std::vector<AutomationPoint> automationCurve;  // breakpoints + handles: BP,H,BP,H,...,BP
 
         // Network cues
         std::string networkPatchName;   // name of the target NetworkSetup patch
@@ -283,6 +293,69 @@ struct ShowFile {
         std::vector<Entry> entries;
     };
 
+    // ---- Snapshot list ---------------------------------------------------------
+    // Stores named mixing snapshots and path-based scope tracking.
+    // Each Snapshot has a stable numeric `id` so that future SnapshotCue types
+    // can reference it by ID rather than by position (position changes on delete).
+    //
+    // Parameter path scheme (prefix-match hierarchy):
+    //   /mixer/{ch}                 — entire channel
+    //   /mixer/{ch}/delay           — delay (ms/samples)
+    //   /mixer/{ch}/polarity        — phase invert
+    //   /mixer/{ch}/mute            — mute
+    //   /mixer/{ch}/fader           — master gain
+    //   /mixer/{ch}/crosspoint/{out}— one crosspoint send
+    struct SnapshotList {
+        struct Snapshot {
+            int         id{0};       // stable identifier — referenced by future SnapshotCue
+            std::string name;
+
+            // Paths in scope for this snapshot (prefix-match: "/mixer/0" covers all sub-paths).
+            std::vector<std::string> scope;
+
+            struct XpSend { int out{0}; float db{0.0f}; };
+            struct ChannelState {
+                int ch{0};
+                // optional<T>: present only when the corresponding path was in scope at store time.
+                std::optional<double> delayMs;
+                std::optional<bool>   delayInSamples;
+                std::optional<int>    delaySamples;
+                std::optional<bool>   polarity;
+                std::optional<bool>   mute;
+                std::optional<float>  faderDb;
+                // Only crosspoints whose /crosspoint/{out} path was in scope at store time.
+                std::vector<XpSend>   xpSends;
+            };
+            std::vector<ChannelState> channels;
+        };
+
+        // Paths of parameters changed since the last store (auto-scope for next Store).
+        // Persisted so continuity survives session restarts.
+        std::vector<std::string> pendingDirtyPaths;
+
+        // Slots are sparse: std::nullopt = empty/deleted slot.
+        // Deleting a snapshot sets the slot to nullopt rather than erasing it,
+        // so subsequent slot numbers don't shift.
+        std::vector<std::optional<Snapshot>> snapshots;
+        int                                  currentIndex{0};  // cursor; == snapshots.size() → new slot
+
+        // Returns a snapshot ID not yet used in this list.
+        int nextSnapshotId() const {
+            int mx = 0;
+            for (const auto& s : snapshots) if (s) mx = std::max(mx, s->id);
+            return mx + 1;
+        }
+        // Find a filled snapshot by stable ID.
+        Snapshot* findById(int id) {
+            for (auto& s : snapshots) if (s && s->id == id) return &s.value();
+            return nullptr;
+        }
+        const Snapshot* findById(int id) const {
+            for (const auto& s : snapshots) if (s && s->id == id) return &s.value();
+            return nullptr;
+        }
+    };
+
     // ---- Top-level fields --------------------------------------------------
     std::string              version{kCurrentVersion};
     ShowMeta                 show;
@@ -294,7 +367,8 @@ struct ShowFile {
     OscServerSettings        oscServer;
     ScriptletLibrary         scriptletLibrary;
     std::vector<CueListData> cueLists;
-    UiHints                  uiHints;   // frontend-only; engine round-trips without reading
+    UiHints                  uiHints;        // frontend-only; engine round-trips without reading
+    SnapshotList             snapshotList;
 
     // ---- Helpers -----------------------------------------------------------
 

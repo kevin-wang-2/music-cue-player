@@ -88,9 +88,18 @@ void StreamReader::devamp(bool stopAfter, bool preVamp) {
 // Routing
 
 void StreamReader::setRouting(std::vector<float> xpGains, std::vector<float> outLevGains, int outCh) {
-    m_xpGains     = std::move(xpGains);
-    m_outLevGains = std::move(outLevGains);
-    m_xpOutCh     = outCh;
+    if (m_xpOutCh == outCh &&
+        m_xpGains.size()     == xpGains.size() &&
+        m_outLevGains.size() == outLevGains.size()) {
+        // Same layout: update individual floats in-place so the audio thread only
+        // sees benign single-word writes — identical to setXpointGain / setOutLevelGain.
+        for (size_t i = 0; i < xpGains.size();     ++i) m_xpGains[i]     = xpGains[i];
+        for (size_t i = 0; i < outLevGains.size(); ++i) m_outLevGains[i] = outLevGains[i];
+    } else {
+        m_xpGains     = std::move(xpGains);
+        m_outLevGains = std::move(outLevGains);
+        m_xpOutCh     = outCh;
+    }
 }
 
 void StreamReader::setOutLevelGain(int outCh, float linGain) {

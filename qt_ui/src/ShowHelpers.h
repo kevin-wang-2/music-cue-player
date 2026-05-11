@@ -40,6 +40,9 @@ void normalizeListRefs(mcp::ShowFile& sf);
 bool rebuildCueList(AppModel& model, int listIdx, std::string& err);
 // Rebuild all engine CueLists (calls syncListCount + rebuildCueList for each).
 bool rebuildAllCueLists(AppModel& model, std::string& err);
+// Update only the channel map on all active lists — does NOT clear or stop playback.
+// Call this for mixing-only changes (fader, mute, crosspoint) that must not interrupt audio.
+void applyChannelMap(AppModel& model);
 // Sync SF for one list (listIdx) from its engine.  Pass -1 to use the active list.
 void syncSfFromCues(AppModel& model, int listIdx = -1);
 // Sync SF for ALL lists from their engines (call after rebuildAllCueLists).
@@ -92,5 +95,50 @@ void sfInsertBefore(mcp::ShowFile& sf, int listIdx, int beforeFlatIdx, mcp::Show
 
 // Append cd as the last child of the group cue at groupFlatIdx.
 void sfAppendToGroup(mcp::ShowFile& sf, int listIdx, int groupFlatIdx, mcp::ShowFile::CueData cd);
+
+// ---------------------------------------------------------------------------
+// Direct engine mutations (no full rebuild needed)
+
+// Insert a single cue at flat position flatIdx in engine list listIdx.
+// Negative flatIdx means append (past-end).
+// If cd is a group, falls back to rebuildCueList for that list only.
+// Updates both engine and sf; does NOT emit any signals.
+// Returns the final flat index of the inserted cue, or -1 on error.
+int insertEngineCue(AppModel& m, int listIdx, int flatIdx,
+                    mcp::ShowFile::CueData cd, std::string& err);
+
+// Remove the cue (and its subtree if Group) at flatIdx from both engine and sf.
+// Stops any active voice(s). Fixes all index refs.
+void removeEngineCue(AppModel& m, int listIdx, int flatIdx);
+
+// Reload the audio file for cue[flatIdx] in place.
+// The new path must already be written into sf via sfCueAt().
+// Returns false if the reload fails (cue remains broken but still present).
+bool reloadEngineCueAudio(AppModel& m, int listIdx, int flatIdx);
+
+// ---------------------------------------------------------------------------
+// Undo / redo helpers
+
+// Move multiple flat-index blocks within one engine list without rebuilding.
+// topLevel[i] is the original flat index of block i's header; blockSizes[i] is
+// its total span (1 + childCount).  dstRow is the destination in the original
+// flat index space; adjustedDst = dstRow - sum(blockSizes of blocks before dstRow).
+// Falls back to rebuildAllCueLists when the move is a mixed up/down selection.
+void moveEngineCues(AppModel& m, int listIdx,
+                    const std::vector<int>& topLevel,
+                    const std::vector<int>& blockSizes,
+                    int dstRow, int adjustedDst);
+
+// Returns true if the two SF snapshots differ in structure (list count, flat
+// cue count per list, or cue type at any position).  A false result means
+// only parameters changed — reapplyParamsFromSF() is sufficient to sync the
+// engine without a full rebuild.
+bool isStructuralChange(
+    const std::vector<mcp::ShowFile::CueListData>& a,
+    const std::vector<mcp::ShowFile::CueListData>& b);
+
+// Re-apply every parameter from m.sf to the engine without rebuilding.
+// Only correct when isStructuralChange() returns false (structure is identical).
+void reapplyParamsFromSF(AppModel& m);
 
 } // namespace ShowHelpers

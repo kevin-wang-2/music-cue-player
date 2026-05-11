@@ -50,6 +50,7 @@ add_library(mcp_engine STATIC
     src/Timecode.cpp
     src/LtcStreamReader.cpp
     src/MtcGenerator.cpp
+    src/SnapshotManager.cpp
 )
 
 target_include_directories(mcp_engine

@@ -4,6 +4,7 @@
 #include "engine/CueList.h"
 #include "engine/Scheduler.h"
 #include "engine/ShowFile.h"
+#include "engine/SnapshotManager.h"
 #include "MidiInputManager.h"
 #include "OscServer.h"
 #include "ScriptletEngine.h"
@@ -26,8 +27,9 @@ public:
     ~AppModel() override;
 
     // Engine stack — declared in init order (each depends on the previous).
-    mcp::AudioEngine engine;
-    mcp::Scheduler   scheduler;
+    mcp::AudioEngine     engine;
+    mcp::Scheduler       scheduler;
+    mcp::SnapshotManager snapshots;
     // NOTE: CueList instances live in m_cueLists. Use cues() for the active list.
 
     // External trigger infrastructure
@@ -83,6 +85,11 @@ public:
     // Creates or removes engine CueLists as needed (new ones start empty).
     void syncListCount();
 
+    // Insert an empty engine CueList at position atIdx (mirrors sf.cueLists insert).
+    void insertEngineList(int atIdx);
+    // Panic and remove the engine CueList at position atIdx (mirrors sf.cueLists erase).
+    void removeEngineList(int atIdx);
+
     // Direct access to a specific engine CueList (for ShowHelpers::rebuildCueList).
     mcp::CueList& cueListAt(int idx) { return *m_cueLists[static_cast<size_t>(idx)]; }
 
@@ -97,11 +104,8 @@ public:
     void tick();
 
     // Number of logical channels defined in the current show.
-    // Falls back to engine.channels() if audioSetup is empty.
     int channelCount() const {
-        if (!sf.audioSetup.channels.empty())
-            return static_cast<int>(sf.audioSetup.channels.size());
-        return engineOk ? engine.channels() : 2;
+        return static_cast<int>(sf.audioSetup.channels.size());
     }
 
     // Human-readable name for channel index ch (e.g. "L", "R").
@@ -118,10 +122,19 @@ public:
     // Use this instead of cues.go() for operator-initiated go actions.
     void go();
 
+    // Snapshot helpers — delegate to snapshots.*. recall* also call applyMixing().
+    void storeSnapshot();
+    void storeSnapshotAll();
+    void recallSnapshot();
+    void recallSnapshotById(int id);
+
     // Apply OscServerSettings from sf and (re)start the OSC server.
     void applyOscSettings();
     // Push channel + physout DSP settings from sf to the engine.
     void applyOutputDsp();
+    // Update channel map + output DSP without rebuilding or stopping cues.
+    // Use this for all mixing-only parameter changes in MixConsole.
+    void applyMixing();
     // Apply MIDI input: open all ports.
     void applyMidiInput();
     // Sync scriptlet library from sf into the ScriptletEngine.
@@ -160,6 +173,7 @@ signals:
     void scriptletOutput(const QString& text);
     void selectionChanged(int index);
     void playbackStateChanged();    // voices started/stopped
+    void mixStateChanged();         // sf.audioSetup changed (snapshot recall, automation, etc.)
     void dirtyChanged(bool dirty);
     void engineStatusChanged();
     // Emitted when an external trigger fires a cue (for UI highlight feedback)

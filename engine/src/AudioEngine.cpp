@@ -35,6 +35,7 @@ struct VoiceSlot {
         int            tag{-1};
         float          gain{1.0f};
         int            deviceIndex{0};
+        bool           bypassChannelFold{false};
     } pending;
 
     std::atomic<bool>  pendingReady{false};
@@ -51,9 +52,23 @@ struct VoiceSlot {
     int            channels{0};
     int64_t        startEngineFrame{0};
     int            deviceIndex{0};   // which stream renders this voice
+    bool           bypassChannelFold{false};
     std::atomic<int>  activeTag{-1};
     std::atomic<bool> active{false};
 };
+
+// ---------------------------------------------------------------------------
+// Channel-fold buffer for one device: fold[ch * numPhys + p] = gain from logical
+// channel ch to this device's local physical output p.  Double-buffered for
+// lock-free main-thread updates; callback reads the active half.
+struct FoldBuffer {
+    std::vector<float> data;
+    int numCh{0};
+    int numPhys{0};
+};
+
+// Maximum frames per callback buffer we pre-allocate chanBuf for.
+static constexpr int kMaxChanBufFrames = 8192;
 
 // ---------------------------------------------------------------------------
 // Per-device stream state.
@@ -69,6 +84,17 @@ struct DeviceStream {
     std::atomic<int64_t> renderedFrames{0};
     // Master enginePlayhead captured when this slave stream was opened.
     int64_t              masterFrameAtZero{0};
+
+    // Channel bus: non-bypass voices accumulate here (numCh channels × frame).
+    // Main thread allocates/grows (kMaxChanBufFrames × capacity); callback reads
+    // via atomic pointer.  chanBufNumCh is the active channel count (loop bound).
+    std::atomic<float*> chanBufPtr{nullptr};
+    std::atomic<int>    chanBufNumCh{0};
+    int                 chanBufCapacity{0};  // written by main thread only
+
+    // Fold matrix double-buffer — same pattern as dspBuf.
+    FoldBuffer           foldBuf[2];
+    std::atomic<int>     foldBufIdx{0};
 };
 
 // ---------------------------------------------------------------------------
@@ -99,15 +125,32 @@ struct AudioEngineImpl {
     std::atomic<int64_t> softPanicStartFrame{0};
     std::atomic<int64_t> softPanicEndFrame{0};
 
+    // Channel DSP — double-buffered; applied to chanBuf per logical channel, pre-fold.
+    struct ChanDspSlot { bool phaseInvert{false}; int delaySamples{0}; };
+    std::vector<ChanDspSlot> chanDspBuf[2];
+    std::atomic<int>         chanDspBufIdx{0};
+    // Per-logical-channel delay rings; grown in setDeviceChannelFold() as numCh increases.
+    static constexpr int kDelayMask = AudioEngine::kMaxDelaySamples - 1;
+    std::vector<std::vector<float>> chanDelayRings;  // [numCh][kMaxDelaySamples]
+    std::vector<int>                chanDelayWrPos;  // [numCh]
+
     // Output DSP — double-buffered for lock-free main-thread updates.
     // Index [0/1] flips atomically; callback reads active, main writes inactive.
     std::vector<OutDspSlot> dspBuf[2];       // [globalOutCh]
     std::atomic<int>        dspBufIdx{0};    // which buffer is active
 
     // Delay rings — pre-allocated at initialize(); never resized afterwards.
-    static constexpr int kDelayMask = AudioEngine::kMaxDelaySamples - 1;
     std::vector<std::vector<float>> delayRings;  // [globalOutCh][kMaxDelaySamples]
     std::vector<int>                delayWrPos;  // [globalOutCh]
+
+    // Per-logical-channel peak amplitudes measured from chanBuf (pre-fold).
+    // Fixed maximum size; chanPeakLevelCount is the active channel count.
+    std::unique_ptr<std::atomic<float>[]> chanPeakLevels;
+    std::atomic<int>                      chanPeakLevelCount{0};
+
+    // Old chanBuf allocations — kept alive until shutdown to avoid use-after-free.
+    // Main thread appends; freed in closeAllStreams() after callbacks are stopped.
+    std::vector<float*> oldChanBufs;
 
     int masterIdx() const {
         for (int i = 0; i < (int)streams.size(); ++i)
@@ -140,35 +183,40 @@ static int paDeviceCallback(const void* /*input*/, void* output,
     auto* out = static_cast<float*>(output);
     std::memset(out, 0, frameCount * static_cast<size_t>(ds.outChannels) * sizeof(float));
 
+    // Channel bus: non-bypass streaming voices mix here first, then fold → out[].
+    float* chanBuf   = ds.chanBufPtr.load(std::memory_order_acquire);
+    const int activeCh = ds.chanBufNumCh.load(std::memory_order_acquire);
+    const auto& fold = ds.foldBuf[ds.foldBufIdx.load(std::memory_order_acquire)];
+    const bool hasChanBus = (chanBuf != nullptr && activeCh > 0 && fold.numCh > 0);
+
+    if (hasChanBus)
+        std::memset(chanBuf, 0, static_cast<size_t>(frameCount) * static_cast<size_t>(activeCh) * sizeof(float));
+
     for (auto& v : impl->voices) {
         // pendingClear: any callback can handle it (exchange guarantees once-only).
-        // The voice is being stopped regardless of which device was rendering it.
         if (v.pendingClear.exchange(false, std::memory_order_acq_rel)) {
             v.active.store(false, std::memory_order_relaxed);
             v.activeTag.store(-1, std::memory_order_relaxed);
         }
 
         // pendingReady: only the target device's callback activates the voice.
-        // Two-step check: load(acquire) guards the pending.deviceIndex read;
-        // exchange then claims atomically so at most one callback activates it.
         if (v.pendingReady.load(std::memory_order_acquire) &&
             v.pending.deviceIndex == cbd->streamIndex &&
             v.pendingReady.exchange(false, std::memory_order_acq_rel)) {
-            v.deviceIndex      = v.pending.deviceIndex;
-            v.samples          = v.pending.samples;
-            v.streamReader     = v.pending.streamReader;
-            v.streaming        = v.pending.streaming;
-            v.totalFrames      = v.pending.totalFrames;
-            v.channels         = v.pending.channels;
-            v.startEngineFrame = engStart;
+            v.deviceIndex        = v.pending.deviceIndex;
+            v.samples            = v.pending.samples;
+            v.streamReader       = v.pending.streamReader;
+            v.streaming          = v.pending.streaming;
+            v.totalFrames        = v.pending.totalFrames;
+            v.channels           = v.pending.channels;
+            v.startEngineFrame   = engStart;
+            v.bypassChannelFold  = v.pending.bypassChannelFold;
             v.gain.store(v.pending.gain, std::memory_order_relaxed);
             v.activeTag.store(v.pending.tag, std::memory_order_relaxed);
             v.active.store(true, std::memory_order_relaxed);
         }
 
         if (!v.active.load(std::memory_order_relaxed)) continue;
-
-        // Only render voices assigned to this device stream.
         if (v.deviceIndex != cbd->streamIndex) continue;
 
         if (!v.streaming && v.channels != ds.outChannels) {
@@ -185,19 +233,88 @@ static int paDeviceCallback(const void* /*input*/, void* output,
 
         if (v.streaming) {
             if (v.streamReader && toRead > 0) {
-                const int64_t got = v.streamReader->read(out, toRead, ds.outChannels, gain);
+                // Non-bypass voices accumulate into chanBuf (channel space);
+                // bypass voices (e.g. LTC) mix directly to physical out[].
+                const bool useChannelBus = hasChanBus && !v.bypassChannelFold;
+                float*     dest    = useChannelBus ? chanBuf : out;
+                const int  destCh  = useChannelBus ? activeCh : ds.outChannels;
+                const int64_t got = v.streamReader->read(dest, toRead, destCh, gain);
                 if (got < toRead && v.streamReader->isDone())
                     v.active.store(false, std::memory_order_release);
             }
             if (toRead < static_cast<int64_t>(frameCount))
                 v.active.store(false, std::memory_order_release);
         } else {
+            // In-memory voices always go directly to physical out[].
             const float* src = v.samples + localStart * v.channels;
             for (int64_t f = 0; f < toRead; ++f)
                 for (int ch = 0; ch < ds.outChannels; ++ch)
                     out[f * ds.outChannels + ch] += src[f * v.channels + ch] * gain;
             if (toRead < static_cast<int64_t>(frameCount))
                 v.active.store(false, std::memory_order_release);
+        }
+    }
+
+    // Per-logical-channel DSP: phase inversion and delay, applied to chanBuf pre-fold.
+    if (hasChanBus) {
+        const auto& cdsp = impl->chanDspBuf[impl->chanDspBufIdx.load(std::memory_order_acquire)];
+        for (int ch = 0; ch < activeCh; ++ch) {
+            if (ch >= static_cast<int>(cdsp.size())) break;
+            const bool inv   = cdsp[static_cast<size_t>(ch)].phaseInvert;
+            const int  delay = cdsp[static_cast<size_t>(ch)].delaySamples;
+            if (!inv && delay <= 0) continue;
+
+            if (ch >= static_cast<int>(impl->chanDelayRings.size())) continue;
+            auto& ring = impl->chanDelayRings[static_cast<size_t>(ch)];
+            auto& wp   = impl->chanDelayWrPos[static_cast<size_t>(ch)];
+            if (ring.empty()) continue;
+
+            for (unsigned long f = 0; f < frameCount; ++f) {
+                float s = chanBuf[f * static_cast<unsigned long>(activeCh) + static_cast<unsigned long>(ch)];
+                ring[static_cast<size_t>(wp)] = s;
+                if (delay > 0) {
+                    const int rp = (wp - delay + AudioEngine::kMaxDelaySamples) & AudioEngineImpl::kDelayMask;
+                    s = ring[static_cast<size_t>(rp)];
+                }
+                wp = (wp + 1) & AudioEngineImpl::kDelayMask;
+                if (inv) s = -s;
+                chanBuf[f * static_cast<unsigned long>(activeCh) + static_cast<unsigned long>(ch)] = s;
+            }
+        }
+    }
+
+    // Measure chanBuf peaks (logical channels, pre-fold).
+    if (hasChanBus && impl->chanPeakLevels) {
+        const int measCh = std::min(activeCh,
+            std::min(impl->chanPeakLevelCount.load(std::memory_order_relaxed),
+                     AudioEngine::kMaxChannels));
+        for (int ch = 0; ch < measCh; ++ch) {
+            float peak = 0.0f;
+            for (unsigned long f = 0; f < frameCount; ++f) {
+                const float s = chanBuf[f * static_cast<unsigned long>(activeCh) + static_cast<unsigned long>(ch)];
+                const float a = s < 0.0f ? -s : s;
+                if (a > peak) peak = a;
+            }
+            float prev = impl->chanPeakLevels[static_cast<size_t>(ch)].load(std::memory_order_relaxed);
+            while (peak > prev &&
+                   !impl->chanPeakLevels[static_cast<size_t>(ch)].compare_exchange_weak(
+                       prev, peak, std::memory_order_relaxed)) {}
+        }
+    }
+
+    // Apply channel fold: accumulate chanBuf (channel space) into out[] (physical space).
+    if (hasChanBus) {
+        const int numCh   = std::min(activeCh, fold.numCh);
+        const int numPhys = std::min(ds.outChannels, fold.numPhys);
+        for (int ch = 0; ch < numCh; ++ch) {
+            for (unsigned long f = 0; f < frameCount; ++f) {
+                const float s = chanBuf[f * static_cast<unsigned long>(activeCh) + static_cast<unsigned long>(ch)];
+                if (s == 0.0f) continue;
+                for (int p = 0; p < numPhys; ++p) {
+                    out[f * static_cast<unsigned long>(ds.outChannels) + static_cast<unsigned long>(p)]
+                        += s * fold.data[static_cast<size_t>(ch * fold.numPhys + p)];
+                }
+            }
         }
     }
 
@@ -333,13 +450,21 @@ static int openOneStream(AudioEngineImpl* impl,
 
 // ---------------------------------------------------------------------------
 static void closeAllStreams(AudioEngineImpl* impl) {
-    for (auto& dsp : impl->streams) {
-        if (dsp->stream) {
-            Pa_StopStream(dsp->stream);
-            Pa_CloseStream(dsp->stream);
-            dsp->stream = nullptr;
+    // Stop and close all PA streams first so callbacks are no longer running.
+    for (auto& ds : impl->streams) {
+        if (ds->stream) {
+            Pa_StopStream(ds->stream);
+            Pa_CloseStream(ds->stream);
+            ds->stream = nullptr;
         }
     }
+    // Callbacks are now stopped — safe to free chanBufs.
+    for (auto& ds : impl->streams) {
+        float* p = ds->chanBufPtr.exchange(nullptr, std::memory_order_relaxed);
+        delete[] p;
+    }
+    for (float* p : impl->oldChanBufs) delete[] p;
+    impl->oldChanBufs.clear();
     impl->streams.clear();
 }
 
@@ -396,6 +521,9 @@ bool AudioEngine::initialize(int sampleRate, int channels, const std::string& de
         m_impl->dspBuf[0].assign(static_cast<size_t>(totalOut), OutDspSlot{});
         m_impl->dspBuf[1].assign(static_cast<size_t>(totalOut), OutDspSlot{});
         m_impl->dspBufIdx.store(0, std::memory_order_relaxed);
+        m_impl->chanPeakLevels = std::make_unique<std::atomic<float>[]>(kMaxChannels);
+        for (int i = 0; i < kMaxChannels; ++i)
+            m_impl->chanPeakLevels[static_cast<size_t>(i)].store(0.0f, std::memory_order_relaxed);
     }
 
     m_impl->initialized = true;
@@ -460,6 +588,9 @@ bool AudioEngine::initialize(int sampleRate, const std::vector<DeviceSpec>& devi
         m_impl->dspBuf[0].assign(static_cast<size_t>(totalOut), OutDspSlot{});
         m_impl->dspBuf[1].assign(static_cast<size_t>(totalOut), OutDspSlot{});
         m_impl->dspBufIdx.store(0, std::memory_order_relaxed);
+        m_impl->chanPeakLevels = std::make_unique<std::atomic<float>[]>(kMaxChannels);
+        for (int i = 0; i < kMaxChannels; ++i)
+            m_impl->chanPeakLevels[static_cast<size_t>(i)].store(0.0f, std::memory_order_relaxed);
     }
 
     m_impl->initialized = true;
@@ -496,7 +627,7 @@ int AudioEngine::scheduleVoice(const float* samples, int64_t totalFrames,
         auto& v = m_impl->voices[i];
         if (v.active.load(std::memory_order_relaxed))       continue;
         if (v.pendingReady.load(std::memory_order_relaxed)) continue;
-        v.pending = {samples, nullptr, false, totalFrames, voiceChannels, tag, gain, deviceIndex};
+        v.pending = {samples, nullptr, false, totalFrames, voiceChannels, tag, gain, deviceIndex, false};
         v.pendingReady.store(true, std::memory_order_release);
         return i;
     }
@@ -504,12 +635,14 @@ int AudioEngine::scheduleVoice(const float* samples, int64_t totalFrames,
 }
 
 int AudioEngine::scheduleStreamingVoice(IAudioSource* reader, int64_t totalFrames,
-                                         int voiceChannels, int tag, float gain, int deviceIndex) {
+                                         int voiceChannels, int tag, float gain,
+                                         int deviceIndex, bool bypassChannelFold) {
     for (int i = 0; i < kMaxVoices; ++i) {
         auto& v = m_impl->voices[i];
         if (v.active.load(std::memory_order_relaxed))       continue;
         if (v.pendingReady.load(std::memory_order_relaxed)) continue;
-        v.pending = {nullptr, reader, true, totalFrames, voiceChannels, tag, gain, deviceIndex};
+        v.pending = {nullptr, reader, true, totalFrames, voiceChannels,
+                     tag, gain, deviceIndex, bypassChannelFold};
         v.pendingReady.store(true, std::memory_order_release);
         return i;
     }
@@ -600,6 +733,18 @@ int64_t AudioEngine::bufferPlayheadFrames() const {
 
 const std::string& AudioEngine::lastError() const { return m_impl->lastError; }
 
+void AudioEngine::setChannelDsp(std::vector<ChannelDsp> config) {
+    const int inactive = 1 - m_impl->chanDspBufIdx.load(std::memory_order_relaxed);
+    const int n = static_cast<int>(config.size());
+    m_impl->chanDspBuf[inactive].resize(static_cast<size_t>(n));
+    for (int i = 0; i < n; ++i) {
+        m_impl->chanDspBuf[inactive][static_cast<size_t>(i)].phaseInvert  = config[static_cast<size_t>(i)].phaseInvert;
+        m_impl->chanDspBuf[inactive][static_cast<size_t>(i)].delaySamples =
+            std::min(config[static_cast<size_t>(i)].delaySamples, kMaxDelaySamples - 1);
+    }
+    m_impl->chanDspBufIdx.store(inactive, std::memory_order_release);
+}
+
 void AudioEngine::setOutputDsp(std::vector<OutputDsp> config) {
     // Write to the inactive buffer, then atomically swap the active index.
     const int inactive = 1 - m_impl->dspBufIdx.load(std::memory_order_relaxed);
@@ -614,6 +759,49 @@ void AudioEngine::setOutputDsp(std::vector<OutputDsp> config) {
     for (int i = n; i < (int)m_impl->dspBuf[inactive].size(); ++i)
         m_impl->dspBuf[inactive][static_cast<size_t>(i)] = OutDspSlot{};
     m_impl->dspBufIdx.store(inactive, std::memory_order_release);
+}
+
+void AudioEngine::setDeviceChannelFold(int deviceIdx, const float* fold, int numCh, int physCh) {
+    if (deviceIdx < 0 || deviceIdx >= (int)m_impl->streams.size()) return;
+    auto& ds = *m_impl->streams[static_cast<size_t>(deviceIdx)];
+
+    // Write fold to inactive buffer and swap.
+    const int inactive = 1 - ds.foldBufIdx.load(std::memory_order_relaxed);
+    auto& fb = ds.foldBuf[inactive];
+    fb.numCh  = numCh;
+    fb.numPhys = physCh;
+    fb.data.assign(fold, fold + numCh * physCh);
+    ds.foldBufIdx.store(inactive, std::memory_order_release);
+
+    // Grow chanBuf if needed (main thread only — callback only reads chanBufPtr atomically).
+    if (numCh > ds.chanBufCapacity) {
+        const int newCap = std::max(numCh, ds.chanBufCapacity * 2);
+        auto* newBuf = new float[static_cast<size_t>(kMaxChanBufFrames) * static_cast<size_t>(newCap)]();
+        float* old = ds.chanBufPtr.exchange(nullptr, std::memory_order_relaxed);
+        if (old) m_impl->oldChanBufs.push_back(old);
+        ds.chanBufCapacity = newCap;
+        ds.chanBufPtr.store(newBuf, std::memory_order_release);
+    }
+    ds.chanBufNumCh.store(numCh, std::memory_order_release);
+    m_impl->chanPeakLevelCount.store(numCh, std::memory_order_release);
+
+    // Grow per-channel delay rings if numCh increased (main thread only).
+    if (numCh > static_cast<int>(m_impl->chanDelayRings.size())) {
+        m_impl->chanDelayRings.resize(static_cast<size_t>(numCh),
+                                      std::vector<float>(kMaxDelaySamples, 0.0f));
+        m_impl->chanDelayWrPos.resize(static_cast<size_t>(numCh), 0);
+    }
+}
+
+std::vector<float> AudioEngine::takeChannelPeaks() {
+    if (!m_impl->chanPeakLevels) return {};
+    const int n = m_impl->chanPeakLevelCount.load(std::memory_order_relaxed);
+    if (n <= 0) return {};
+    std::vector<float> result(static_cast<size_t>(n), 0.0f);
+    for (int i = 0; i < n; ++i)
+        result[static_cast<size_t>(i)] =
+            m_impl->chanPeakLevels[static_cast<size_t>(i)].exchange(0.0f, std::memory_order_relaxed);
+    return result;
 }
 
 } // namespace mcp

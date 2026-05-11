@@ -12,7 +12,7 @@
 
 namespace mcp {
 
-enum class CueType { Audio, Start, Stop, Fade, Arm, Devamp, Group, MusicContext, Marker, Network, Midi, Timecode, Goto, Memo, Scriptlet };
+enum class CueType { Audio, Start, Stop, Fade, Arm, Devamp, Group, MusicContext, Marker, Network, Midi, Timecode, Goto, Memo, Scriptlet, Snapshot, Automation };
 
 // Per-audio-cue channel routing.
 // outLevelDb[o]  — per-output-channel level in dB (0.0 = unity).
@@ -41,6 +41,10 @@ struct Cue {
     CueType     type{CueType::Audio};
     std::string cueNumber;
     std::string name;
+
+    // Stable identity — assigned once by CueList, never changes on insert/remove/move.
+    // Used for voice tagging so live voices survive structural list mutations.
+    int stableId{-1};
 
     // Audio cues
     std::string path;
@@ -98,6 +102,28 @@ struct Cue {
 
     // Scriptlet cues
     std::string scriptletCode;        // Python source code to execute
+
+    // Snapshot cues
+    int snapshotId{-1};               // stable snapshot ID to recall; -1 = none
+
+    // Automation cues
+    // AutomationParamMode classifies paths: Linear = smooth interpolation (fader, xp),
+    // Step = snap to 0/1 (mute, polarity), Forbidden = not user-selectable (delay).
+    enum class AutomationParamMode { Linear, Step, Forbidden };
+    static AutomationParamMode automationParamMode(const std::string& path) {
+        if (path.find("/delay") != std::string::npos) return AutomationParamMode::Forbidden;
+        if (path.find("/mute")  != std::string::npos) return AutomationParamMode::Step;
+        if (path.find("/polarity") != std::string::npos) return AutomationParamMode::Step;
+        return AutomationParamMode::Linear;
+    }
+    struct AutomationPoint {
+        double time{0.0};       // seconds from cue start
+        double value{0.0};      // native units: dB for fader/xp, 0/1 for step params
+        bool   isHandle{false}; // true = per-segment PCHIP shape handle (one per segment)
+    };
+    std::string                  automationPath;       // parameter path, e.g. "/mixer/0/fader"
+    std::vector<AutomationPoint> automationCurve;     // breakpoints + handles interleaved: BP,H,BP,H,...,BP
+    double                       automationDuration{5.0};   // total cue duration (seconds)
 
     // Network cues
     int         networkPatchIdx{-1};  // index into CueList's network patch list
@@ -161,7 +187,9 @@ struct Cue {
         if (type == CueType::Network)      return networkPatchIdx >= 0;
         if (type == CueType::Midi)         return midiPatchIdx >= 0;
         if (type == CueType::Timecode)     return tcStartTC < tcEndTC;
-        if (type == CueType::Goto) return targetIndex >= 0;
+        if (type == CueType::Goto)       return targetIndex >= 0;
+        if (type == CueType::Snapshot)   return snapshotId >= 0;
+        if (type == CueType::Automation) return !automationPath.empty() && !automationCurve.empty();
         return true;   // Group, Start, Stop, Arm, Memo, Scriptlet always "loaded"
     }
 };

@@ -125,6 +125,22 @@ static ShowFile::CueData parseCue(const json& j) {
     // Scriptlet cue
     c.scriptletCode = jget<std::string>(j, "scriptletCode", "");
 
+    // Snapshot cue
+    c.snapshotId = jget<int>(j, "snapshotId", -1);
+
+    // Automation cue
+    c.automationPath     = jget<std::string>(j, "automationPath", "");
+    c.automationDuration = jget<double>     (j, "automationDuration", 5.0);
+    if (j.contains("automationCurve") && j["automationCurve"].is_array()) {
+        for (const auto& pt : j["automationCurve"]) {
+            ShowFile::CueData::AutomationPoint p;
+            p.time     = jget<double>(pt, "time",     0.0);
+            p.value    = jget<double>(pt, "value",    0.0);
+            p.isHandle = jget<bool>  (pt, "isHandle", false);
+            c.automationCurve.push_back(p);
+        }
+    }
+
     // Network cue parameters
     c.networkPatchName = jget<std::string>(j, "networkPatchName", "");
     c.networkCommand   = jget<std::string>(j, "networkCommand",   "");
@@ -319,6 +335,24 @@ static json cueToJson(const ShowFile::CueData& c) {
 
     if (c.type == "scriptlet") {
         if (!c.scriptletCode.empty()) j["scriptletCode"] = c.scriptletCode;
+    }
+
+    if (c.type == "snapshot") {
+        if (c.snapshotId >= 0) j["snapshotId"] = c.snapshotId;
+    }
+
+    if (c.type == "automation") {
+        if (!c.automationPath.empty()) j["automationPath"] = c.automationPath;
+        j["automationDuration"] = c.automationDuration;
+        if (!c.automationCurve.empty()) {
+            json arr = json::array();
+            for (const auto& pt : c.automationCurve) {
+                json pj; pj["time"] = pt.time; pj["value"] = pt.value;
+                if (pt.isHandle) pj["isHandle"] = true;
+                arr.push_back(pj);
+            }
+            j["automationCurve"] = arr;
+        }
     }
 
     if (c.type == "network") {
@@ -594,6 +628,63 @@ bool ShowFile::load(const std::filesystem::path& path, std::string& error) {
             if (v.is_string()) uiHints.set(k, v.get<std::string>());
     }
 
+    snapshotList = {};
+    if (root.contains("snapshots") && root["snapshots"].is_object()) {
+        const auto& sj = root["snapshots"];
+
+        if (sj.contains("pendingDirtyPaths") && sj["pendingDirtyPaths"].is_array()) {
+            for (const auto& pj : sj["pendingDirtyPaths"])
+                if (pj.is_string())
+                    snapshotList.pendingDirtyPaths.push_back(pj.get<std::string>());
+        }
+
+        if (sj.contains("list") && sj["list"].is_array()) {
+            for (const auto& sn : sj["list"]) {
+                if (sn.is_null()) {
+                    snapshotList.snapshots.push_back(std::nullopt);
+                    continue;
+                }
+                SnapshotList::Snapshot snap;
+                snap.id   = jget<int>        (sn, "id",   0);
+                snap.name = jget<std::string>(sn, "name", "");
+                if (sn.contains("scope") && sn["scope"].is_array())
+                    for (const auto& pj : sn["scope"])
+                        if (pj.is_string()) snap.scope.push_back(pj.get<std::string>());
+                if (sn.contains("channels") && sn["channels"].is_array()) {
+                    for (const auto& cj : sn["channels"]) {
+                        SnapshotList::Snapshot::ChannelState cs;
+                        cs.ch = jget<int>(cj, "ch", 0);
+                        if (cj.contains("delayMs"))
+                            cs.delayMs = jget<double>(cj, "delayMs", 0.0);
+                        if (cj.contains("delayInSamples"))
+                            cs.delayInSamples = jget<bool>(cj, "delayInSamples", false);
+                        if (cj.contains("delaySamples"))
+                            cs.delaySamples = jget<int>(cj, "delaySamples", 0);
+                        if (cj.contains("polarity"))
+                            cs.polarity = jget<bool>(cj, "polarity", false);
+                        if (cj.contains("mute"))
+                            cs.mute = jget<bool>(cj, "mute", false);
+                        if (cj.contains("faderDb"))
+                            cs.faderDb = jget<float>(cj, "faderDb", 0.0f);
+                        if (cj.contains("xpSends") && cj["xpSends"].is_array()) {
+                            for (const auto& xj : cj["xpSends"]) {
+                                SnapshotList::Snapshot::XpSend xs;
+                                xs.out = jget<int>  (xj, "out", 0);
+                                xs.db  = jget<float>(xj, "db",  0.0f);
+                                cs.xpSends.push_back(xs);
+                            }
+                        }
+                        snap.channels.push_back(cs);
+                    }
+                }
+                snapshotList.snapshots.push_back(snap);
+            }
+        }
+
+        const int count = static_cast<int>(snapshotList.snapshots.size());
+        snapshotList.currentIndex = std::min(jget<int>(sj, "currentIndex", 0), count);
+    }
+
     return true;
 }
 
@@ -762,6 +853,56 @@ bool ShowFile::save(const std::filesystem::path& path, std::string& error) const
         for (const auto& [k, v] : uiHints.data)
             hints[k] = v;
         root["ui_hints"] = hints;
+    }
+
+    if (!snapshotList.snapshots.empty() || !snapshotList.pendingDirtyPaths.empty()) {
+        json sj;
+        sj["currentIndex"] = snapshotList.currentIndex;
+
+        if (!snapshotList.pendingDirtyPaths.empty()) {
+            json pdArr = json::array();
+            for (const auto& p : snapshotList.pendingDirtyPaths)
+                pdArr.push_back(p);
+            sj["pendingDirtyPaths"] = pdArr;
+        }
+
+        json listArr = json::array();
+        for (const auto& slot : snapshotList.snapshots) {
+            if (!slot) { listArr.push_back(nullptr); continue; }
+            const auto& snap = *slot;
+            json sn;
+            sn["id"]   = snap.id;
+            sn["name"] = snap.name;
+            {
+                json scopeArr = json::array();
+                for (const auto& p : snap.scope) scopeArr.push_back(p);
+                sn["scope"] = scopeArr;
+            }
+            json chArr = json::array();
+            for (const auto& cs : snap.channels) {
+                json cj;
+                cj["ch"] = cs.ch;
+                if (cs.delayMs)        cj["delayMs"]        = *cs.delayMs;
+                if (cs.delayInSamples) cj["delayInSamples"] = *cs.delayInSamples;
+                if (cs.delaySamples)   cj["delaySamples"]   = *cs.delaySamples;
+                if (cs.polarity)       cj["polarity"]       = *cs.polarity;
+                if (cs.mute)           cj["mute"]           = *cs.mute;
+                if (cs.faderDb)        cj["faderDb"]        = *cs.faderDb;
+                if (!cs.xpSends.empty()) {
+                    json xpArr = json::array();
+                    for (const auto& xs : cs.xpSends) {
+                        json xj; xj["out"] = xs.out; xj["db"] = xs.db;
+                        xpArr.push_back(xj);
+                    }
+                    cj["xpSends"] = xpArr;
+                }
+                chArr.push_back(cj);
+            }
+            if (!chArr.empty()) sn["channels"] = chArr;
+            listArr.push_back(sn);
+        }
+        sj["list"] = listArr;
+        root["snapshots"] = sj;
     }
 
     std::ofstream f(path);

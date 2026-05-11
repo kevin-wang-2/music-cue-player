@@ -1,5 +1,6 @@
 #include "InspectorWidget.h"
 #include "AppModel.h"
+#include "AutomationView.h"
 #include "MidiInputManager.h"
 #include "FaderWidget.h"
 #include "MCImport.h"
@@ -47,7 +48,11 @@
 #include <QMimeData>
 #include <QMouseEvent>
 #include <QPainter>
+#include <QDialog>
+#include <QDialogButtonBox>
 #include <QTabWidget>
+#include <QTreeWidget>
+#include <QTreeWidgetItem>
 #include <QUrl>
 #include <QVBoxLayout>
 
@@ -149,6 +154,220 @@ private:
     QString  m_path;
 };
 
+// ── Automation parameter path helpers ─────────────────────────────────────
+
+struct AutoPathItem {
+    QString label;
+    QString data;      // "fader", "0", "/mixer/1/polarity", etc.
+    bool    terminal;  // no further levels below
+};
+
+// Returns selectable items for one level of the path hierarchy.
+static QList<AutoPathItem> pathItemsAtLevel(AppModel* model, const QString& prefix)
+{
+
+    const auto& as = model->sf.audioSetup;
+    const int   nCh = static_cast<int>(as.channels.size());
+
+    auto chLabel = [&](int idx) -> QString {
+        if (idx >= 0 && idx < nCh && !as.channels[static_cast<size_t>(idx)].name.empty())
+            return QString::fromStdString(as.channels[static_cast<size_t>(idx)].name);
+        return QStringLiteral("Ch %1").arg(idx + 1);
+    };
+
+    QList<AutoPathItem> items;
+    if (prefix.isEmpty()) {
+        items.append({"Mixer", "mixer", false});
+    } else if (prefix == QLatin1String("mixer")) {
+        for (int ch = 0; ch < nCh; ++ch) {
+            if (ch > 0 && as.channels[static_cast<size_t>(ch - 1)].linkedStereo) continue;
+            items.append({chLabel(ch), QString::number(ch), false});
+        }
+    } else if (prefix.startsWith(QLatin1String("mixer/"))) {
+        const QStringList parts = prefix.split('/');
+        if (parts.size() == 2) {
+            items.append({"Fader",      "fader",      true});
+            items.append({"Mute",       "mute",       true});
+            items.append({"Polarity",   "polarity",   true});
+            items.append({"Crosspoint", "crosspoint", false});
+            bool ok;
+            const int mCh = parts[1].toInt(&ok);
+            if (ok && mCh >= 0 && mCh < nCh - 1
+                && as.channels[static_cast<size_t>(mCh)].linkedStereo) {
+                const int sl = mCh + 1;
+                items.append({chLabel(sl) + " Polarity",
+                               QStringLiteral("/mixer/%1/polarity").arg(sl), true});
+                items.append({chLabel(sl) + " Crosspoint",
+                               QStringLiteral("/mixer/%1/crosspoint").arg(sl), false});
+            }
+        } else if (parts.size() == 3 && parts[2] == QLatin1String("crosspoint")) {
+            for (int out = 0; out < nCh; ++out) {
+                if (out > 0 && as.channels[static_cast<size_t>(out - 1)].linkedStereo) continue;
+                items.append({QStringLiteral("→ %1").arg(chLabel(out)), QString::number(out), true});
+            }
+        }
+    }
+    return items;
+}
+
+// Human-readable label for one path segment given its data and level index.
+static QString pathSegLabel(const mcp::ShowFile::AudioSetup& as,
+                            const QString& data, int level)
+{
+    const int nCh = static_cast<int>(as.channels.size());
+    auto chLabel = [&](int idx) -> QString {
+        if (idx >= 0 && idx < nCh && !as.channels[static_cast<size_t>(idx)].name.empty())
+            return QString::fromStdString(as.channels[static_cast<size_t>(idx)].name);
+        return QStringLiteral("Ch %1").arg(idx + 1);
+    };
+    if (data.startsWith('/')) {
+        const QStringList p = data.mid(1).split('/');
+        if (p.size() >= 3 && p[0] == QLatin1String("mixer")) {
+            bool ok; const int ch = p[1].toInt(&ok);
+            if (ok) {
+                if (p[2] == QLatin1String("polarity"))   return chLabel(ch) + " Polarity";
+                if (p[2] == QLatin1String("crosspoint")) return chLabel(ch) + " Crosspoint";
+            }
+        }
+        return data;
+    }
+    switch (level) {
+    case 0: return "Mixer";
+    case 1: { bool ok; int ch = data.toInt(&ok); return ok ? chLabel(ch) : data; }
+    case 2:
+        if (data == QLatin1String("fader"))      return "Fader";
+        if (data == QLatin1String("mute"))       return "Mute";
+        if (data == QLatin1String("polarity"))   return "Polarity";
+        if (data == QLatin1String("crosspoint")) return "Crosspoint";
+        return data;
+    case 3: { bool ok; int ch = data.toInt(&ok);
+              return ok ? QStringLiteral("→ %1").arg(chLabel(ch)) : data; }
+    default: return data;
+    }
+}
+
+// ── AutoParamPickerDialog ──────────────────────────────────────────────────
+// Modal dialog for browsing/searching automation parameters.
+// Does not use Q_OBJECT; all connections via lambdas.
+class AutoParamPickerDialog : public QDialog {
+public:
+    AutoParamPickerDialog(AppModel* model, const QString& currentPath, QWidget* parent = nullptr)
+        : QDialog(parent), m_model(model), m_selected(currentPath)
+    {
+        setWindowTitle("Add Parameter");
+        setMinimumWidth(320);
+        setMinimumHeight(420);
+
+        auto* vlay = new QVBoxLayout(this);
+        vlay->setSpacing(8);
+
+        auto* filterRow = new QHBoxLayout;
+        filterRow->addWidget(new QLabel("Filter:"));
+        m_filter = new QLineEdit;
+        filterRow->addWidget(m_filter, 1);
+        vlay->addLayout(filterRow);
+
+        m_tree = new QTreeWidget;
+        m_tree->setHeaderHidden(true);
+        m_tree->setRootIsDecorated(true);
+        m_tree->setUniformRowHeights(true);
+        m_tree->setSelectionMode(QAbstractItemView::SingleSelection);
+        vlay->addWidget(m_tree, 1);
+
+        auto* btnBox = new QDialogButtonBox(QDialogButtonBox::Ok | QDialogButtonBox::Cancel);
+        vlay->addWidget(btnBox);
+
+        buildTree(currentPath);
+
+        connect(btnBox, &QDialogButtonBox::accepted, this, [this]() {
+            auto* item = m_tree->currentItem();
+            if (item) {
+                const QString path = item->data(0, Qt::UserRole).toString();
+                if (!path.isEmpty()) { m_selected = path; accept(); }
+            }
+        });
+        connect(btnBox, &QDialogButtonBox::rejected, this, &QDialog::reject);
+        connect(m_tree, &QTreeWidget::itemDoubleClicked,
+                this, [this](QTreeWidgetItem* item, int) {
+            const QString path = item->data(0, Qt::UserRole).toString();
+            if (!path.isEmpty()) { m_selected = path; accept(); }
+        });
+        connect(m_filter, &QLineEdit::textChanged, this, [this](const QString& text) {
+            applyFilter(text);
+        });
+    }
+
+    QString selectedPath() const { return m_selected; }
+
+private:
+    void addChildren(QTreeWidgetItem* parent, const QString& prefix, int depth = 0) {
+        if (depth > 6) return;
+        const auto items = pathItemsAtLevel(m_model, prefix);
+        for (const auto& item : items) {
+            const QString childPrefix = item.data.startsWith('/')
+                ? item.data.mid(1)
+                : (prefix.isEmpty() ? item.data : prefix + "/" + item.data);
+            auto* treeItem = new QTreeWidgetItem(parent, {item.label});
+            if (item.terminal) {
+                treeItem->setData(0, Qt::UserRole, "/" + childPrefix);
+                treeItem->setChildIndicatorPolicy(QTreeWidgetItem::DontShowIndicator);
+            } else {
+                treeItem->setData(0, Qt::UserRole, QString());
+                addChildren(treeItem, childPrefix, depth + 1);
+            }
+        }
+    }
+
+    void buildTree(const QString& currentPath) {
+        m_tree->clear();
+        for (const auto& root : pathItemsAtLevel(m_model, "")) {
+            auto* rootItem = new QTreeWidgetItem(m_tree, {root.label});
+            rootItem->setData(0, Qt::UserRole, root.terminal ? "/" + root.data : QString());
+            if (!root.terminal) addChildren(rootItem, root.data, 1);
+        }
+        m_tree->expandAll();
+        if (!currentPath.isEmpty()) {
+            QTreeWidgetItemIterator it(m_tree);
+            while (*it) {
+                if ((*it)->data(0, Qt::UserRole).toString() == currentPath) {
+                    m_tree->setCurrentItem(*it);
+                    m_tree->scrollToItem(*it);
+                    break;
+                }
+                ++it;
+            }
+        }
+    }
+
+    bool filterItem(QTreeWidgetItem* item, const QString& text) {
+        const bool isLeaf    = !item->data(0, Qt::UserRole).toString().isEmpty();
+        const bool selfMatch = isLeaf && item->text(0).contains(text, Qt::CaseInsensitive);
+        bool childMatch = false;
+        for (int i = 0; i < item->childCount(); ++i)
+            childMatch |= filterItem(item->child(i), text);
+        const bool show = selfMatch || childMatch;
+        item->setHidden(!show);
+        if (childMatch) item->setExpanded(true);
+        return show;
+    }
+
+    void applyFilter(const QString& text) {
+        if (text.isEmpty()) {
+            QTreeWidgetItemIterator it(m_tree);
+            while (*it) { (*it)->setHidden(false); ++it; }
+            m_tree->expandAll();
+            return;
+        }
+        for (int i = 0; i < m_tree->topLevelItemCount(); ++i)
+            filterItem(m_tree->topLevelItem(i), text);
+    }
+
+    AppModel*    m_model;
+    QLineEdit*   m_filter{nullptr};
+    QTreeWidget* m_tree{nullptr};
+    QString      m_selected;
+};
+
 // ── style helpers ──────────────────────────────────────────────────────────
 
 static const char* kXpCellStyle =
@@ -195,6 +414,8 @@ InspectorWidget::InspectorWidget(AppModel* model, QWidget* parent)
     buildTimeTab();
     buildTimelineTab();
     buildScriptTab();
+    buildSnapshotTab();
+    buildAutomationTab();
     buildNetworkTab();
     buildMidiTab();
     buildTimecodeTab();
@@ -606,6 +827,10 @@ void InspectorWidget::buildMCTab() {
     m_chkAttachMC = new QCheckBox("Attach Music Context");
     outerLay->addWidget(m_chkAttachMC);
 
+    m_chkInheritParentMC = new QCheckBox("Inherit parent cue's Music Context");
+    m_chkInheritParentMC->hide();
+    outerLay->addWidget(m_chkInheritParentMC);
+
     m_mcContent = new QWidget;
     auto* contentLay = new QVBoxLayout(m_mcContent);
     contentLay->setContentsMargins(0, 4, 0, 0);
@@ -617,18 +842,21 @@ void InspectorWidget::buildMCTab() {
     m_mcView = new MusicContextView(m_model, m_mcContent);
     contentLay->addWidget(m_mcView);
 
-    // Button row: Import and Inherit
+    // Button row: Import and Inherit from child (wrapped in m_mcBtnRow so it can be hidden)
     {
-        auto* btnRow = new QHBoxLayout;
+        m_mcBtnRow = new QWidget(m_mcContent);
+        auto* btnRow = new QHBoxLayout(m_mcBtnRow);
+        btnRow->setContentsMargins(0, 0, 0, 0);
+        btnRow->setSpacing(4);
 
-        auto* btnImport = new QPushButton("Import...", m_mcContent);
+        auto* btnImport = new QPushButton("Import...", m_mcBtnRow);
         btnRow->addWidget(btnImport);
 
-        auto* btnInherit = new QPushButton("Inherit from child...", m_mcContent);
+        auto* btnInherit = new QPushButton("Inherit from child...", m_mcBtnRow);
         btnRow->addWidget(btnInherit);
         btnRow->addStretch();
 
-        contentLay->addLayout(btnRow);
+        contentLay->addWidget(m_mcBtnRow);
 
         // Import button: open MIDI or SMT file
         connect(btnImport, &QPushButton::clicked, this, [this]() {
@@ -757,8 +985,10 @@ void InspectorWidget::buildMCTab() {
     // ── signals ────────────────────────────────────────────────────────────
     connect(m_chkAttachMC, &QCheckBox::toggled, this, [this](bool on) {
         if (m_loading || m_cueIdx < 0) return;
-        m_model->pushUndo();
         if (on) {
+            // Detach any parent-inherit link first
+            m_model->pushUndo();
+            m_model->cues().setCueMCSource(m_cueIdx, -1);
             // Create default MC: 4/4, 120 BPM, bar 1 beat 1
             auto mc = std::make_unique<mcp::MusicContext>();
             mcp::MusicContext::Point p;
@@ -767,11 +997,31 @@ void InspectorWidget::buildMCTab() {
             mc->points.push_back(p);
             m_model->cues().setCueMusicContext(m_cueIdx, std::move(mc));
         } else {
+            m_model->pushUndo();
             m_model->cues().setCueMusicContext(m_cueIdx, nullptr);
         }
         ShowHelpers::syncSfFromCues(*m_model);
         emit cueEdited();
         // Reload the tab without losing the current tab selection
+        const int cIdx = m_cueIdx;
+        m_cueIdx = -1;
+        setCueIndex(cIdx);
+    });
+
+    connect(m_chkInheritParentMC, &QCheckBox::toggled, this, [this](bool on) {
+        if (m_loading || m_cueIdx < 0) return;
+        const mcp::Cue* c = m_model->cues().cueAt(m_cueIdx);
+        if (!c) return;
+        m_model->pushUndo();
+        if (on) {
+            // Link to parent's MC; clear any own MC first
+            m_model->cues().setCueMusicContext(m_cueIdx, nullptr);
+            m_model->cues().setCueMCSource(m_cueIdx, c->parentIndex);
+        } else {
+            m_model->cues().setCueMCSource(m_cueIdx, -1);
+        }
+        ShowHelpers::syncSfFromCues(*m_model);
+        emit cueEdited();
         const int cIdx = m_cueIdx;
         m_cueIdx = -1;
         setCueIndex(cIdx);
@@ -947,7 +1197,8 @@ void InspectorWidget::setCueIndex(int idx) {
     const bool isTimeline  = isGroup && c->groupData &&
                              c->groupData->mode == mcp::GroupData::Mode::Timeline;
 
-    const bool hasMC = isAudio || isMCCue || (isGroup && (isSyncGroup || isTimeline));
+    const bool isAutomation  = c && c->type == mcp::CueType::Automation;
+    const bool hasMC = isAudio || isMCCue || isAutomation || (isGroup && (isSyncGroup || isTimeline));
 
     m_tabs->setTabVisible(m_tabs->indexOf(m_mcPage),       hasMC);
     m_tabs->setTabVisible(m_tabs->indexOf(m_levelsPage),   isAudio || isFade);
@@ -962,7 +1213,10 @@ void InspectorWidget::setCueIndex(int idx) {
     const bool isMidiCue     = c && c->type == mcp::CueType::Midi;
     const bool isTimecodeCue = c && c->type == mcp::CueType::Timecode;
     const bool isScriptlet   = c && c->type == mcp::CueType::Scriptlet;
-    m_tabs->setTabVisible(m_tabs->indexOf(m_scriptPage),    isScriptlet);
+    const bool isSnapshot    = c && c->type == mcp::CueType::Snapshot;
+    m_tabs->setTabVisible(m_tabs->indexOf(m_scriptPage),       isScriptlet);
+    m_tabs->setTabVisible(m_tabs->indexOf(m_snapshotPage),     isSnapshot);
+    m_tabs->setTabVisible(m_tabs->indexOf(m_automationPage),   isAutomation);
     m_tabs->setTabVisible(m_tabs->indexOf(m_markerPage),    isMarkerCue);
     m_tabs->setTabVisible(m_tabs->indexOf(m_networkPage),   isNetworkCue);
     m_tabs->setTabVisible(m_tabs->indexOf(m_midiPage),      isMidiCue);
@@ -986,21 +1240,40 @@ void InspectorWidget::setCueIndex(int idx) {
             ShowHelpers::syncSfFromCues(*m_model);
             mcAttached = true;
         }
+
+        // Parent MC inheritance: show checkbox only when parent has an MC
+        const int parentIdx = c ? c->parentIndex : -1;
+        const bool parentHasMC = (parentIdx >= 0) &&
+                                  (m_model->cues().musicContextOf(parentIdx) != nullptr);
+        const bool isInheriting = parentHasMC &&
+                                   (m_model->cues().cueMCSourceIdx(idx) == parentIdx);
+        m_chkInheritParentMC->setVisible(parentHasMC);
+        m_chkInheritParentMC->setChecked(isInheriting);
+
         // For MC cues the attach checkbox is always checked and disabled
         if (isMCCue) {
             m_chkAttachMC->setChecked(true);
             m_chkAttachMC->setEnabled(false);
         } else {
-            m_chkAttachMC->setEnabled(true);
-            m_chkAttachMC->setChecked(mcAttached);
+            m_chkAttachMC->setEnabled(!isInheriting);
+            m_chkAttachMC->setChecked(mcAttached && !isInheriting);
         }
-        m_mcContent->setVisible(mcAttached);
+
+        // When inheriting, show content read-only (no own MC edit, no button row)
+        const bool showContent = mcAttached || isInheriting;
+        m_mcContent->setVisible(showContent);
         m_selMCPt = -1;
-        if (mcAttached) {
-            m_chkApplyBefore->setChecked(m_model->cues().musicContextOf(idx)->applyBeforeStart);
+        if (showContent) {
+            const auto* mc = m_model->cues().musicContextOf(idx);
+            if (mc) m_chkApplyBefore->setChecked(mc->applyBeforeStart);
+            m_chkApplyBefore->setEnabled(!isInheriting);
+            m_mcBtnRow->setVisible(!isInheriting);
             m_mcView->setCueIndex(idx);
+            m_mcView->setEnabled(!isInheriting);
             m_mcPropGroup->hide();
         }
+    } else {
+        m_chkInheritParentMC->hide();
     }
 
     loadBasic();
@@ -1013,6 +1286,8 @@ void InspectorWidget::setCueIndex(int idx) {
         if (isTimeline) m_timelineView->setGroupCueIndex(idx);
     }
     if (isScriptlet)   loadScript();
+    if (isSnapshot)    loadSnapshotTab();
+    if (isAutomation)  loadAutomationTab();
     if (isNetworkCue)  loadNetwork();
     if (isMidiCue)     loadMidi();
     if (isTimecodeCue) loadTimecode();
@@ -1146,8 +1421,7 @@ void InspectorWidget::replaceAudioFile(const QString& newAbsPath) {
     if (!sfCue) return;
     sfCue->path = pathToStore;
 
-    std::string err;
-    ShowHelpers::rebuildAllCueLists(*m_model, err);
+    ShowHelpers::reloadEngineCueAudio(*m_model, m_model->activeListIdx(), m_cueIdx);
     m_model->dirty = true;
 
     // Update the path widget immediately (show the resolved absolute path)
@@ -1839,6 +2113,373 @@ void InspectorWidget::refreshScriptErrors() {
         m_editScript->markErrorLine(errorLine);
     else
         m_editScript->clearErrorLines();
+}
+
+void InspectorWidget::buildSnapshotTab() {
+    m_snapshotPage = new QWidget;
+    auto* form = new QFormLayout(m_snapshotPage);
+    form->setContentsMargins(8, 8, 8, 8);
+    form->setSpacing(6);
+
+    m_comboSnapshot = new QComboBox;
+    m_comboSnapshot->setToolTip("Snapshot to recall when this cue fires");
+    form->addRow(tr("Recall:"), m_comboSnapshot);
+
+    m_tabs->addTab(m_snapshotPage, tr("Snapshot"));
+
+    connect(m_comboSnapshot, QOverload<int>::of(&QComboBox::currentIndexChanged),
+            this, [this](int idx) {
+        if (m_loading || m_cueIdx < 0) return;
+        const int snapId = (idx > 0) ? m_comboSnapshot->itemData(idx).toInt() : -1;
+        m_model->cues().setCueSnapshotId(m_cueIdx, snapId);
+        ShowHelpers::syncSfFromCues(*m_model);
+        emit cueEdited();
+    });
+}
+
+void InspectorWidget::loadSnapshotTab() {
+    if (m_cueIdx < 0) return;
+    const auto* c = m_model->cues().cueAt(m_cueIdx);
+    if (!c) return;
+
+    m_loading = true;
+    m_comboSnapshot->clear();
+    m_comboSnapshot->addItem(tr("(none)"), -1);
+
+    const auto& sl = m_model->sf.snapshotList;
+    int selectIdx = 0;
+    for (int i = 0; i < static_cast<int>(sl.snapshots.size()); ++i) {
+        const auto& slot = sl.snapshots[static_cast<size_t>(i)];
+        if (!slot) continue;
+        const QString label = QString("[%1] %2").arg(i + 1)
+                              .arg(QString::fromStdString(slot->name));
+        m_comboSnapshot->addItem(label, slot->id);
+        if (slot->id == c->snapshotId)
+            selectIdx = m_comboSnapshot->count() - 1;
+    }
+    m_comboSnapshot->setCurrentIndex(selectIdx);
+    m_loading = false;
+}
+
+double InspectorWidget::currentAutomationParamValue(const std::string& path) const {
+    const auto& as = m_model->sf.audioSetup;
+    // Parse channel index from "/mixer/{ch}/..."
+    int ch = -1;
+    if (path.size() > 7 && path.compare(0, 7, "/mixer/") == 0) {
+        const size_t pos   = 7;
+        const size_t slash = path.find('/', pos);
+        try { ch = std::stoi(path.substr(pos, slash == std::string::npos
+                                              ? std::string::npos : slash - pos)); }
+        catch (...) {}
+    }
+    if (ch < 0 || ch >= (int)as.channels.size()) return 0.0;
+    const auto& chan = as.channels[static_cast<size_t>(ch)];
+    if (path.find("/fader")    != std::string::npos) return chan.masterGainDb;
+    if (path.find("/mute")     != std::string::npos) return chan.mute     ? 1.0 : 0.0;
+    if (path.find("/polarity") != std::string::npos) return chan.phaseInvert ? 1.0 : 0.0;
+    if (path.find("/crosspoint/") != std::string::npos) {
+        const std::string mid = "/crosspoint/";
+        const auto it = path.find(mid);
+        int out = -1;
+        try { out = std::stoi(path.substr(it + mid.size())); } catch (...) {}
+        if (out >= 0) {
+            for (const auto& xe : as.xpEntries)
+                if (xe.ch == ch && xe.out == out) return xe.db;
+            return (ch == out) ? 0.0 : -144.0;  // default diagonal / off
+        }
+    }
+    return 0.0;
+}
+
+// ---------------------------------------------------------------------------
+// Automation tab — breadcrumb path bar
+
+void InspectorWidget::rebuildAutoPathBar(const QString& path) {
+
+    const auto& as = m_model->sf.audioSetup;
+    const int   nCh = static_cast<int>(as.channels.size());
+
+    // Clear the bar's existing widgets.
+    auto* barLayout = qobject_cast<QHBoxLayout*>(m_autoPathBar->layout());
+    while (QLayoutItem* it = barLayout->takeAt(0)) {
+        if (QWidget* w = it->widget()) w->deleteLater();
+        delete it;
+    }
+
+    // Parse path into segments; remap slave-channel paths to show through master.
+    QStringList segments;
+    if (!path.isEmpty()) {
+        QString p = path;
+        if (p.startsWith('/')) p = p.mid(1);
+        segments = p.split('/');
+    }
+    if (segments.size() >= 3 && segments[0] == QLatin1String("mixer")) {
+        bool ok; const int pathCh = segments[1].toInt(&ok);
+        if (ok && pathCh > 0 && pathCh < nCh
+            && as.channels[static_cast<size_t>(pathCh - 1)].linkedStereo) {
+            const QString slaveFull = "/mixer/" + segments[1] + "/" + segments[2];
+            segments[1] = QString::number(pathCh - 1);
+            segments[2] = slaveFull;
+        }
+    }
+
+    if (segments.isEmpty()) {
+        auto* placeholder = new QLabel(tr("(no parameter)"), m_autoPathBar);
+        placeholder->setStyleSheet("color: #777; font-style: italic;");
+        barLayout->addWidget(placeholder);
+        barLayout->addStretch();
+        return;
+    }
+
+    // Create one flat-styled button per segment with "›" separators.
+    const QStringList segsCopy = segments;
+    for (int i = 0; i < segments.size(); ++i) {
+        if (i > 0) {
+            auto* sep = new QLabel(QStringLiteral("›"), m_autoPathBar);
+            sep->setStyleSheet("color: #888; margin: 0 1px;");
+            barLayout->addWidget(sep);
+        }
+        const QString label = pathSegLabel(as, segments[i], i);
+        auto* btn = new QPushButton(label, m_autoPathBar);
+        btn->setFlat(true);
+        btn->setCursor(Qt::PointingHandCursor);
+        btn->setStyleSheet(
+            "QPushButton { padding: 1px 5px; border: none; border-radius: 3px; }"
+            "QPushButton:hover { background: rgba(255,255,255,0.13); }");
+
+        const int levelCopy = i;
+        connect(btn, &QPushButton::clicked, this, [this, levelCopy, segsCopy]() {
+            if (m_loading || m_cueIdx < 0) return;
+            // Compute the prefix that leads to this level.
+            QString pfx;
+            for (int j = 0; j < levelCopy; ++j) {
+                const QString& d = segsCopy[j];
+                pfx = d.startsWith('/') ? d.mid(1) : (pfx.isEmpty() ? d : pfx + "/" + d);
+            }
+            const auto pitems = pathItemsAtLevel(m_model, pfx);
+            if (pitems.isEmpty()) return;
+
+            QMenu menu(this);
+            for (const auto& pi : pitems) {
+                auto* act = menu.addAction(pi.label);
+                act->setCheckable(true);
+                act->setChecked(pi.data == segsCopy[levelCopy]);
+                const QString piData  = pi.data;
+                const bool    piTerm  = pi.terminal;
+                connect(act, &QAction::triggered, this,
+                        [this, levelCopy, segsCopy, piData, piTerm]() {
+                    // Keep levels 0..levelCopy-1, replace levelCopy with new choice,
+                    // then auto-complete remaining levels by always picking first item.
+                    QStringList newSegs = segsCopy.mid(0, levelCopy);
+                    newSegs << piData;
+                    if (!piTerm) {
+                        QString pfx2;
+                        for (const auto& d : newSegs)
+                            pfx2 = d.startsWith('/') ? d.mid(1)
+                                                     : (pfx2.isEmpty() ? d : pfx2 + "/" + d);
+                        for (int guard = 0; guard < 6; ++guard) {
+                            const auto next = pathItemsAtLevel(m_model, pfx2);
+                            if (next.isEmpty()) break;
+                            const auto& first = next[0];
+                            newSegs << first.data;
+                            pfx2 = first.data.startsWith('/') ? first.data.mid(1)
+                                 : (pfx2.isEmpty() ? first.data : pfx2 + "/" + first.data);
+                            if (first.terminal) break;
+                        }
+                    }
+                    QString newPath;
+                    for (const auto& d : newSegs)
+                        newPath = d.startsWith('/') ? d
+                                : (newPath.isEmpty() ? "/" + d : newPath + "/" + d);
+                    commitAutoPath(newPath);
+                });
+            }
+            if (auto* src = qobject_cast<QPushButton*>(sender()))
+                menu.exec(src->mapToGlobal(QPoint(0, src->height())));
+        });
+        barLayout->addWidget(btn);
+    }
+    barLayout->addStretch();
+}
+
+void InspectorWidget::commitAutoPath(const QString& path) {
+    if (m_cueIdx < 0) return;
+    const std::string pathStr = path.toStdString();
+    m_model->cues().setCueAutomationPath(m_cueIdx, pathStr);
+    rebuildAutoPathBar(path);
+    const auto mode = mcp::Cue::automationParamMode(pathStr);
+    m_automationView->setParamMode(mode);
+    const double curVal = currentAutomationParamValue(pathStr);
+    const double dur    = m_spinAutoDuration->value();
+    const std::vector<mcp::Cue::AutomationPoint> flat{{0.0, curVal}, {dur, curVal}};
+    m_model->cues().setCueAutomationCurve(m_cueIdx, flat);
+    m_automationView->setPoints(flat);
+    ShowHelpers::syncSfFromCues(*m_model);
+    emit cueEdited();
+}
+
+void InspectorWidget::openAutoParamPicker() {
+    if (m_cueIdx < 0) return;
+    const auto* c = m_model->cues().cueAt(m_cueIdx);
+    const QString curPath = c ? QString::fromStdString(c->automationPath) : QString();
+    AutoParamPickerDialog dlg(m_model, curPath, this);
+    if (dlg.exec() == QDialog::Accepted) {
+        const QString newPath = dlg.selectedPath();
+        if (!newPath.isEmpty() && newPath != curPath)
+            commitAutoPath(newPath);
+    }
+}
+
+void InspectorWidget::buildAutomationTab() {
+    m_automationPage = new QWidget;
+    auto* vlay = new QVBoxLayout(m_automationPage);
+    vlay->setContentsMargins(8, 8, 8, 8);
+    vlay->setSpacing(6);
+
+    auto* form = new QFormLayout;
+    form->setSpacing(6);
+
+    // Path bar row: breadcrumb frame on the left, browse button on the right.
+    m_autoPathWidget = new QWidget;
+    auto* pathRowLayout = new QHBoxLayout(m_autoPathWidget);
+    pathRowLayout->setContentsMargins(0, 0, 0, 0);
+    pathRowLayout->setSpacing(4);
+
+    m_autoPathBar = new QFrame;
+    m_autoPathBar->setFrameShape(QFrame::StyledPanel);
+    m_autoPathBar->setFrameShadow(QFrame::Sunken);
+    m_autoPathBar->setSizePolicy(QSizePolicy::Expanding, QSizePolicy::Fixed);
+    auto* barLayout = new QHBoxLayout(m_autoPathBar);
+    barLayout->setContentsMargins(4, 2, 4, 2);
+    barLayout->setSpacing(2);
+    pathRowLayout->addWidget(m_autoPathBar, 1);
+
+    auto* searchBtn = new QPushButton(tr("…"), m_autoPathWidget);
+    searchBtn->setFixedWidth(28);
+    searchBtn->setToolTip(tr("Browse parameters…"));
+    connect(searchBtn, &QPushButton::clicked, this, &InspectorWidget::openAutoParamPicker);
+    pathRowLayout->addWidget(searchBtn);
+
+    form->addRow(tr("Parameter:"), m_autoPathWidget);
+
+    m_spinAutoDuration = new QDoubleSpinBox;
+    m_spinAutoDuration->setRange(0.01, 3600.0);
+    m_spinAutoDuration->setDecimals(2);
+    m_spinAutoDuration->setSuffix(" s");
+    form->addRow(tr("Duration:"), m_spinAutoDuration);
+
+    // Quantize row — visible only when an MC is attached
+    m_autoQuantizeRow = new QWidget;
+    {
+        auto* qlay = new QHBoxLayout(m_autoQuantizeRow);
+        qlay->setContentsMargins(0, 0, 0, 0);
+        qlay->setSpacing(4);
+        m_comboAutoQuantize = new QComboBox;
+        m_comboAutoQuantize->addItems({tr("None"), tr("Bar"), tr("Beat")});
+        qlay->addWidget(m_comboAutoQuantize);
+        qlay->addStretch();
+    }
+    m_autoQuantizeRow->hide();
+    form->addRow(tr("Quantize:"), m_autoQuantizeRow);
+
+    vlay->addLayout(form);
+
+    m_automationView = new AutomationView;
+    m_automationView->setMinimumHeight(140);
+    vlay->addWidget(m_automationView, 1);
+
+    auto* helpLbl = new QLabel(tr("Left-click: add point  ·  Drag: move  ·  Right-click: delete"));
+    helpLbl->setStyleSheet("color: #666; font-size: 10px;");
+    vlay->addWidget(helpLbl);
+
+    m_tabs->addTab(m_automationPage, tr("Automation"));
+
+    connect(m_spinAutoDuration, QOverload<double>::of(&QDoubleSpinBox::valueChanged),
+            this, [this](double v) {
+        if (m_loading || m_cueIdx < 0) return;
+        m_model->cues().setCueAutomationDuration(m_cueIdx, v);
+        m_automationView->setDuration(v);
+        ShowHelpers::syncSfFromCues(*m_model);
+        emit cueEdited();
+    });
+
+    connect(m_automationView, &AutomationView::curveChanged,
+            this, [this](const std::vector<mcp::Cue::AutomationPoint>& pts) {
+        if (m_loading || m_cueIdx < 0) return;
+        m_model->cues().setCueAutomationCurve(m_cueIdx, pts);
+        ShowHelpers::syncSfFromCues(*m_model);
+        emit cueEdited();
+    });
+
+    connect(m_comboAutoQuantize, QOverload<int>::of(&QComboBox::currentIndexChanged),
+            this, [this](int mode) {
+        if (m_loading) return;
+        m_automationView->setQuantize(mode);
+    });
+}
+
+void InspectorWidget::loadAutomationTab() {
+    if (m_cueIdx < 0) return;
+    const auto* c = m_model->cues().cueAt(m_cueIdx);
+    if (!c) return;
+
+    m_loading = true;
+
+
+    const QString curPath = QString::fromStdString(c->automationPath);
+    rebuildAutoPathBar(curPath);
+
+    m_spinAutoDuration->setValue(c->automationDuration);
+
+    const auto mode = mcp::Cue::automationParamMode(c->automationPath);
+    m_automationView->setParamMode(mode);
+    m_automationView->setDuration(c->automationDuration);
+
+    // Wire up MC for bar/beat grid
+    const mcp::MusicContext* mc = m_model->cues().musicContextOf(m_cueIdx);
+    m_automationView->setMusicContext(mc);
+    m_automationView->setQuantize(m_comboAutoQuantize->currentIndex());
+    m_autoQuantizeRow->setVisible(mc != nullptr);
+
+    m_loading = false;
+
+    // If path is empty (new cue), auto-commit the first available path.
+    if (c->automationPath.empty()) {
+        QString firstPath;
+        QString pfx;
+        for (int guard = 0; guard < 8; ++guard) {
+            const auto items = pathItemsAtLevel(m_model, pfx);
+            if (items.isEmpty()) break;
+            const auto& first = items[0];
+            pfx = first.data.startsWith('/') ? first.data.mid(1)
+                : (pfx.isEmpty() ? first.data : pfx + "/" + first.data);
+            firstPath = "/" + pfx;
+            if (first.terminal) break;
+        }
+        if (!firstPath.isEmpty()) commitAutoPath(firstPath);
+        return;
+    }
+
+    // Seed flat curve if missing.
+    if (c->automationCurve.empty()) {
+        const double curVal = currentAutomationParamValue(c->automationPath);
+        const double dur    = c->automationDuration;
+        const std::vector<mcp::Cue::AutomationPoint> flat{{0.0, curVal}, {dur, curVal}};
+        m_model->cues().setCueAutomationCurve(m_cueIdx, flat);
+        ShowHelpers::syncSfFromCues(*m_model);
+        m_automationView->setPoints(flat);
+    } else {
+        m_automationView->setPoints(c->automationCurve);
+    }
+    // setPoints() calls ensureHandles() which may add default handles not yet in the engine.
+    // Save the augmented point list back so handles persist across saves.
+    {
+        const auto& viewPts = m_automationView->points();
+        if (viewPts.size() != c->automationCurve.size()) {
+            m_model->cues().setCueAutomationCurve(m_cueIdx, viewPts);
+            ShowHelpers::syncSfFromCues(*m_model);
+        }
+    }
 }
 
 void InspectorWidget::buildNetworkTab() {

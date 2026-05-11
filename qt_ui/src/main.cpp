@@ -65,6 +65,14 @@ int main(int argc, char* argv[]) {
         }
     } else {
         model.sf = mcp::ShowFile::empty();
+        const int n = model.engineOk ? model.engine.channels() : 2;
+        for (int i = 0; i < n; ++i) {
+            mcp::ShowFile::AudioSetup::Channel ch;
+            ch.name = "Ch " + std::to_string(i + 1);
+            model.sf.audioSetup.channels.push_back(ch);
+        }
+        std::string err;
+        ShowHelpers::rebuildAllCueLists(model, err);
     }
 
     MainWindow win(&model);

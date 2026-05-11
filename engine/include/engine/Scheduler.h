@@ -4,6 +4,7 @@
 #include <condition_variable>
 #include <cstdint>
 #include <functional>
+#include <memory>
 #include <mutex>
 #include <thread>
 #include <vector>
@@ -14,15 +15,18 @@ class AudioEngine;
 
 // Engine-playhead-driven event scheduler.
 //
-// Events are registered with an absolute engine-frame deadline and fired on a
-// dedicated thread the first time enginePlayheadFrames() >= targetFrame.
+// Discrete events: registered with an absolute engine-frame deadline and fired
+// on a dedicated thread the first time enginePlayheadFrames() >= targetFrame.
+// Stored in a min-heap — O(log N) insert, O(1) peek, O(log N) pop.
 //
-// Timing accuracy: within the poll interval (2 ms) plus one audio buffer
-// period — far tighter than OS-timer approaches, and immune to wall-clock
-// drift over long shows because all deadlines are expressed in audio frames.
+// Continuous ramps: a single O(1) registration replaces the burst of N discrete
+// events used by Fade/Automation cues.  The scheduler thread advances each ramp
+// step-by-step every poll cycle; the tick(stepIndex) callback receives pre-
+// computed values directly from the caller's table.  Ramps are cancelled via a
+// shared_ptr<atomic<bool>> flag — the same pattern as discrete event cancel.
 //
 // Thread model:
-//   Any thread  — schedule / cancel / cancelAll (all lock-guarded)
+//   Any thread  — schedule / scheduleRamp / cancel / cancelAll (all lock-guarded)
 //   Scheduler thread — fires callbacks (do not call schedule() from a callback)
 class Scheduler {
 public:
@@ -44,10 +48,21 @@ public:
 
     // Schedule relative to a caller-supplied origin frame instead of the
     // current playhead.  Use this when multiple events need to share the
-    // same origin so their deadlines stay aligned (e.g. co-temporal prewait
-    // events that must fire in the same poll cycle).
+    // same origin so their deadlines stay aligned.
     int scheduleFromFrame(int64_t originFrame, double seconds, Callback cb,
                           std::string label = "");
+
+    // Register a continuous ramp.  tick(s) fires when
+    //   enginePlayhead >= originFrame + s * stepFrames,  s = 0..numSteps-1.
+    // done() fires after the last tick (not called when cancelled).
+    // cancel is the shared atomic flag; setting it to true before the next
+    // poll silently removes the ramp without calling done().
+    // Returns an ID (same namespace as discrete event IDs).
+    int scheduleRamp(int64_t originFrame, double stepSec, int numSteps,
+                     std::shared_ptr<std::atomic<bool>> cancel,
+                     std::function<void(int)> tick,
+                     std::function<void()> done,
+                     std::string label = "");
 
     // Silently ignored if the event has already fired or the ID is unknown.
     void cancel(int eventId);
@@ -70,11 +85,31 @@ private:
         int64_t     targetFrame;
         Callback    cb;
         std::string label;
+        bool        cancelled{false};
+    };
+
+    // Min-heap comparator: smallest targetFrame at top.
+    struct EventCmp {
+        bool operator()(const Event& a, const Event& b) const {
+            return a.targetFrame > b.targetFrame;
+        }
+    };
+
+    struct Ramp {
+        int     id;
+        int64_t originFrame;
+        int64_t stepFrames;
+        int     numSteps;
+        int     nextStep{0};
+        std::shared_ptr<std::atomic<bool>> cancel;
+        std::function<void(int)> tick;
+        std::function<void()>    done;
     };
 
     mutable std::mutex      m_mutex;
     std::condition_variable m_cv;
-    std::vector<Event>      m_events;
+    std::vector<Event>      m_events;   // maintained as a min-heap
+    std::vector<Ramp>       m_ramps;
     int                     m_nextId{0};
 
     std::atomic<bool> m_running{false};

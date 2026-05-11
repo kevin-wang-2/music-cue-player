@@ -39,6 +39,8 @@ set(QT_UI_SOURCES
     src/CollectDialog.cpp
     src/MissingMediaDialog.h
     src/MissingMediaDialog.cpp
+    src/MixConsoleDialog.h
+    src/MixConsoleDialog.cpp
     src/AppModel.h
     src/AppModel.cpp
     src/SettingsDialog.h
@@ -57,6 +59,8 @@ set(QT_UI_SOURCES
     src/SyncGroupView.cpp
     src/MusicContextView.h
     src/MusicContextView.cpp
+    src/AutomationView.h
+    src/AutomationView.cpp
     src/CueListPanel.h
     src/CueListPanel.cpp
     src/MainWindow.h

@@ -149,6 +149,10 @@ bool rebuildCueList(AppModel& m, int listIdx, std::string& /*err*/) {
             cm.fold.assign(static_cast<size_t>(numPhys * numPhys), 0.0f);
             for (int i = 0; i < numPhys; ++i)
                 cm.fold[static_cast<size_t>(i * numPhys + i)] = 1.0f;
+            cm.xpLinear = cm.fold;
+            cm.liveMasterGainDb.assign(static_cast<size_t>(numPhys), 0.0f);
+            cm.liveMute.assign(static_cast<size_t>(numPhys), false);
+            cm.stereoSlave.assign(static_cast<size_t>(numPhys), -1);
             cm.primaryPhys.resize(static_cast<size_t>(numPhys));
             for (int i = 0; i < numPhys; ++i) cm.primaryPhys[static_cast<size_t>(i)] = i;
         } else {
@@ -162,9 +166,18 @@ bool rebuildCueList(AppModel& m, int listIdx, std::string& /*err*/) {
                     cm.fold[static_cast<size_t>(xe.ch * numPhys + xe.out)] =
                         (xe.db <= -144.0f) ? 0.0f : mcp::lut::dBToLinear(xe.db);
             }
+            // Save xp-only fold for live automation updates, then apply master gain.
+            cm.xpLinear = cm.fold;
+            cm.liveMasterGainDb.resize(static_cast<size_t>(cm.numCh), 0.0f);
+            cm.liveMute.resize(static_cast<size_t>(cm.numCh), false);
+            cm.stereoSlave.assign(static_cast<size_t>(cm.numCh), -1);
             // Apply channel master gain and mute
             for (int ch = 0; ch < cm.numCh; ++ch) {
                 const auto& cfg = setup.channels[static_cast<size_t>(ch)];
+                cm.liveMasterGainDb[static_cast<size_t>(ch)] = cfg.masterGainDb;
+                cm.liveMute[static_cast<size_t>(ch)] = cfg.mute;
+                if (cfg.linkedStereo && ch + 1 < cm.numCh)
+                    cm.stereoSlave[static_cast<size_t>(ch)] = ch + 1;
                 float g = cfg.mute ? 0.0f : mcp::lut::dBToLinear(cfg.masterGainDb);
                 for (int p = 0; p < numPhys; ++p)
                     cm.fold[static_cast<size_t>(ch * numPhys + p)] *= g;
@@ -317,6 +330,10 @@ bool rebuildCueList(AppModel& m, int listIdx, std::string& /*err*/) {
                     cl.addMemoCue(cd.name, cd.preWait);
                 } else if (cd.type == "scriptlet") {
                     cl.addScriptletCue(cd.name, cd.preWait);
+                } else if (cd.type == "snapshot") {
+                    cl.addSnapshotCue(cd.name, cd.preWait);
+                } else if (cd.type == "automation") {
+                    cl.addAutomationCue(cd.name, cd.preWait);
                 } else if (cd.type == "network") {
                     cl.addNetworkCue(cd.name, cd.preWait);
                 } else if (cd.type == "midi") {
@@ -346,6 +363,17 @@ bool rebuildCueList(AppModel& m, int listIdx, std::string& /*err*/) {
                     cl.setCueMarkerIndex(myIdx, cd.markerIndex);
                 if (cd.type == "scriptlet")
                     cl.setCueScriptletCode(myIdx, cd.scriptletCode);
+                if (cd.type == "snapshot")
+                    cl.setCueSnapshotId(myIdx, cd.snapshotId);
+                if (cd.type == "automation") {
+                    cl.setCueAutomationPath(myIdx, cd.automationPath);
+                    cl.setCueAutomationDuration(myIdx, cd.automationDuration);
+                    std::vector<mcp::Cue::AutomationPoint> pts;
+                    pts.reserve(cd.automationCurve.size());
+                    for (const auto& p : cd.automationCurve)
+                        pts.push_back({p.time, p.value, p.isHandle});
+                    cl.setCueAutomationCurve(myIdx, pts);
+                }
                 if (cd.type == "network") {
                     // Resolve patch name → index
                     int patchIdx = -1;
@@ -789,6 +817,22 @@ void syncSfFromCues(AppModel& m, int listIdx) {
                     cd.scriptletCode  = c->scriptletCode;
                     ++i;
                     break;
+
+                case mcp::CueType::Snapshot:
+                    cd.type       = "snapshot";
+                    cd.snapshotId = c->snapshotId;
+                    ++i;
+                    break;
+
+                case mcp::CueType::Automation: {
+                    cd.type               = "automation";
+                    cd.automationPath     = c->automationPath;
+                    cd.automationDuration = c->automationDuration;
+                    for (const auto& p : c->automationCurve)
+                        cd.automationCurve.push_back({p.time, p.value, p.isHandle});
+                    ++i;
+                    break;
+                }
             }
 
             dest.push_back(std::move(cd));
@@ -1165,8 +1209,19 @@ void applyMediaFixes(AppModel& m, const std::vector<MissingEntry>& fixes) {
             cd->path = np.string();
     }
 
-    std::string err;
-    rebuildAllCueLists(m, err);
+    // Reload audio in-place for each fixed cue — no full rebuild needed.
+    for (const auto& fix : fixes) {
+        if (fix.newPath.empty()) continue;
+        if (fix.listIdx < 0 || fix.listIdx >= m.listCount()) continue;
+        auto& cl = m.cueListAt(fix.listIdx);
+        for (int fi = 0; fi < cl.cueCount(); ++fi) {
+            const auto* c = cl.cueAt(fi);
+            if (c && c->cueNumber == fix.cueNumber) {
+                reloadEngineCueAudio(m, fix.listIdx, fi);
+                break;
+            }
+        }
+    }
     m.dirty = true;
 }
 
@@ -1279,6 +1334,557 @@ bool collectAllFiles(AppModel& m,
     }
 
     return !anyFailed;
+}
+
+// ---------------------------------------------------------------------------
+// applyChannelMap — update the channel map on every live CueList without
+// clearing or restarting cues.  Safe to call during playback.
+
+// ---------------------------------------------------------------------------
+// Direct engine mutation helpers
+// ---------------------------------------------------------------------------
+
+// Build a MusicContext from a ShowFile MCData entry (shared between rebuild
+// and the direct-insert path).
+static std::unique_ptr<mcp::MusicContext>
+buildMCFromData(const mcp::ShowFile::CueData::MCData& mc)
+{
+    if (!mc.enabled || mc.points.empty()) return nullptr;
+    auto ctx = std::make_unique<mcp::MusicContext>();
+    ctx->startOffsetSeconds = mc.startOffsetSeconds;
+    ctx->applyBeforeStart   = mc.applyBeforeStart;
+    for (const auto& p : mc.points) {
+        mcp::MusicContext::Point pt;
+        pt.bar        = p.bar;
+        pt.beat       = p.beat;
+        pt.bpm        = p.bpm;
+        pt.isRamp     = p.isRamp;
+        pt.hasTimeSig = p.hasTimeSig;
+        pt.timeSigNum = p.timeSigNum;
+        pt.timeSigDen = p.timeSigDen;
+        ctx->points.push_back(pt);
+    }
+    return ctx;
+}
+
+// Build the engine Cue struct from a ShowFile::CueData.
+// Does NOT assign stableId (insertCueAt handles that).
+// target: already-resolved, post-insertion-adjusted flat index (-1 if n/a).
+// parentFlatIdx: direct parent group flat index (-1 = top-level).
+static mcp::Cue buildEngineCue(
+    const mcp::ShowFile::CueData& cd,
+    const std::filesystem::path& base,
+    int target,
+    int parentFlatIdx)
+{
+    mcp::Cue cue;
+    cue.name           = cd.name.empty() ? cd.type : cd.name;
+    cue.preWaitSeconds = cd.preWait;
+    cue.parentIndex    = parentFlatIdx;
+
+    if (cd.type == "audio") {
+        cue.type = mcp::CueType::Audio;
+        cue.path = cd.path;
+        auto p = std::filesystem::path(cd.path);
+        if (p.is_relative()) p = base / p;
+        cue.audioFile.loadMetadata(p.string());  // silent fail → broken cue
+    } else if (cd.type == "start") {
+        cue.type = mcp::CueType::Start;
+        cue.targetIndex = target;
+    } else if (cd.type == "stop") {
+        cue.type = mcp::CueType::Stop;
+        cue.targetIndex = target;
+    } else if (cd.type == "fade") {
+        cue.type        = mcp::CueType::Fade;
+        cue.duration    = 3.0;
+        cue.targetIndex = target;
+        cue.fadeData    = std::make_shared<mcp::FadeData>();
+        cue.fadeData->targetCueNumber   = cd.targetCueNumber;
+        cue.fadeData->resolvedTargetIdx = target;
+        cue.fadeData->curve = (cd.fadeCurve == "equalpower")
+            ? mcp::FadeData::Curve::EqualPower : mcp::FadeData::Curve::Linear;
+        cue.fadeData->stopWhenDone = cd.fadeStopWhenDone;
+    } else if (cd.type == "arm") {
+        cue.type = mcp::CueType::Arm;
+        cue.targetIndex = target;
+    } else if (cd.type == "devamp") {
+        cue.type = mcp::CueType::Devamp;
+        cue.targetIndex = target;
+    } else if (cd.type == "mc") {
+        cue.type = mcp::CueType::MusicContext;
+    } else if (cd.type == "marker") {
+        cue.type = mcp::CueType::Marker;
+        cue.targetIndex = target;
+        cue.markerIndex = cd.markerIndex;
+    } else if (cd.type == "goto") {
+        cue.type = mcp::CueType::Goto;
+        cue.targetIndex = target;
+    } else if (cd.type == "memo") {
+        cue.type = mcp::CueType::Memo;
+    } else if (cd.type == "scriptlet") {
+        cue.type = mcp::CueType::Scriptlet;
+    } else if (cd.type == "snapshot") {
+        cue.type = mcp::CueType::Snapshot;
+    } else if (cd.type == "automation") {
+        cue.type = mcp::CueType::Automation;
+    } else if (cd.type == "network") {
+        cue.type = mcp::CueType::Network;
+    } else if (cd.type == "midi") {
+        cue.type = mcp::CueType::Midi;
+    } else if (cd.type == "timecode") {
+        cue.type = mcp::CueType::Timecode;
+    }
+    // "group" is handled by the caller (falls back to rebuildCueList).
+    return cue;
+}
+
+// Apply all per-cue setters to the cue at flatIdx after insertCueAt.
+// parentFlatIdx: -1 = top-level (parentIndex already set in struct by buildEngineCue).
+static void applyCueSetters(
+    mcp::CueList& cl,
+    int flatIdx,
+    AppModel& m,
+    const mcp::ShowFile::CueData& cd)
+{
+    cl.setCueCueNumber   (flatIdx, cd.cueNumber);
+    cl.setCueStartTime   (flatIdx, cd.startTime);
+    cl.setCueDuration    (flatIdx, cd.duration);
+    cl.setCueLevel       (flatIdx, cd.level);
+    cl.setCueTrim        (flatIdx, cd.trim);
+    cl.setCueAutoContinue(flatIdx, cd.autoContinue);
+    cl.setCueAutoFollow  (flatIdx, cd.autoFollow);
+    cl.setCueGoQuantize  (flatIdx, cd.goQuantize);
+    cl.setCueTimelineOffset(flatIdx, cd.timelineOffset);
+
+    if (cd.type == "arm")
+        cl.setCueArmStartTime(flatIdx, cd.armStartTime);
+    if (cd.type == "devamp") {
+        cl.setCueDevampMode   (flatIdx, cd.devampMode);
+        cl.setCueDevampPreVamp(flatIdx, cd.devampPreVamp);
+    }
+    if (cd.type == "marker")
+        cl.setCueMarkerIndex(flatIdx, cd.markerIndex);
+    if (cd.type == "scriptlet")
+        cl.setCueScriptletCode(flatIdx, cd.scriptletCode);
+    if (cd.type == "snapshot")
+        cl.setCueSnapshotId(flatIdx, cd.snapshotId);
+    if (cd.type == "automation") {
+        cl.setCueAutomationPath    (flatIdx, cd.automationPath);
+        cl.setCueAutomationDuration(flatIdx, cd.automationDuration);
+        std::vector<mcp::Cue::AutomationPoint> pts;
+        pts.reserve(cd.automationCurve.size());
+        for (const auto& p : cd.automationCurve)
+            pts.push_back({p.time, p.value, p.isHandle});
+        cl.setCueAutomationCurve(flatIdx, pts);
+    }
+    if (cd.type == "network") {
+        int patchIdx = -1;
+        for (int pi = 0; pi < (int)m.sf.networkSetup.patches.size(); ++pi) {
+            if (m.sf.networkSetup.patches[static_cast<size_t>(pi)].name == cd.networkPatchName) {
+                patchIdx = pi; break;
+            }
+        }
+        cl.setCueNetworkPatch  (flatIdx, patchIdx);
+        cl.setCueNetworkCommand(flatIdx, cd.networkCommand);
+    }
+    if (cd.type == "midi") {
+        int patchIdx = -1;
+        for (int pi = 0; pi < (int)m.sf.midiSetup.patches.size(); ++pi) {
+            if (m.sf.midiSetup.patches[static_cast<size_t>(pi)].name == cd.midiPatchName) {
+                patchIdx = pi; break;
+            }
+        }
+        cl.setCueMidiPatch  (flatIdx, patchIdx);
+        cl.setCueMidiMessage(flatIdx, cd.midiMessageType,
+                             cd.midiChannel, cd.midiData1, cd.midiData2);
+    }
+    if (cd.type == "timecode") {
+        mcp::TcFps fps = mcp::TcFps::Fps25;
+        mcp::tcFpsFromString(cd.tcFps, fps);
+        mcp::TcPoint startTC, endTC;
+        mcp::tcFromString(cd.tcStartTC, startTC);
+        mcp::tcFromString(cd.tcEndTC,   endTC);
+        cl.setCueTcFps        (flatIdx, fps);
+        cl.setCueTcStart      (flatIdx, startTC);
+        cl.setCueTcEnd        (flatIdx, endTC);
+        cl.setCueTcType       (flatIdx, cd.tcType);
+        cl.setCueTcLtcChannel (flatIdx, cd.tcLtcChannel);
+        int midiPatchIdx = -1;
+        if (!cd.tcMidiPatchName.empty()) {
+            for (int pi = 0; pi < (int)m.sf.midiSetup.patches.size(); ++pi) {
+                if (m.sf.midiSetup.patches[static_cast<size_t>(pi)].name == cd.tcMidiPatchName) {
+                    midiPatchIdx = pi; break;
+                }
+            }
+        }
+        cl.setCueTcMidiPatch(flatIdx, midiPatchIdx);
+    }
+    if (cd.type == "audio") {
+        std::vector<mcp::Cue::TimeMarker> marks;
+        for (const auto& mk : cd.markers) marks.push_back({mk.time, mk.name});
+        cl.setCueMarkers   (flatIdx, marks);
+        cl.setCueSliceLoops(flatIdx, cd.sliceLoops);
+        for (int o = 0; o < (int)cd.outLevelDb.size(); ++o)
+            cl.setCueOutLevel(flatIdx, o, cd.outLevelDb[o]);
+        for (const auto& xe : cd.xpEntries)
+            cl.setCueXpoint(flatIdx, xe.s, xe.o, xe.db);
+    }
+    if (cd.type == "fade") {
+        cl.setCueFadeMasterTarget  (flatIdx, cd.fadeMasterEnabled, cd.fadeMasterTarget);
+        cl.setCueFadeOutTargetCount(flatIdx, static_cast<int>(cd.fadeOutLevels.size()));
+        for (const auto& fl : cd.fadeOutLevels)
+            cl.setCueFadeOutTarget(flatIdx, fl.ch, fl.enabled, fl.target);
+        for (const auto& fx : cd.fadeXpEntries)
+            cl.setCueFadeXpTarget(flatIdx, fx.s, fx.o, fx.enabled, fx.target);
+    }
+    cl.setCueMusicContext(flatIdx, buildMCFromData(cd.musicContext));
+}
+
+int insertEngineCue(AppModel& m, int listIdx, int flatIdx,
+                    mcp::ShowFile::CueData cd, std::string& err)
+{
+    if (listIdx < 0 || listIdx >= static_cast<int>(m.sf.cueLists.size())) return -1;
+
+    auto& cl      = m.cueListAt(listIdx);
+    const int n   = cl.cueCount();
+    if (flatIdx < 0 || flatIdx > n) flatIdx = n;   // negative = append
+
+    const int thisListId =
+        m.sf.cueLists[static_cast<size_t>(listIdx)].numericId;
+
+    // Groups need recursive child wiring — fall back to single-list rebuild.
+    if (cd.type == "group") {
+        sfInsertBefore(m.sf, listIdx, flatIdx, std::move(cd));
+        return rebuildCueList(m, listIdx, err) ? flatIdx : -1;
+    }
+
+    const auto base = std::filesystem::path(m.baseDir);
+
+    // Build cueNumber → flat engine index map (pre-insertion).
+    std::vector<std::pair<std::string, int>> numToIdx;
+    numToIdx.reserve(static_cast<size_t>(n));
+    for (int i = 0; i < n; ++i) {
+        const auto* c = cl.cueAt(i);
+        if (c && !c->cueNumber.empty())
+            numToIdx.push_back({c->cueNumber, i});
+    }
+
+    // Resolve target index.  After the insert, cues at flatIdx+ shift by +1.
+    auto resolveTarget = [&]() -> int {
+        const bool sameList = (cd.targetListId == -1 || cd.targetListId == thisListId);
+        if (!sameList) return -1;
+        int t = -1;
+        if (!cd.targetCueNumber.empty()) {
+            for (const auto& p : numToIdx)
+                if (p.first == cd.targetCueNumber) { t = p.second; break; }
+        }
+        if (t < 0) t = cd.target;
+        if (t >= 0 && t >= flatIdx) ++t;   // adjust for pending insertion
+        return t;
+    };
+    const int target = resolveTarget();
+
+    // Determine direct parent group (innermost ancestor of flatIdx).
+    // A group g is an ancestor when  g < flatIdx <= g + childCount.
+    // The innermost is the one with the highest g.
+    int parentFlatIdx = -1;
+    for (int g = 0; g < n; ++g) {
+        const auto* gc = cl.cueAt(g);
+        if (!gc || !gc->groupData) continue;
+        if (g < flatIdx && flatIdx <= g + gc->childCount)
+            parentFlatIdx = g;
+    }
+
+    // Build and insert into engine.
+    mcp::Cue cue = buildEngineCue(cd, base, target, parentFlatIdx);
+    cl.insertCueAt(flatIdx, std::move(cue));
+
+    // Apply setters (cueNumber, routing, timecode, fade targets, etc.).
+    applyCueSetters(cl, flatIdx, m, cd);
+
+    // Resolve mcSourceNumber (single-cue pass).
+    if (!cd.mcSourceNumber.empty()) {
+        for (const auto& p : numToIdx) {
+            if (p.first == cd.mcSourceNumber) {
+                const int srcIdx = (p.second >= flatIdx) ? p.second + 1 : p.second;
+                cl.setCueMCSource(flatIdx, srcIdx);
+                break;
+            }
+        }
+    }
+
+    // Resolve anchorMarkerCueNumber (audio cues).
+    if (cd.type == "audio") {
+        for (int mi = 0; mi < static_cast<int>(cd.markers.size()); ++mi) {
+            const auto& mkNum =
+                cd.markers[static_cast<size_t>(mi)].anchorMarkerCueNumber;
+            if (mkNum.empty()) continue;
+            for (int ci = 0; ci < cl.cueCount(); ++ci) {
+                const auto* cc = cl.cueAt(ci);
+                if (cc && cc->cueNumber == mkNum) {
+                    cl.setMarkerAnchor(flatIdx, mi, ci);
+                    break;
+                }
+            }
+        }
+    }
+
+    // Mirror the insertion in the SF tree.
+    sfInsertBefore(m.sf, listIdx, flatIdx, std::move(cd));
+
+    return flatIdx;
+}
+
+void removeEngineCue(AppModel& m, int listIdx, int flatIdx)
+{
+    if (listIdx < 0 || listIdx >= static_cast<int>(m.sf.cueLists.size())) return;
+    auto& cl = m.cueListAt(listIdx);
+    if (flatIdx < 0 || flatIdx >= cl.cueCount()) return;
+
+    // Engine removal: stops voices, fixes all index refs.
+    cl.removeCueAt(flatIdx);
+
+    // Mirror in SF.
+    sfRemoveAt(m.sf, listIdx, flatIdx);
+    sfFixTargetsAfterRemoval(m.sf, listIdx, flatIdx);
+}
+
+bool reloadEngineCueAudio(AppModel& m, int listIdx, int flatIdx)
+{
+    if (listIdx < 0 || listIdx >= static_cast<int>(m.sf.cueLists.size())) return false;
+    const auto* sfCue = sfCueAt(m.sf, listIdx, flatIdx);
+    if (!sfCue) return false;
+
+    // Build absolute path.
+    const auto base = std::filesystem::path(m.baseDir);
+    auto p = std::filesystem::path(sfCue->path);
+    if (p.is_relative()) p = base / p;
+
+    return m.cueListAt(listIdx).reloadCueAudio(flatIdx, p.string(), m.baseDir);
+}
+
+// ---------------------------------------------------------------------------
+// Multi-block engine move (no rebuild for pure up / pure down selections)
+
+void moveEngineCues(AppModel& m, int listIdx,
+                    const std::vector<int>& topLevel,
+                    const std::vector<int>& blockSizes,
+                    int dstRow, int adjustedDst)
+{
+    const int n = static_cast<int>(topLevel.size());
+    if (n == 0) return;
+
+    // Classify: are all blocks strictly below dstRow (moving down), or all at/above?
+    bool anyBelow = false, anyAtOrAbove = false;
+    for (int i = 0; i < n; ++i) {
+        if (topLevel[i] < dstRow) anyBelow = true;
+        else anyAtOrAbove = true;
+    }
+    if (anyBelow && anyAtOrAbove) {
+        // Mixed selection — rare edge case; fall back to rebuild.
+        std::string err;
+        rebuildAllCueLists(m, err);
+        return;
+    }
+
+    auto& cl = m.cueListAt(listIdx);
+
+    if (anyBelow) {
+        // Pure DOWN: process from highest to lowest original index.
+        // to_i = adjustedDst + sum(blockSizes[0..i]) (gives the exclusive-end destination
+        // in the original index space, which is what moveCueTo expects for to > from).
+        for (int i = n - 1; i >= 0; --i) {
+            int cumSum = 0;
+            for (int j = 0; j <= i; ++j) cumSum += blockSizes[j];
+            cl.moveCueTo(topLevel[i], adjustedDst + cumSum);
+        }
+    } else {
+        // Pure UP: process from lowest to highest original index.
+        // to_i = adjustedDst + sum(blockSizes[0..i-1]) (the start position, to < from).
+        for (int i = 0; i < n; ++i) {
+            int cumSum = 0;
+            for (int j = 0; j < i; ++j) cumSum += blockSizes[j];
+            cl.moveCueTo(topLevel[i], adjustedDst + cumSum);
+        }
+    }
+}
+
+// ---------------------------------------------------------------------------
+// Undo / redo helpers
+
+bool isStructuralChange(
+    const std::vector<mcp::ShowFile::CueListData>& a,
+    const std::vector<mcp::ShowFile::CueListData>& b)
+{
+    if (a.size() != b.size()) return true;
+
+    std::function<void(const std::vector<mcp::ShowFile::CueData>&,
+                       std::vector<std::string>&)> flatten;
+    flatten = [&](const std::vector<mcp::ShowFile::CueData>& cues,
+                  std::vector<std::string>& out) {
+        for (const auto& cd : cues) {
+            out.push_back(cd.type);
+            if (!cd.children.empty()) flatten(cd.children, out);
+        }
+    };
+
+    for (size_t i = 0; i < a.size(); ++i) {
+        std::vector<std::string> ta, tb;
+        flatten(a[i].cues, ta);
+        flatten(b[i].cues, tb);
+        if (ta.size() != tb.size()) return true;
+        for (size_t j = 0; j < ta.size(); ++j)
+            if (ta[j] != tb[j]) return true;
+    }
+    return false;
+}
+
+void reapplyParamsFromSF(AppModel& m)
+{
+    for (int li = 0; li < m.listCount(); ++li) {
+        auto& cl = m.cueListAt(li);
+        const int n = cl.cueCount();
+        const int thisListId = m.sf.cueLists[static_cast<size_t>(li)].numericId;
+
+        // Build cueNumber → flatIdx map from engine.
+        std::vector<std::pair<std::string, int>> numToIdx;
+        numToIdx.reserve(static_cast<size_t>(n));
+        for (int i = 0; i < n; ++i) {
+            const auto* c = cl.cueAt(i);
+            if (c && !c->cueNumber.empty())
+                numToIdx.push_back({c->cueNumber, i});
+        }
+
+        for (int fi = 0; fi < n; ++fi) {
+            const auto* cdp = sfCueAt(m.sf, li, fi);
+            if (!cdp) continue;
+            const auto& cd = *cdp;
+
+            // Resolve target index.
+            const bool sameList = (cd.targetListId == -1 || cd.targetListId == thisListId);
+            int t = -1;
+            if (sameList) {
+                if (!cd.targetCueNumber.empty()) {
+                    for (const auto& p : numToIdx)
+                        if (p.first == cd.targetCueNumber) { t = p.second; break; }
+                }
+                if (t < 0) t = cd.target;
+            }
+            cl.setCueTarget(fi, t);
+
+            // Re-apply all parameter setters.
+            applyCueSetters(cl, fi, m, cd);
+
+            // Resolve mcSourceNumber.
+            if (!cd.mcSourceNumber.empty()) {
+                for (const auto& p : numToIdx) {
+                    if (p.first == cd.mcSourceNumber) {
+                        cl.setCueMCSource(fi, p.second);
+                        break;
+                    }
+                }
+            }
+
+            // Resolve anchorMarkerCueNumber for audio cues.
+            if (cd.type == "audio") {
+                for (int mi = 0; mi < static_cast<int>(cd.markers.size()); ++mi) {
+                    const auto& mkNum =
+                        cd.markers[static_cast<size_t>(mi)].anchorMarkerCueNumber;
+                    if (mkNum.empty()) continue;
+                    for (int ci = 0; ci < cl.cueCount(); ++ci) {
+                        const auto* cc = cl.cueAt(ci);
+                        if (cc && cc->cueNumber == mkNum) {
+                            cl.setMarkerAnchor(fi, mi, ci);
+                            break;
+                        }
+                    }
+                }
+            }
+        }
+    }
+}
+
+void applyChannelMap(AppModel& m) {
+    const auto& setup = m.sf.audioSetup;
+    const bool isMultiDevice = !setup.devices.empty();
+
+    int numPhys = 0;
+    if (isMultiDevice) {
+        for (const auto& d : setup.devices) numPhys += d.channelCount;
+    } else {
+        numPhys = m.engineOk ? m.engine.channels() : 2;
+    }
+
+    // Build the ChannelMap exactly as rebuildCueList does but without clear().
+    mcp::ChannelMap cm;
+    cm.numPhys = numPhys;
+    cm.numCh   = static_cast<int>(setup.channels.size());
+
+    if (isMultiDevice) {
+        const int numDev = static_cast<int>(setup.devices.size());
+        cm.devicePhysCount.resize(static_cast<size_t>(numDev), 0);
+        cm.physDevice.resize(static_cast<size_t>(numPhys), 0);
+        cm.physLocalCh.resize(static_cast<size_t>(numPhys), 0);
+        int gp = 0;
+        for (int d = 0; d < numDev; ++d) {
+            const int cnt = setup.devices[static_cast<size_t>(d)].channelCount;
+            cm.devicePhysCount[static_cast<size_t>(d)] = cnt;
+            for (int lp = 0; lp < cnt; ++lp, ++gp) {
+                cm.physDevice[static_cast<size_t>(gp)]  = d;
+                cm.physLocalCh[static_cast<size_t>(gp)] = lp;
+            }
+        }
+    }
+
+    if (cm.numCh == 0) {
+        cm.numCh = numPhys;
+        cm.fold.assign(static_cast<size_t>(numPhys * numPhys), 0.0f);
+        for (int i = 0; i < numPhys; ++i)
+            cm.fold[static_cast<size_t>(i * numPhys + i)] = 1.0f;
+        cm.xpLinear = cm.fold;
+        cm.liveMasterGainDb.assign(static_cast<size_t>(numPhys), 0.0f);
+        cm.liveMute.assign(static_cast<size_t>(numPhys), false);
+        cm.stereoSlave.assign(static_cast<size_t>(numPhys), -1);
+        cm.primaryPhys.resize(static_cast<size_t>(numPhys));
+        for (int i = 0; i < numPhys; ++i) cm.primaryPhys[static_cast<size_t>(i)] = i;
+    } else {
+        cm.fold.assign(static_cast<size_t>(cm.numCh * numPhys), 0.0f);
+        for (int ch = 0; ch < cm.numCh && ch < numPhys; ++ch)
+            cm.fold[static_cast<size_t>(ch * numPhys + ch)] = 1.0f;
+        for (const auto& xe : setup.xpEntries) {
+            if (xe.ch >= 0 && xe.ch < cm.numCh && xe.out >= 0 && xe.out < numPhys)
+                cm.fold[static_cast<size_t>(xe.ch * numPhys + xe.out)] =
+                    (xe.db <= -144.0f) ? 0.0f : mcp::lut::dBToLinear(xe.db);
+        }
+        cm.xpLinear = cm.fold;
+        cm.liveMasterGainDb.resize(static_cast<size_t>(cm.numCh), 0.0f);
+        cm.liveMute.resize(static_cast<size_t>(cm.numCh), false);
+        cm.stereoSlave.assign(static_cast<size_t>(cm.numCh), -1);
+        for (int ch = 0; ch < cm.numCh; ++ch) {
+            const auto& cfg = setup.channels[static_cast<size_t>(ch)];
+            cm.liveMasterGainDb[static_cast<size_t>(ch)] = cfg.masterGainDb;
+            cm.liveMute[static_cast<size_t>(ch)] = cfg.mute;
+            if (cfg.linkedStereo && ch + 1 < cm.numCh)
+                cm.stereoSlave[static_cast<size_t>(ch)] = ch + 1;
+            float g = cfg.mute ? 0.0f : mcp::lut::dBToLinear(cfg.masterGainDb);
+            for (int p = 0; p < numPhys; ++p)
+                cm.fold[static_cast<size_t>(ch * numPhys + p)] *= g;
+        }
+        cm.primaryPhys.resize(static_cast<size_t>(cm.numCh), 0);
+        for (int ch = 0; ch < cm.numCh; ++ch) {
+            float maxG = -1.0f;
+            int   maxP = (ch < numPhys) ? ch : 0;
+            for (int p = 0; p < numPhys; ++p) {
+                float g = cm.fold[static_cast<size_t>(ch * numPhys + p)];
+                if (g > maxG) { maxG = g; maxP = p; }
+            }
+            cm.primaryPhys[static_cast<size_t>(ch)] = maxP;
+        }
+    }
+
+    // Push the same map to every active list.
+    for (int li = 0; li < static_cast<int>(m.sf.cueLists.size()); ++li)
+        m.cueListAt(li).setChannelMap(cm);   // copy — each list gets its own
 }
 
 } // namespace ShowHelpers

@@ -2,6 +2,7 @@
 #include "AppModel.h"
 #include "CollectDialog.h"
 #include "MissingMediaDialog.h"
+#include "MixConsoleDialog.h"
 #include "CueListPanel.h"
 #include "ProjectStatusDialog.h"
 #include "ScriptletLibraryDialog.h"
@@ -191,6 +192,9 @@ MainWindow::MainWindow(AppModel* model, QWidget* parent)
         if (!m_model->engineOk)
             showToast("Engine error: " + QString::fromStdString(m_model->engineError));
     });
+    connect(m_model, &AppModel::mixStateChanged, this, [this]() {
+        if (m_mixConsole) m_mixConsole->refresh();
+    });
 
     connect(m_cueTable,  &CueTableView::rowSelected,    this, &MainWindow::onRowSelected);
     connect(m_cueTable,  &CueTableView::cueListModified, this, &MainWindow::onCueListModified);
@@ -307,9 +311,9 @@ void MainWindow::buildIconBar() {
                 cd.type      = "group";
                 cd.groupMode = "timeline";
                 cd.cueNumber = ShowHelpers::nextCueNumber(m_model->sf);
-                ShowHelpers::sfInsertBefore(m_model->sf, m_model->activeListIdx(), -1, std::move(cd));
                 std::string err;
-                ShowHelpers::rebuildAllCueLists(*m_model, err);
+                ShowHelpers::insertEngineCue(*m_model, m_model->activeListIdx(), -1,
+                                             std::move(cd), err);
                 onCueListModified();
                 m_cueTable->refresh();
                 m_cueTable->selectRow(m_model->cues().cueCount() - 1);
@@ -343,9 +347,8 @@ void MainWindow::buildIconBar() {
             if (sc && sc->type == mcp::CueType::Group)
                 ins = selRow + 1 + sc->childCount;
         }
-        ShowHelpers::sfInsertBefore(m_model->sf, m_model->activeListIdx(), ins, std::move(cd));
         std::string err;
-        ShowHelpers::rebuildAllCueLists(*m_model, err);
+        ShowHelpers::insertEngineCue(*m_model, m_model->activeListIdx(), ins, std::move(cd), err);
         const int newRow = (ins >= 0) ? ins : m_model->cues().cueCount() - 1;
         m_model->cues().setSelectedIndex(newRow);
         onCueListModified();
@@ -376,6 +379,9 @@ void MainWindow::buildIconBar() {
         { "⊹",  "Add Network cue",        "network"  },
         { "♪",  "Add MIDI cue",           "midi"     },
         { "TC", "Add Timecode cue",       "timecode" },
+        { nullptr, nullptr, nullptr },
+        { "📷", "Add Snapshot cue",       "snapshot"    },
+        { "∿",  "Add Automation cue",     "automation"  },
     };
     for (const auto& b : cueBtns) {
         if (!b.type) {
@@ -508,6 +514,13 @@ void MainWindow::buildMenuBar() {
 
     auto* showMenu = mb->addMenu("&Show");
     showMenu->addAction("&Settings…", this, &MainWindow::onOpenSettings);
+    showMenu->addAction("&Mix Console…", this, [this]() {
+        if (!m_mixConsole)
+            m_mixConsole = new MixConsoleDialog(m_model, this);
+        m_mixConsole->show();
+        m_mixConsole->raise();
+        m_mixConsole->activateWindow();
+    });
     showMenu->addAction("Show &Information…", this, [this]() {
         if (!m_showInfoDialog)
             m_showInfoDialog = new ShowInfoDialog(m_model, this);
@@ -617,6 +630,18 @@ void MainWindow::onTick() {
 void MainWindow::onNewShow() {
     if (!confirmDirty()) return;
     m_model->sf = mcp::ShowFile::empty();
+
+    // Populate default logical channels from the engine so MixConsole has strips.
+    {
+        const int n = m_model->engineOk ? m_model->engine.channels() : 2;
+        m_model->sf.audioSetup.channels.clear();
+        for (int i = 0; i < n; ++i) {
+            mcp::ShowFile::AudioSetup::Channel ch;
+            ch.name = "Ch " + std::to_string(i + 1);
+            m_model->sf.audioSetup.channels.push_back(ch);
+        }
+    }
+
     m_model->showPath.clear();
     m_model->baseDir.clear();
     m_model->dirty = false;
@@ -624,6 +649,7 @@ void MainWindow::onNewShow() {
     ShowHelpers::normalizeListRefs(m_model->sf);
     std::string err;
     ShowHelpers::rebuildAllCueLists(*m_model, err);
+    if (m_mixConsole) m_mixConsole->refresh();
     m_cueTable->refresh();
     m_inspector->setCueIndex(-1);
     updateCueInfo();
@@ -687,8 +713,11 @@ void MainWindow::checkMissingMedia() {
 
 void MainWindow::onOpenSettings() {
     SettingsDialog dlg(m_model, this);
-    if (dlg.exec() != QDialog::Accepted) return;
-    m_model->sf.audioSetup      = dlg.audioResult();
+    const bool accepted = (dlg.exec() == QDialog::Accepted);
+    if (m_mixConsole) m_mixConsole->refresh();   // sync MixConsole regardless of accept/cancel
+    if (!accepted) return;
+    // sf.audioSetup is already up-to-date (SettingsDialog works on it directly).
+    // Only non-audio settings still use local copies returned via result accessors.
     m_model->sf.networkSetup    = dlg.networkResult();
     m_model->sf.midiSetup       = dlg.midiResult();
     m_model->sf.oscServer       = dlg.oscResult();
@@ -735,12 +764,17 @@ void MainWindow::onCueListModified() {
 
 void MainWindow::onUndo() {
     if (!m_model->canUndo()) return;
+    const bool structural =
+        ShowHelpers::isStructuralChange(m_model->sf.cueLists, m_model->undoStack.back());
     if (!m_model->sf.cueLists.empty())
         m_model->redoStack.push_back(m_model->sf.cueLists);
     m_model->sf.cueLists = std::move(m_model->undoStack.back());
     m_model->undoStack.pop_back();
     std::string err;
-    ShowHelpers::rebuildAllCueLists(*m_model, err);
+    if (structural)
+        ShowHelpers::rebuildAllCueLists(*m_model, err);
+    else
+        ShowHelpers::reapplyParamsFromSF(*m_model);
     m_model->dirty = true;
     emit m_model->dirtyChanged(true);
     m_cueTable->refresh();
@@ -757,12 +791,17 @@ void MainWindow::onUndo() {
 
 void MainWindow::onRedo() {
     if (!m_model->canRedo()) return;
+    const bool structural =
+        ShowHelpers::isStructuralChange(m_model->sf.cueLists, m_model->redoStack.back());
     if (!m_model->sf.cueLists.empty())
         m_model->undoStack.push_back(m_model->sf.cueLists);
     m_model->sf.cueLists = std::move(m_model->redoStack.back());
     m_model->redoStack.pop_back();
     std::string err;
-    ShowHelpers::rebuildAllCueLists(*m_model, err);
+    if (structural)
+        ShowHelpers::rebuildAllCueLists(*m_model, err);
+    else
+        ShowHelpers::reapplyParamsFromSF(*m_model);
     m_model->dirty = true;
     emit m_model->dirtyChanged(true);
     m_cueTable->refresh();
@@ -826,11 +865,12 @@ void MainWindow::onRenumberCues() {
             base = cd->cueNumber;
         }
 
-        cd->cueNumber = pfx.toStdString() + base + sfx.toStdString();
+        const std::string newNum = pfx.toStdString() + base + sfx.toStdString();
+        cd->cueNumber = newNum;
+        // Push directly to engine — no rebuild needed for a cue number change.
+        m_model->cues().setCueCueNumber(row, newNum);
     }
 
-    std::string err;
-    ShowHelpers::rebuildAllCueLists(*m_model, err);
     onCueListModified();
     m_cueTable->refresh();
 }
@@ -1064,6 +1104,8 @@ void MainWindow::updateCueInfo() {
             case mcp::CueType::Goto:         detail += "Goto";     break;
             case mcp::CueType::Memo:         detail += "Memo";     break;
             case mcp::CueType::Scriptlet:    detail += "Script";   break;
+            case mcp::CueType::Snapshot:     detail += "Snapshot";   break;
+            case mcp::CueType::Automation:   detail += "Automation"; break;
             case mcp::CueType::Group:  break;  // handled above
         }
     }

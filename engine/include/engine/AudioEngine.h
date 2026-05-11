@@ -92,10 +92,12 @@ public:
     // Schedule a streaming voice backed by any IAudioSource.
     // The raw pointer must remain valid (kept alive externally) until
     // isVoiceActive(slot) returns false.
-    // `deviceIndex` — which stream (device) renders this voice; 0 = master/default.
+    // `deviceIndex`        — which stream (device) renders this voice; 0 = master/default.
+    // `bypassChannelFold`  — when true, voice mixes directly to physical out[] bypassing
+    //                        the channel bus (use for LTC and other special-purpose voices).
     int scheduleStreamingVoice(IAudioSource* reader, int64_t totalFrames,
                                int voiceChannels, int tag = -1, float gain = 1.0f,
-                               int deviceIndex = 0);
+                               int deviceIndex = 0, bool bypassChannelFold = false);
 
     // Update the gain of a running voice. Safe to call from the main thread
     // while the audio thread is running (atomic store, no locking).
@@ -131,7 +133,15 @@ public:
 
     // --- Output DSP ---------------------------------------------------------
 
-    // DSP applied per physical output channel, post-mix, in the audio callback.
+    // DSP applied per logical channel, post-chanBuf-mix, pre-fold, in the audio callback.
+    // `config[i]` applies to logical channel i.
+    struct ChannelDsp {
+        bool phaseInvert{false};
+        int  delaySamples{0};    // 0 = no delay; clamped to kMaxDelaySamples-1
+    };
+    void setChannelDsp(std::vector<ChannelDsp> config);
+
+    // DSP applied per physical output channel, post-fold, in the audio callback.
     // `config[i]` applies to global output channel i (sequential across streams).
     // Can be called at any time; takes effect within one callback buffer.
     struct OutputDsp {
@@ -139,6 +149,21 @@ public:
         int  delaySamples{0};    // 0 = no delay; clamped to kMaxDelaySamples-1
     };
     void setOutputDsp(std::vector<OutputDsp> config);
+
+    // Push a channel-fold matrix to one device stream.
+    // fold[ch * physCh + p] = linear gain from logical channel ch to device-local physical output p.
+    // numCh must equal the number of logical channels in the channel map.
+    // Allocates/grows the per-device chanBuf as needed (main thread only).
+    void setDeviceChannelFold(int deviceIdx, const float* fold, int numCh, int physCh);
+
+    // Poll and reset per-logical-channel peak amplitudes measured from the
+    // channel bus (chanBuf), pre-fold.  Returns one entry per logical channel
+    // (same count as numCh passed to setDeviceChannelFold).
+    // Returns empty vector if the channel bus is not set up.
+    std::vector<float> takeChannelPeaks();
+
+    // Maximum number of logical channels supported for peak metering.
+    static constexpr int kMaxChannels = 256;
 
     // Maximum supported delay in samples (power of 2 for fast ring indexing).
     static constexpr int kMaxDelaySamples = 131072;  // ~2.73 s at 48 kHz

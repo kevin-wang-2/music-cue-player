@@ -9,6 +9,7 @@ class CueListPanel;
 class CueTableView;
 class InspectorWidget;
 class MissingMediaDialog;
+class MixConsoleDialog;
 class ProjectStatusDialog;
 class ScriptletLibraryDialog;
 class ShowInfoDialog;
@@ -77,6 +78,7 @@ private:
     InspectorWidget*      m_inspector{nullptr};
     CueListPanel*         m_listPanel{nullptr};
     MissingMediaDialog*     m_missingMediaDialog{nullptr};
+    MixConsoleDialog*       m_mixConsole{nullptr};
     ProjectStatusDialog*    m_statusDialog{nullptr};
     ScriptletLibraryDialog* m_libraryDialog{nullptr};
     ShowInfoDialog*         m_showInfoDialog{nullptr};

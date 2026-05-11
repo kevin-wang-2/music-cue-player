@@ -19,6 +19,7 @@ AppModel::AppModel(QObject* parent)
     , oscServer(this)
     , scriptlet(std::make_unique<ScriptletEngine>())
 {
+    snapshots.init(sf);
     // Create one engine CueList (more are added in syncListCount() after load).
     m_cueLists.push_back(std::make_unique<mcp::CueList>(engine, scheduler));
     connect(&midiIn,   &MidiInputManager::midiReceived,
@@ -206,13 +207,11 @@ AppModel::AppModel(QObject* parent)
         cd.type      = type;
         cd.cueNumber = number.empty() ? ShowHelpers::nextCueNumber(sf) : number;
         cd.name      = name;
-        const int beforeIdx = m_cueLists[li]->cueCount();
-        ShowHelpers::sfInsertBefore(sf, li, beforeIdx, std::move(cd));
         std::string err;
-        ShowHelpers::rebuildAllCueLists(*this, err);
+        ShowHelpers::insertEngineCue(*this, li, -1 /*append*/, std::move(cd), err);
         dirty = true;
         emit cueListChanged();
-        const int newIdx = m_cueLists[li]->cueCount() - 1;
+        const int newIdx = m_cueLists[static_cast<size_t>(li)]->cueCount() - 1;
         scriptlet->fireCueInsertedEvent(newIdx);
         return newIdx;
     });
@@ -222,15 +221,14 @@ AppModel::AppModel(QObject* parent)
                                                           const std::string& number,
                                                           const std::string& name) -> int {
         const int li = findLi(listId);
-        if (li < 0 || refIdx < 0 || refIdx >= m_cueLists[li]->cueCount()) return -1;
+        if (li < 0 || refIdx < 0 || refIdx >= m_cueLists[static_cast<size_t>(li)]->cueCount()) return -1;
         pushUndo();
         mcp::ShowFile::CueData cd;
         cd.type      = type;
         cd.cueNumber = number.empty() ? ShowHelpers::nextCueNumber(sf) : number;
         cd.name      = name;
-        ShowHelpers::sfInsertBefore(sf, li, refIdx + 1, std::move(cd));
         std::string err;
-        ShowHelpers::rebuildAllCueLists(*this, err);
+        ShowHelpers::insertEngineCue(*this, li, refIdx + 1, std::move(cd), err);
         dirty = true;
         emit cueListChanged();
         scriptlet->fireCueInsertedEvent(refIdx + 1);
@@ -240,15 +238,24 @@ AppModel::AppModel(QObject* parent)
     scriptlet->setCueListMoveCallback([this, findLi](int listId, int refIdx, int cueIdx, bool toGroup) -> bool {
         const int li = findLi(listId);
         if (li < 0) return false;
-        const int cnt = m_cueLists[li]->cueCount();
+        auto& cl = *m_cueLists[static_cast<size_t>(li)];
+        const int cnt = cl.cueCount();
         if (cueIdx < 0 || cueIdx >= cnt || refIdx < 0 || refIdx >= cnt || refIdx == cueIdx) return false;
         pushUndo();
+        const auto* ec = cl.cueAt(cueIdx);
+        const int blockSize = ec ? 1 + ec->childCount : 1;
         mcp::ShowFile::CueData cd = ShowHelpers::sfRemoveAt(sf, li, cueIdx);
         const int adjustedRef = (refIdx > cueIdx) ? refIdx - 1 : refIdx;
-        if (toGroup) ShowHelpers::sfAppendToGroup(sf, li, adjustedRef, std::move(cd));
-        else         ShowHelpers::sfInsertBefore(sf, li, adjustedRef + 1, std::move(cd));
-        std::string err;
-        ShowHelpers::rebuildAllCueLists(*this, err);
+        if (toGroup) {
+            ShowHelpers::sfAppendToGroup(sf, li, adjustedRef, std::move(cd));
+            std::string err;
+            ShowHelpers::rebuildCueList(*this, li, err);
+        } else {
+            ShowHelpers::sfInsertBefore(sf, li, adjustedRef + 1, std::move(cd));
+            const int dstRow = refIdx + 1;
+            ShowHelpers::sfFixTargetsForReorder(sf, li, cueIdx, blockSize, dstRow);
+            cl.moveCueTo(cueIdx, dstRow);
+        }
         dirty = true;
         emit cueListChanged();
         return true;
@@ -256,12 +263,9 @@ AppModel::AppModel(QObject* parent)
 
     scriptlet->setCueListDeleteCallback([this, findLi](int listId, int idx) -> bool {
         const int li = findLi(listId);
-        if (li < 0 || idx < 0 || idx >= m_cueLists[li]->cueCount()) return false;
+        if (li < 0 || idx < 0 || idx >= m_cueLists[static_cast<size_t>(li)]->cueCount()) return false;
         pushUndo();
-        ShowHelpers::sfRemoveAt(sf, li, idx);
-        ShowHelpers::sfFixTargetsAfterRemoval(sf, li, idx);
-        std::string err;
-        ShowHelpers::rebuildAllCueLists(*this, err);
+        ShowHelpers::removeEngineCue(*this, li, idx);
         dirty = true;
         emit cueListChanged();
         return true;
@@ -276,8 +280,7 @@ AppModel::AppModel(QObject* parent)
         cld.numericId = sf.nextListId();
         const int newId = cld.numericId;
         sf.cueLists.push_back(std::move(cld));
-        std::string err;
-        ShowHelpers::rebuildAllCueLists(*this, err);
+        insertEngineList(static_cast<int>(sf.cueLists.size()) - 1);
         dirty = true;
         emit dirtyChanged(true);
         emit cueListsChanged();
@@ -293,8 +296,7 @@ AppModel::AppModel(QObject* parent)
         cld.numericId = sf.nextListId();
         const int newId = cld.numericId;
         sf.cueLists.insert(sf.cueLists.begin() + refLi + 1, std::move(cld));
-        std::string err;
-        ShowHelpers::rebuildAllCueLists(*this, err);
+        insertEngineList(refLi + 1);
         dirty = true;
         emit dirtyChanged(true);
         emit cueListsChanged();
@@ -306,10 +308,8 @@ AppModel::AppModel(QObject* parent)
         if (li < 0) return false;  // not found or already deleted
         if (sf.cueLists.size() <= 1) return false;  // must keep at least one list
         pushUndo();
-        m_cueLists[li]->panic();
         sf.cueLists.erase(sf.cueLists.begin() + li);
-        std::string err;
-        ShowHelpers::rebuildAllCueLists(*this, err);
+        removeEngineList(li);
         const int newActive = std::min(m_activeListIdx, (int)sf.cueLists.size() - 1);
         setActiveList(newActive);
         dirty = true;
@@ -440,6 +440,24 @@ void AppModel::syncListCount() {
         m_activeListIdx = std::max(0, static_cast<int>(m_cueLists.size()) - 1);
 }
 
+void AppModel::insertEngineList(int atIdx) {
+    const int n = static_cast<int>(m_cueLists.size());
+    if (atIdx < 0) atIdx = 0;
+    if (atIdx > n) atIdx = n;
+    m_cueLists.insert(m_cueLists.begin() + atIdx,
+                      std::make_unique<mcp::CueList>(engine, scheduler));
+    if (m_activeListIdx >= static_cast<int>(m_cueLists.size()))
+        m_activeListIdx = std::max(0, static_cast<int>(m_cueLists.size()) - 1);
+}
+
+void AppModel::removeEngineList(int atIdx) {
+    if (atIdx < 0 || atIdx >= static_cast<int>(m_cueLists.size())) return;
+    m_cueLists[static_cast<size_t>(atIdx)]->panic();
+    m_cueLists.erase(m_cueLists.begin() + atIdx);
+    if (m_activeListIdx >= static_cast<int>(m_cueLists.size()))
+        m_activeListIdx = std::max(0, static_cast<int>(m_cueLists.size()) - 1);
+}
+
 void AppModel::setActiveList(int idx) {
     if (idx < 0 || idx >= static_cast<int>(m_cueLists.size())) return;
     if (idx == m_activeListIdx) return;
@@ -482,6 +500,63 @@ void AppModel::tick() {
     const bool isActive = engine.activeVoiceCount() > 0;
     if (wasActive != isActive)
         emit playbackStateChanged();
+
+    // Drain snapshot cues from all lists and recall.
+    bool mixChanged = false;
+    for (auto& cl : m_cueLists) {
+        for (const auto& [cueIdx, snapId] : cl->drainPendingSnapshots()) {
+            if (snapId >= 0 && snapshots.recallById(snapId)) {
+                applyMixing();
+                dirty = true;
+                mixChanged = true;
+            }
+        }
+    }
+
+    // Sync sf.audioSetup from automation updates produced by scheduler callbacks.
+    // Audio is already updated at scheduler precision; we only update sf for UI display.
+    for (auto& cl : m_cueLists) {
+        for (const auto& [path, value] : cl->drainAutomationUpdates()) {
+            auto& as = sf.audioSetup;
+            int ch = -1;
+            if (path.size() > 7 && path.compare(0, 7, "/mixer/") == 0) {
+                size_t slash = path.find('/', 7);
+                try { ch = std::stoi(path.substr(7, slash == std::string::npos
+                                                      ? std::string::npos : slash - 7)); }
+                catch (...) { ch = -1; }
+            }
+            if (ch < 0 || ch >= (int)as.channels.size()) continue;
+            auto& chan = as.channels[static_cast<size_t>(ch)];
+            if (path.find("/fader") != std::string::npos) {
+                chan.masterGainDb = static_cast<float>(value);
+            } else if (path.find("/mute") != std::string::npos) {
+                chan.mute = (value >= 0.5);
+            } else if (path.find("/polarity") != std::string::npos) {
+                chan.phaseInvert = (value >= 0.5);
+            } else if (path.find("/crosspoint/") != std::string::npos) {
+                const std::string mid = "/crosspoint/";
+                const auto it2 = path.find(mid);
+                int out = -1;
+                try { out = std::stoi(path.substr(it2 + mid.size())); } catch (...) {}
+                if (out >= 0) {
+                    bool found = false;
+                    for (auto& xe : as.xpEntries) {
+                        if (xe.ch == ch && xe.out == out) {
+                            xe.db = static_cast<float>(value); found = true; break;
+                        }
+                    }
+                    if (!found)
+                        as.xpEntries.push_back({ch, out, static_cast<float>(value)});
+                }
+            }
+            mixChanged = true;
+            dirty = true;
+        }
+    }
+    if (mixChanged) {
+        // Do NOT call applyMixing() here — audio was already updated by the scheduler.
+        emit mixStateChanged();
+    }
 
     // Drain scriptlets from ALL lists into a local buffer BEFORE running any of them.
     // Running a scriptlet can invoke insert/delete-cue-list callbacks which call
@@ -558,6 +633,19 @@ void AppModel::tick() {
     }
 }
 
+void AppModel::storeSnapshot()    { snapshots.store();    dirty = true; }
+void AppModel::storeSnapshotAll() { snapshots.storeAll(); dirty = true; }
+
+void AppModel::recallSnapshot()
+{
+    if (snapshots.recall()) { applyMixing(); dirty = true; emit mixStateChanged(); }
+}
+
+void AppModel::recallSnapshotById(int id)
+{
+    if (snapshots.recallById(id)) { applyMixing(); dirty = true; emit mixStateChanged(); }
+}
+
 void AppModel::applyOscSettings() {
     oscServer.applySettings(sf.oscServer);
 }
@@ -575,49 +663,39 @@ void AppModel::applyOutputDsp() {
     }
     nPhys = std::max(nPhys, static_cast<int>(sf.audioSetup.physOutDsp.size()));
 
-    std::vector<mcp::AudioEngine::OutputDsp> config(static_cast<size_t>(nPhys));
-
-    // Effective crosspoint gain for (ch → out): uses explicit xpEntries, falls back to diagonal default.
-    static constexpr float kSilent = -143.0f;
-    auto xpGain = [&](int ch, int out) -> float {
-        for (const auto& xe : sf.audioSetup.xpEntries)
-            if (xe.ch == ch && xe.out == out) return xe.db;
-        return (ch == out) ? 0.0f : -144.0f;
-    };
-
-    // For each physical output, accumulate channel DSP from all channels routed to it.
-    for (int p = 0; p < nPhys; ++p) {
-        bool first = true;
+    // Channel DSP: phase inversion and delay applied per logical channel, pre-fold.
+    {
+        std::vector<mcp::AudioEngine::ChannelDsp> chanConfig(static_cast<size_t>(nCh));
         for (int ch = 0; ch < nCh; ++ch) {
-            if (xpGain(ch, p) <= kSilent) continue;
             const auto& c = sf.audioSetup.channels[static_cast<size_t>(ch)];
-            const int delay = c.delayInSamples
+            chanConfig[static_cast<size_t>(ch)].phaseInvert  = c.phaseInvert;
+            chanConfig[static_cast<size_t>(ch)].delaySamples = c.delayInSamples
                 ? c.delaySamples
                 : static_cast<int>(c.delayMs * sr / 1000.0 + 0.5);
-            if (first) {
-                config[static_cast<size_t>(p)].phaseInvert  = c.phaseInvert;
-                config[static_cast<size_t>(p)].delaySamples = delay;
-                first = false;
-            } else {
-                config[static_cast<size_t>(p)].phaseInvert ^= c.phaseInvert;
-                config[static_cast<size_t>(p)].delaySamples += delay;
-            }
         }
+        engine.setChannelDsp(std::move(chanConfig));
     }
 
-    // Merge physOut DSP on top (XOR phase, add delay).
-    const int nPhysDsp = static_cast<int>(sf.audioSetup.physOutDsp.size());
-    for (int p = 0; p < nPhys && p < nPhysDsp; ++p) {
-        const auto& pd = sf.audioSetup.physOutDsp[static_cast<size_t>(p)];
-        config[static_cast<size_t>(p)].phaseInvert ^= pd.phaseInvert;
-        const int pDelay = pd.delayInSamples
-            ? pd.delaySamples
-            : static_cast<int>(pd.delayMs * sr / 1000.0 + 0.5);
-        config[static_cast<size_t>(p)].delaySamples += pDelay;
+    // Physical output DSP: phase inversion and delay applied per output, post-fold.
+    {
+        std::vector<mcp::AudioEngine::OutputDsp> config(static_cast<size_t>(nPhys));
+        const int nPhysDsp = static_cast<int>(sf.audioSetup.physOutDsp.size());
+        for (int p = 0; p < nPhys && p < nPhysDsp; ++p) {
+            const auto& pd = sf.audioSetup.physOutDsp[static_cast<size_t>(p)];
+            config[static_cast<size_t>(p)].phaseInvert  = pd.phaseInvert;
+            config[static_cast<size_t>(p)].delaySamples = pd.delayInSamples
+                ? pd.delaySamples
+                : static_cast<int>(pd.delayMs * sr / 1000.0 + 0.5);
+        }
+        engine.setOutputDsp(std::move(config));
     }
-
-    engine.setOutputDsp(std::move(config));
 }
+
+void AppModel::applyMixing() {
+    ShowHelpers::applyChannelMap(*this);
+    applyOutputDsp();
+}
+
 
 void AppModel::applyMidiInput() {
     midiIn.openAll();

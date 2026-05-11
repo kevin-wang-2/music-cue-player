@@ -79,6 +79,8 @@ static TypeInfo typeInfoFor(mcp::CueType t) {
         case mcp::CueType::Goto:         return {"→",  {0x44, 0xdd, 0x88}};
         case mcp::CueType::Memo:         return {"✎",  {0x88, 0x88, 0x88}};
         case mcp::CueType::Scriptlet:    return {"λ",  {0xff, 0xaa, 0x44}};
+        case mcp::CueType::Snapshot:     return {"📷", {0x44, 0xbb, 0xee}};
+        case mcp::CueType::Automation:   return {"∿",  {0xff, 0x77, 0xbb}};
     }
     return {"?", {0x88, 0x88, 0x88}};
 }
@@ -330,6 +332,8 @@ QString CueTableView::typeLabel(mcp::CueType t) const {
         case mcp::CueType::Goto:         return "Goto";
         case mcp::CueType::Memo:         return "Memo";
         case mcp::CueType::Scriptlet:    return "Script";
+        case mcp::CueType::Snapshot:     return "Snapshot";
+        case mcp::CueType::Automation:   return "Auto";
     }
     return "?";
 }
@@ -661,13 +665,12 @@ void CueTableView::keyPressEvent(QKeyEvent* ev) {
             if (!m_model->clipboard.empty() && !m_model->sf.cueLists.empty()) {
                 m_model->pushUndo();
                 int ins = (m_selRow >= 0) ? m_selRow + 1 : m_model->cues().cueCount();
+                std::string err;
                 for (auto cd : m_model->clipboard) {
                     cd.cueNumber = ShowHelpers::nextCueNumber(m_model->sf);
-                    ShowHelpers::sfInsertBefore(m_model->sf, m_model->activeListIdx(), ins, cd);
+                    ShowHelpers::insertEngineCue(*m_model, m_model->activeListIdx(), ins, std::move(cd), err);
                     ++ins;
                 }
-                std::string err;
-                ShowHelpers::rebuildAllCueLists(*m_model, err);
                 m_selRow = ins - 1;
                 emit rowSelected(m_selRow);
                 emit cueListModified();
@@ -958,8 +961,7 @@ void CueTableView::dropEvent(QDropEvent* ev) {
                         if (srcRow < candidateGroup) adjGroup -= blocksRm;
                         ShowHelpers::sfAppendToGroup(m_model->sf, m_model->activeListIdx(), adjGroup, std::move(cd));
                         std::string err;
-                        ShowHelpers::rebuildAllCueLists(*m_model, err);
-                        ShowHelpers::syncAllSfFromCues(*m_model);
+                        ShowHelpers::rebuildCueList(*m_model, m_model->activeListIdx(), err);
                         const mcp::Cue* grp = m_model->cues().cueAt(adjGroup);
                         m_selRow = grp ? (adjGroup + grp->childCount) : adjGroup;
                         ev->setDropAction(Qt::IgnoreAction);
@@ -1097,9 +1099,8 @@ void CueTableView::dropEvent(QDropEvent* ev) {
         }
     }
 
-    std::string err;
-    ShowHelpers::rebuildAllCueLists(*m_model, err);
-    ShowHelpers::syncAllSfFromCues(*m_model);
+    ShowHelpers::moveEngineCues(*m_model, m_model->activeListIdx(),
+                                topLevel, blockSizes, dstRow, adjustedDst);
     m_selRow = adjustedDst;
     ev->setDropAction(Qt::IgnoreAction);
     ev->accept();
@@ -1189,9 +1190,8 @@ void CueTableView::contextMenuEvent(QContextMenuEvent* ev) {
             m_model->pushUndo();
             auto copy = *cd;
             copy.cueNumber = ShowHelpers::nextCueNumber(m_model->sf);
-            ShowHelpers::sfInsertBefore(m_model->sf, m_model->activeListIdx(), row + 1, std::move(copy));
             std::string err;
-            ShowHelpers::rebuildAllCueLists(*m_model, err);
+            ShowHelpers::insertEngineCue(*m_model, m_model->activeListIdx(), row + 1, std::move(copy), err);
             m_selRow = row + 1;
             emit rowSelected(m_selRow);
             emit cueListModified();
@@ -1215,13 +1215,12 @@ void CueTableView::contextMenuEvent(QContextMenuEvent* ev) {
             if (m_model->sf.cueLists.empty()) return;
             m_model->pushUndo();
             int ins = (row >= 0) ? row + 1 : m_model->cues().cueCount();
+            std::string err;
             for (auto cd : m_model->clipboard) {
                 cd.cueNumber = ShowHelpers::nextCueNumber(m_model->sf);
-                ShowHelpers::sfInsertBefore(m_model->sf, m_model->activeListIdx(), ins, cd);
+                ShowHelpers::insertEngineCue(*m_model, m_model->activeListIdx(), ins, std::move(cd), err);
                 ++ins;
             }
-            std::string err;
-            ShowHelpers::rebuildAllCueLists(*m_model, err);
             m_selRow = ins - 1;
             emit rowSelected(m_selRow);
             emit cueListModified();
@@ -1284,6 +1283,14 @@ void CueTableView::contextMenuEvent(QContextMenuEvent* ev) {
     addMenu->addSeparator();
     // Transport control
     for (const char* type : {"Start", "Stop", "Goto", "Arm", "Devamp", "Marker", "Memo", "Scriptlet"}) {
+        auto* act = addMenu->addAction(type);
+        connect(act, &QAction::triggered, this, [this, type, insertAt, autoTarget]() {
+            addCueOfType(type, insertAt, autoTarget);
+        });
+    }
+    addMenu->addSeparator();
+    // Snapshot & Automation
+    for (const char* type : {"Snapshot", "Automation"}) {
         auto* act = addMenu->addAction(type);
         connect(act, &QAction::triggered, this, [this, type, insertAt, autoTarget]() {
             addCueOfType(type, insertAt, autoTarget);
@@ -1368,8 +1375,7 @@ void CueTableView::replaceAudioForRow(int row, const QString& absPath) {
     if (!sfCue) return;
     sfCue->path = pathToStore;
 
-    std::string err;
-    ShowHelpers::rebuildAllCueLists(*m_model, err);
+    ShowHelpers::reloadEngineCueAudio(*m_model, m_model->activeListIdx(), row);
     m_model->dirty = true;
 
     m_selRow = row;
@@ -1402,10 +1408,8 @@ void CueTableView::insertAudioCueForPath(const QString& path, int beforeRow) {
         cd.path = path.toStdString();
     }
 
-    ShowHelpers::sfInsertBefore(m_model->sf, m_model->activeListIdx(), beforeRow, std::move(cd));
-
     std::string err;
-    ShowHelpers::rebuildAllCueLists(*m_model, err);
+    ShowHelpers::insertEngineCue(*m_model, m_model->activeListIdx(), beforeRow, std::move(cd), err);
 
     // Explicitly initialize diagonal crosspoint for the new audio cue so the
     // inspector grid always shows "0.0" on first display — no lazy defaults.
@@ -1447,10 +1451,8 @@ void CueTableView::addCueOfType(const QString& type, int beforeRow, int autoTarg
     // Default group mode for new group cues.
     if (cd.type == "group") cd.groupMode = "timeline";
 
-    ShowHelpers::sfInsertBefore(m_model->sf, m_model->activeListIdx(), beforeRow, std::move(cd));
-
     std::string err;
-    ShowHelpers::rebuildAllCueLists(*m_model, err);
+    ShowHelpers::insertEngineCue(*m_model, m_model->activeListIdx(), beforeRow, std::move(cd), err);
     m_selRow = beforeRow;
     m_model->cues().setSelectedIndex(beforeRow);
     emit rowSelected(m_selRow);
@@ -1465,13 +1467,8 @@ void CueTableView::deleteRows(const std::vector<int>& rows) {
     // Sort descending so earlier removals don't shift indices of later ones.
     auto sorted = rows;
     std::sort(sorted.rbegin(), sorted.rend());
-    for (int r : sorted) {
-        ShowHelpers::sfRemoveAt(m_model->sf, m_model->activeListIdx(), r);
-        ShowHelpers::sfFixTargetsAfterRemoval(m_model->sf, m_model->activeListIdx(), r);
-    }
-
-    std::string err;
-    ShowHelpers::rebuildAllCueLists(*m_model, err);
+    for (int r : sorted)
+        ShowHelpers::removeEngineCue(*m_model, m_model->activeListIdx(), r);
 
     const int newCount = m_model->cues().cueCount();
     if (m_selRow >= newCount) m_selRow = newCount - 1;
@@ -1501,7 +1498,7 @@ void CueTableView::createGroupFromSelection(const std::vector<int>& rows) {
     ShowHelpers::sfInsertBefore(m_model->sf, m_model->activeListIdx(), rows.front(), std::move(groupCd));
 
     std::string err;
-    ShowHelpers::rebuildAllCueLists(*m_model, err);
+    ShowHelpers::rebuildCueList(*m_model, m_model->activeListIdx(), err);
     m_selRow = rows.front();
     emit rowSelected(m_selRow);
     emit cueListModified();

@@ -1,6 +1,7 @@
 #pragma once
 
 #include "AudioEngine.h"
+#include "AutoParam.h"
 #include "Cue.h"
 #include "FadeData.h"
 #include "IAudioSource.h"
@@ -8,12 +9,21 @@
 #include "ShowFile.h"
 #include "StreamReader.h"
 #include <array>
+#include <atomic>
 #include <memory>
 #include <mutex>
 #include <optional>
 #include <string>
 #include <unordered_map>
 #include <vector>
+
+// Private built-in AutoParam implementations — defined in CueList.cpp.
+// Forward-declared here solely for the friend declarations below.
+namespace mcp_detail {
+    class ChannelFaderParam;
+    class ChannelMuteParam;
+    class CrosspointParam;
+}
 
 namespace mcp {
 
@@ -38,6 +48,16 @@ struct ChannelMap {
     std::vector<int> physDevice;      // physDevice[p]     = stream index for global physOut p
     std::vector<int> physLocalCh;     // physLocalCh[p]    = local channel index on that stream
     std::vector<int> devicePhysCount; // devicePhysCount[d]= physical channel count of stream d
+
+    // Scheduler-safe live automation fields.
+    // xpLinear[ch*numPhys+p] = fold without masterGain factor (set by setChannelMap).
+    // Scheduler callbacks update liveMasterGainDb/liveMute and recompute fold[ch*] in-place.
+    std::vector<float> xpLinear;           // [numCh * numPhys]
+    std::vector<float> liveMasterGainDb;   // [numCh]
+    std::vector<bool>  liveMute;           // [numCh]
+    // stereoSlave[ch] = slave channel index (ch+1 when ch.linkedStereo is set), else -1.
+    // When automating fader/mute on ch, the same gain is also applied to the slave.
+    std::vector<int>   stereoSlave;        // [numCh]
 };
 
 // High-level cue sequencer backed by a shared AudioEngine and Scheduler.
@@ -148,6 +168,32 @@ public:
     // Thread-safe (shares m_scriptletMutex).
     std::vector<int> drainFiredCues();
 
+    // Append a Snapshot cue.  When fired, queues a recall for the UI layer.
+    bool addSnapshotCue(const std::string& name = "", double preWait = 0.0);
+
+    // Set the snapshot ID to recall when this cue fires.
+    void setCueSnapshotId(int index, int snapshotId);
+
+    // Drain and return any snapshot recalls queued since the last call.
+    // Each entry is {cueIndex, snapshotId}.  Thread-safe.
+    std::vector<std::pair<int, int>> drainPendingSnapshots();
+
+    // Append an Automation cue.  When fired, drives a parameter path through
+    // a piecewise-linear curve over automationDuration seconds.
+    // Parameter updates are queued to m_pendingAutomationUpdates (drained per tick).
+    bool addAutomationCue(const std::string& name = "", double preWait = 0.0);
+
+    // Set the parameter path for an Automation cue (e.g. "/mixer/0/fader").
+    void setCueAutomationPath    (int index, const std::string& path);
+    // Replace the entire automation curve (points + handles, sorted by time).
+    void setCueAutomationCurve   (int index, const std::vector<Cue::AutomationPoint>& pts);
+    // Set total cue duration in seconds.
+    void setCueAutomationDuration(int index, double seconds);
+
+    // Drain and return {paramPath, value} pairs accumulated since last call.
+    // Called on the main thread by AppModel::tick() after update().
+    std::vector<std::pair<std::string, double>> drainAutomationUpdates();
+
     // Append a Network cue.  When fired, sends the stored command to the
     // network patch identified by networkPatchIdx.
     bool addNetworkCue(const std::string& name = "", double preWait = 0.0);
@@ -191,6 +237,27 @@ public:
 
     void clear();
     int  cueCount() const;
+
+    // --- Structural mutations (engine is source of truth) -------------------
+
+    // Insert a fully built Cue at flat position idx (0 = prepend, cueCount() = append).
+    // Assigns a new stableId; fixes up all index-based refs; inserts runtime slots.
+    // Voices currently playing for other cues are NOT interrupted.
+    // Returns the assigned stableId, or -1 on invalid idx.
+    int  insertCueAt(int idx, Cue cue);
+
+    // Remove the cue at flat position idx, and its entire subtree if it is a Group.
+    // Stops any active voice(s) for removed cues; fixes up all index-based refs.
+    void removeCueAt(int idx);
+
+    // Move the cue (and its subtree if Group) from flat position `from` to `to`.
+    // `to` is the destination index in the ORIGINAL list (before the move).
+    // Voices keep playing — stable voice tags are not affected by the move.
+    void moveCueTo(int from, int to);
+
+    // Reload the audio file for an Audio cue in place (e.g. after path change).
+    // Stops any active voice for this cue first.  Returns false if load fails.
+    bool reloadCueAudio(int idx, const std::string& newPath, const std::string& baseDir);
 
     // The cue that will fire on the next go(). May equal cueCount() (past-end).
     int  selectedIndex() const;
@@ -255,8 +322,8 @@ public:
     // srcCh = file channels, outCh = engine output channels.
     void initCueRouting(int index, int srcCh, int outCh);
 
-    // Set the channel-to-physical-output fold matrix.
-    // Call after loading show data and after each audio device change.
+    // Set the channel-to-physical-output fold matrix and immediately re-apply
+    // routing to all currently-playing cues so parameter changes are heard live.
     // An empty map (numCh == 0) uses legacy identity routing.
     void setChannelMap(ChannelMap map);
 
@@ -281,6 +348,9 @@ public:
 
     // True when the effective MC (own or inherited) is non-null.
     bool hasMusicContext(int index) const;
+
+    // Returns the raw mcSourceIdx link for cue i (-1 = no inheritance set).
+    int cueMCSourceIdx(int i) const;
 
     // Direct access to the effective MC (follows mcSourceIdx chain).
     // Returns nullptr if the cue has no MC and no valid inheritance link.
@@ -423,6 +493,26 @@ private:
     void applyRoutingToSourceForDevice(const Cue& cue, IAudioSource& source,
                                         int srcCh, int deviceIdx);
 
+    // Re-apply routing to every currently-playing audio cue reader using the
+    // current m_channelMap.  Called by setChannelMap when the map itself changes.
+    void reapplyRoutingToActive();
+
+    // Push the current m_channelMap fold matrix to AudioEngine (per device).
+    // Automatically called when fader/mute/crosspoint values change so the fold
+    // update reaches the audio callback without rebuilding per-cue StreamReader routing.
+    void pushFoldToEngine();
+
+    // Apply a channel-strip parameter change at scheduler precision.
+    // Parse path once at fire() time and return a ready-to-use AutoParam.
+    // Construction can be expensive; setValue() on the returned object must not
+    // do any path parsing or map lookups.  Returns nullptr on invalid/unsupported paths.
+    std::unique_ptr<AutoParam> makeAutoParam(const std::string& path);
+
+    // Built-in AutoParam implementations access CueList internals directly.
+    friend class ::mcp_detail::ChannelFaderParam;
+    friend class ::mcp_detail::ChannelMuteParam;
+    friend class ::mcp_detail::CrosspointParam;
+
     // Update a live voice's per-output-channel gain (called from fade callbacks).
     // Does NOT modify cue.routing — fade is a live-voice-only multiplier.
     void setCueOutLevelGain(int cueIdx, int outCh, float linGain);
@@ -431,11 +521,30 @@ private:
     // Does NOT modify cue.routing.xpoint.
     void setCueXpointGain(int cueIdx, int srcCh, int outCh, float linGain);
 
+    // --- Structural mutation helpers ----------------------------------------
+
+    // Append the 5 parallel runtime slots that accompany each new cue entry.
+    // Must be called after m_cues.push_back(); caller must hold m_slotMutex.
+    void pushSlots();
+
+    // Shift all flat-index refs for an insertion at position k.
+    // Does NOT touch m_cues or the parallel arrays themselves.
+    void fixupRefsForInsert(int k);
+
+    // Shift all flat-index refs for removal of positions [k, k+count).
+    // Does NOT touch m_cues or the parallel arrays themselves.
+    void fixupRefsForRemove(int k, int count);
+
+    // Fix all flat-index refs after a rotation-based move of the subtree
+    // that was at [from, from+count) to its new position `to` (original indexing).
+    void fixupRefsForMove(int from, int count, int to);
+
     AudioEngine& m_engine;
     Scheduler&   m_scheduler;
     // Unique tag base assigned at construction so voice tags never collide with
     // voices from a different CueList that shares the same AudioEngine.
     int m_tagBase{0};
+    int m_nextStableId{0};  // monotonically increasing; never reset (even after clear())
     std::vector<Cue> m_cues;
     int m_selectedIndex{0};
     ChannelMap   m_channelMap;
@@ -498,9 +607,17 @@ private:
 
     // Pending scriptlet codes queued by fire() (possibly scheduler thread);
     // drained on the main thread by AppModel::tick() via drainScriptlets().
+    // Same mutex also guards m_pendingSnapshots and m_pendingFiredCues.
     mutable std::mutex                         m_scriptletMutex;
     std::vector<std::pair<int, std::string>>   m_pendingScriptlets;
+    std::vector<std::pair<int, int>>           m_pendingSnapshots;  // (cueIdx, snapshotId)
     std::vector<int>                           m_pendingFiredCues;
+    // Automation: cancel flags for running automation cues.
+    // Keyed by cue index; protected by m_scriptletMutex.
+    std::unordered_map<int, std::shared_ptr<std::atomic<bool>>> m_automationCancel;
+    // Values pushed by scheduler callbacks; drained by AppModel::tick() via drainAutomationUpdates().
+    // Protected by m_scriptletMutex (written from scheduler thread).
+    std::vector<std::pair<std::string, double>> m_pendingAutomationUpdates;
 
     // Active MTC generators keyed by cue index.  Protected by m_slotMutex.
     // Stored so stop() / panic() can terminate a running generator immediately.

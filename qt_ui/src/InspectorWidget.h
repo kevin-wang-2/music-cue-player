@@ -13,6 +13,7 @@ class WaveformView;
 
 class SyncGroupView;
 
+class AutomationView;
 class QCheckBox;
 class QComboBox;
 class QFrame;
@@ -74,6 +75,18 @@ private:
     void buildTimelineTab();
     void buildMCTab();
     void buildScriptTab();
+    void buildSnapshotTab();
+    void loadSnapshotTab();
+    void buildAutomationTab();
+    void loadAutomationTab();
+    // Read the current value of a parameter path from sf.audioSetup (for default curve seeding).
+    double currentAutomationParamValue(const std::string& path) const;
+    // Rebuild the breadcrumb bar from the given path.
+    void rebuildAutoPathBar(const QString& path);
+    // Commit a new path: saves to cue, rebuilds bar, seeds curve.
+    void commitAutoPath(const QString& path);
+    // Open the full parameter picker dialog.
+    void openAutoParamPicker();
     void loadScript();
     void refreshScriptErrors();   // re-apply error highlight for current cue
     void buildNetworkTab();
@@ -187,6 +200,21 @@ private:
     // Timeline tab (Timeline group cues)
     TimelineGroupView* m_timelineView{nullptr};
 
+    // Snapshot tab
+    QWidget*    m_snapshotPage{nullptr};
+    QComboBox*  m_comboSnapshot{nullptr};
+
+    // Automation tab
+    QWidget*        m_automationPage{nullptr};
+    // Path bar: m_autoPathWidget is the outer row (bar + browse button).
+    // m_autoPathBar is the styled breadcrumb frame; its contents are rebuilt by rebuildAutoPathBar().
+    QWidget*              m_autoPathWidget{nullptr};
+    QFrame*               m_autoPathBar{nullptr};
+    QDoubleSpinBox* m_spinAutoDuration{nullptr};  // total duration
+    AutomationView* m_automationView{nullptr};    // curve editor
+    QWidget*        m_autoQuantizeRow{nullptr};   // hidden when no MC attached
+    QComboBox*      m_comboAutoQuantize{nullptr};
+
     // Script tab (Scriptlet cues)
     QWidget*           m_scriptPage{nullptr};
     ScriptEditorWidget* m_editScript{nullptr};
@@ -226,7 +254,9 @@ private:
 
     // Music Context tab
     QCheckBox*         m_chkAttachMC{nullptr};
+    QCheckBox*         m_chkInheritParentMC{nullptr};  // visible only when parent has MC
     QWidget*           m_mcContent{nullptr};
+    QWidget*           m_mcBtnRow{nullptr};             // Import/Inherit button row (hidden when inheriting)
     QCheckBox*         m_chkApplyBefore{nullptr};
     MusicContextView*  m_mcView{nullptr};
     QWidget*           m_mcPropGroup{nullptr};    // property panel (hidden when no selection)

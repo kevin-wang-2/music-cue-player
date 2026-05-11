@@ -176,9 +176,7 @@ void CueListPanel::onAddList() {
     cld.name      = name.trimmed().toStdString();
     cld.numericId = m_model->sf.nextListId();
     m_model->sf.cueLists.push_back(std::move(cld));
-
-    std::string err;
-    ShowHelpers::rebuildAllCueLists(*m_model, err);
+    m_model->insertEngineList(static_cast<int>(m_model->sf.cueLists.size()) - 1);
 
     m_model->dirty = true;
     emit m_model->dirtyChanged(true);
@@ -201,12 +199,8 @@ void CueListPanel::onDeleteList() {
         != QMessageBox::Yes) return;
 
     m_model->pushUndo();
-    // Panic any playing cues in the deleted list
-    m_model->cueListAt(row).panic();
     m_model->sf.cueLists.erase(m_model->sf.cueLists.begin() + row);
-
-    std::string err;
-    ShowHelpers::rebuildAllCueLists(*m_model, err);
+    m_model->removeEngineList(row);
 
     m_model->dirty = true;
     emit m_model->dirtyChanged(true);
