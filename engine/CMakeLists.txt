@@ -53,6 +53,25 @@ add_library(mcp_engine STATIC
     src/SnapshotManager.cpp
 )
 
+# ── Plugin abstraction layer ──────────────────────────────────────────────────
+# Standalone static library: no portaudio / sndfile / samplerate dependency.
+# Both mcp_engine and the test suite link against it independently.
+add_library(mcp_plugin STATIC
+    src/plugin/ParameterSet.cpp
+    src/plugin/PluginWrapper.cpp
+    src/plugin/InternalPluginFactory.cpp
+    src/plugin/TrimProcessor.cpp
+    src/plugin/DelayProcessor.cpp
+)
+
+target_include_directories(mcp_plugin
+    PUBLIC  include
+    PRIVATE src/plugin       # private processor headers
+)
+
+target_link_libraries(mcp_plugin PUBLIC nlohmann_json::nlohmann_json)
+target_compile_options(mcp_plugin PRIVATE -Wall -Wextra -Wpedantic)
+
 target_include_directories(mcp_engine
     PUBLIC
         include

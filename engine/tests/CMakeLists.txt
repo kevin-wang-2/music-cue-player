@@ -36,3 +36,10 @@ add_engine_test(test_audio_engine)
 add_engine_test(test_scheduler)
 add_engine_test(test_cue_list)
 add_engine_test(test_timecode)
+
+# Plugin abstraction tests link against mcp_plugin only (no portaudio/sndfile).
+add_executable(test_plugin test_plugin.cpp)
+target_include_directories(test_plugin PRIVATE ${CMAKE_CURRENT_SOURCE_DIR})
+target_link_libraries(test_plugin PRIVATE mcp_plugin Catch2::Catch2WithMain)
+target_compile_options(test_plugin PRIVATE -Wall -Wextra)
+catch_discover_tests(test_plugin)
