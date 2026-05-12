@@ -27,6 +27,8 @@ public:
     void refresh();
     // Call on each timer tick to repaint the Status column only.
     void refreshStatus();
+    // Block/unblock destructive editing operations.
+    void setShowMode(bool on) { m_showMode = on; }
 
     // Currently selected row (-1 = none).
     int selectedRow() const { return m_selRow; }
@@ -80,6 +82,7 @@ private:
     AppModel* m_model{nullptr};
     int       m_selRow{-1};
     bool      m_refreshing{false};  // guard against onCellChanged re-entry
+    bool      m_showMode{false};
 
     std::vector<RowProgress> m_rowProgress;
 

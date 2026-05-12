@@ -56,6 +56,14 @@ public:
     void markDirty() {
         if (!dirty) { dirty = true; emit dirtyChanged(true); }
     }
+
+    bool isShowMode() const { return m_showMode; }
+    void setShowMode(bool on) {
+        if (m_showMode == on) return;
+        m_showMode = on;
+        emit showModeChanged(on);
+    }
+
     bool          engineOk{false};
     std::string   engineError;
 
@@ -206,6 +214,7 @@ signals:
     // Emitted after deactivate/reactivate completes — UI should refresh (ch, slot).
     void pluginSlotChanged(int ch, int slot);
     void dirtyChanged(bool dirty);
+    void showModeChanged(bool on);
     void engineStatusChanged();
     // Emitted when an external trigger fires a cue (for UI highlight feedback)
     void externalTriggerFired(int cueIndex);
@@ -248,6 +257,8 @@ public:
     void applyPluginParamStates();
 
 private:
+    bool m_showMode{false};
+
     std::vector<std::unique_ptr<mcp::CueList>> m_cueLists;
     int  m_activeListIdx{0};
     std::set<int> m_scriptletRunningCues;   // cue indices currently executing (reentrance guard)

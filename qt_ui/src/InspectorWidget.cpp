@@ -1430,6 +1430,21 @@ void InspectorWidget::restoreTabIndex(int idx) {
         m_tabs->setCurrentIndex(idx);
 }
 
+void InspectorWidget::setShowMode(bool on) {
+    // Disable all tab page content in show mode (cue properties are read-only).
+    // The tab bar itself stays active so users can still view all properties.
+    const QList<QWidget*> pages = {
+        m_basicPage, m_levelsPage, m_trimPage, m_timePage, m_curvePage,
+        m_modePage, m_timelinePage, m_mcPage, m_markerPage,
+        m_snapshotPage, m_pluginTargetPage, m_automationPage,
+        m_scriptPage, m_networkPage, m_midiPage, m_timecodePage,
+        m_triggersPage
+    };
+    for (QWidget* p : pages) {
+        if (p) p->setEnabled(!on);
+    }
+}
+
 // ── load helpers ───────────────────────────────────────────────────────────
 
 void InspectorWidget::loadBasic() {

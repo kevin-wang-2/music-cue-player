@@ -1426,6 +1426,7 @@ void MixConsoleDialog::applyLink(int ch, bool linked)
 
 void MixConsoleDialog::addChannel()
 {
+    if (m_model->isShowMode()) return;
     auto& as = m_model->sf.audioSetup;
     mcp::ShowFile::AudioSetup::Channel ch;
     ch.name = "Ch " + std::to_string(as.channels.size() + 1);
@@ -1447,6 +1448,7 @@ void MixConsoleDialog::addChannel()
 
 void MixConsoleDialog::removeSelectedChannels()
 {
+    if (m_model->isShowMode()) return;
     auto& as = m_model->sf.audioSetup;
     if (as.channels.empty()) return;
 
@@ -1507,6 +1509,7 @@ void MixConsoleDialog::updateSnapToolbar()
 
 void MixConsoleDialog::storeSnapshot()
 {
+    if (m_model->isShowMode()) return;
     // Diff all open AU editors before storing so per-param scope is recorded.
     for (const auto& [key, dlgPtr] : m_pluginEditors)
         if (dlgPtr) diffAndMarkPluginDirty(key.first, key.second);
@@ -1535,6 +1538,7 @@ void MixConsoleDialog::recallSnapshot()
 // Snapshot list dialog — lists all snapshots with rename/delete/scope controls.
 void MixConsoleDialog::openSnapshotList()
 {
+    if (m_model->isShowMode()) return;
     auto* dlg = new QDialog(this);
     dlg->setWindowTitle(tr("Snapshots"));
     dlg->setAttribute(Qt::WA_DeleteOnClose);
@@ -1641,6 +1645,7 @@ void MixConsoleDialog::openSnapshotList()
 // Columns: Ch | Delay | Polarity | Mute | Fader | →Out1 | →Out2 | …
 void MixConsoleDialog::openScopeEditor(int snapIdx)
 {
+    if (m_model->isShowMode()) return;
     auto& snapList = m_model->sf.snapshotList;
     if (snapIdx < 0 || snapIdx >= static_cast<int>(snapList.snapshots.size())) return;
     if (!snapList.snapshots[static_cast<size_t>(snapIdx)]) return;
@@ -2501,6 +2506,7 @@ void MixConsoleDialog::showPluginInfo(int ch, int slot)
 }
 
 void MixConsoleDialog::openPluginPicker(int ch, int slot) {
+    if (m_model->isShowMode()) return;
     auto& as  = m_model->sf.audioSetup;
     const int nCh = static_cast<int>(as.channels.size());
     if (ch < 0 || ch >= nCh) return;
@@ -2790,6 +2796,7 @@ bool MixConsoleDialog::closePluginEditor(int ch, int slot) {
 }
 
 void MixConsoleDialog::removePlugin(int ch, int slot) {
+    if (m_model->isShowMode()) return;
     auto& as = m_model->sf.audioSetup;
     if (ch < 0 || ch >= static_cast<int>(as.channels.size())) return;
     auto& pSlots = as.channels[static_cast<size_t>(ch)].plugins;
@@ -3450,6 +3457,7 @@ void MixConsoleDialog::openSendEditor(int ch, int slot)
 
 void MixConsoleDialog::openSendPicker(int ch, int slot)
 {
+    if (m_model->isShowMode()) return;
     const auto& chans = m_model->sf.audioSetup.channels;
     const int nCh = static_cast<int>(chans.size());
     if (ch < 0 || ch >= nCh) return;
@@ -3498,6 +3506,7 @@ void MixConsoleDialog::openSendPicker(int ch, int slot)
 
 void MixConsoleDialog::removeSend(int ch, int slot)
 {
+    if (m_model->isShowMode()) return;
     auto& chans = m_model->sf.audioSetup.channels;
     if (ch < 0 || ch >= static_cast<int>(chans.size())) return;
     auto& sends = chans[static_cast<size_t>(ch)].sends;

@@ -200,6 +200,7 @@ MainWindow::MainWindow(AppModel* model, QWidget* parent)
     connect(m_model, &AppModel::mixStateChanged, this, [this]() {
         if (m_mixConsole) m_mixConsole->refresh();
     });
+    connect(m_model, &AppModel::showModeChanged, this, &MainWindow::updateShowModeUi);
 
     connect(m_cueTable,  &CueTableView::rowSelected,    this, &MainWindow::onRowSelected);
     connect(m_cueTable,  &CueTableView::cueListModified, this, &MainWindow::onCueListModified);
@@ -283,6 +284,15 @@ void MainWindow::buildGoBar() {
     m_lblGlobalMC->setAlignment(Qt::AlignRight | Qt::AlignVCenter);
     m_lblGlobalMC->hide();
     hlay->addWidget(m_lblGlobalMC);
+
+    // Show Mode indicator
+    m_lblShowMode = new QLabel("SHOW MODE", bar);
+    m_lblShowMode->setStyleSheet(
+        "color:#fff; font-size:13px; font-weight:700; letter-spacing:1px;"
+        "background:#992222; border-radius:4px; padding:4px 10px;");
+    m_lblShowMode->setAlignment(Qt::AlignCenter);
+    m_lblShowMode->hide();
+    hlay->addWidget(m_lblShowMode);
 }
 
 // ── IconBar ────────────────────────────────────────────────────────────────
@@ -299,6 +309,7 @@ void MainWindow::buildIconBar() {
 
     // Helper that inserts a cue of given type after the currently selected cue.
     auto addCue = [this](const QString& type) {
+        if (m_model->isShowMode()) return;
         if (m_model->sf.cueLists.empty())
             m_model->sf.cueLists.push_back({});
 
@@ -376,8 +387,14 @@ void MainWindow::buildIconBar() {
         m_cueTable->selectRow(newRow);
     };
 
-    // Add-cue type buttons grouped by category.
-    // A null entry inserts a visual separator between groups.
+    // Add-cue type buttons grouped by category (wrapped so show mode can disable them).
+    auto* addGroup = new QWidget(bar);
+    addGroup->setObjectName("iconBarAddGroup");
+    addGroup->setStyleSheet("QWidget#iconBarAddGroup { background: transparent; }");
+    auto* agLay = new QHBoxLayout(addGroup);
+    agLay->setContentsMargins(0, 0, 0, 0);
+    agLay->setSpacing(2);
+
     struct CueBtnDef { const char* icon; const char* tip; const char* type; };
     const CueBtnDef cueBtns[] = {
         { "▤",  "Add Group cue",          "group"  },
@@ -407,16 +424,17 @@ void MainWindow::buildIconBar() {
     };
     for (const auto& b : cueBtns) {
         if (!b.type) {
-            auto* s = new QFrame(bar);
+            auto* s = new QFrame(addGroup);
             s->setFrameShape(QFrame::VLine);
             s->setStyleSheet("color:#333; margin:4px 2px;");
-            hlay->addWidget(s);
+            agLay->addWidget(s);
         } else {
             auto* btn = makeIconBtn(b.icon, b.tip);
             connect(btn, &QToolButton::clicked, this, [=]() { addCue(b.type); });
-            hlay->addWidget(btn);
+            agLay->addWidget(btn);
         }
     }
+    hlay->addWidget(addGroup);
 
     // Separator before playback controls
     auto* sep = new QFrame(bar);
@@ -573,6 +591,14 @@ void MainWindow::buildMenuBar() {
         dlg->activateWindow();
     });
     showMenu->addSeparator();
+    m_actShowMode = showMenu->addAction("&Show Mode");
+    m_actShowMode->setCheckable(true);
+    m_actShowMode->setShortcut(QKeySequence(Qt::CTRL | Qt::SHIFT | Qt::Key_M));
+    m_actShowMode->setToolTip("Lock cue list and settings; allow live mix adjustments");
+    connect(m_actShowMode, &QAction::toggled, this, [this](bool on) {
+        m_model->setShowMode(on);
+    });
+    showMenu->addSeparator();
 
     auto* actPanic = showMenu->addAction("Panic", this, [this]() {
         m_model->panicAll();
@@ -601,6 +627,21 @@ void MainWindow::buildMenuBar() {
 
     m_windowMenu = mb->addMenu("&Window");
     connect(m_windowMenu, &QMenu::aboutToShow, this, &MainWindow::refreshWindowMenu);
+}
+
+void MainWindow::updateShowModeUi(bool on) {
+    m_actShowMode->setChecked(on);
+    m_lblShowMode->setVisible(on);
+
+    // Disable the add-cue icon strip; playback controls stay active.
+    if (auto* ag = findChild<QWidget*>("iconBarAddGroup"))
+        ag->setEnabled(!on);
+
+    // Inspector: all cue-editing tabs become read-only.
+    m_inspector->setShowMode(on);
+
+    // Cue table: edit operations guarded inside CueTableView.
+    m_cueTable->setShowMode(on);
 }
 
 void MainWindow::refreshWindowMenu() {
@@ -774,6 +815,10 @@ void MainWindow::checkMissingMedia() {
 }
 
 void MainWindow::onOpenSettings() {
+    if (m_model->isShowMode()) {
+        showToast("Settings are locked in Show Mode");
+        return;
+    }
     SettingsDialog dlg(m_model, this);
     const bool accepted = (dlg.exec() == QDialog::Accepted);
     if (m_mixConsole) m_mixConsole->refresh();   // sync MixConsole regardless of accept/cancel

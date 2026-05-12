@@ -49,6 +49,8 @@ public:
     // Call when selection changes (rebuilds the whole inspector).
     void setCueIndex(int idx);
 
+    // Update read-only state when show mode changes.
+    void setShowMode(bool on);
     // Call on timer tick to update the waveform playhead.
     void updatePlayhead();
     // Clear the timeline arm cursor (call after GO fires or panic/stop).

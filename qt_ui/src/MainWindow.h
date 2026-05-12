@@ -101,7 +101,11 @@ private:
     QAction* m_actRedo{nullptr};
     QAction* m_actInspector{nullptr};
     QAction* m_actListPanel{nullptr};
+    QAction* m_actShowMode{nullptr};
+
+    QLabel*  m_lblShowMode{nullptr};   // red "SHOW MODE" indicator in GoBar
 
     QMenu*   m_windowMenu{nullptr};
     void refreshWindowMenu();
+    void updateShowModeUi(bool on);
 };

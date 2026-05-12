@@ -615,10 +615,12 @@ void CueTableView::paintEvent(QPaintEvent* ev) {
 
 void CueTableView::keyPressEvent(QKeyEvent* ev) {
     if (ev->key() == Qt::Key_Delete || ev->key() == Qt::Key_Backspace) {
-        std::vector<int> rows;
-        for (const auto& idx : selectionModel()->selectedRows())
-            rows.push_back(idx.row());
-        if (!rows.empty()) deleteRows(rows);
+        if (!m_showMode) {
+            std::vector<int> rows;
+            for (const auto& idx : selectionModel()->selectedRows())
+                rows.push_back(idx.row());
+            if (!rows.empty()) deleteRows(rows);
+        }
         return;
     }
 
@@ -633,6 +635,7 @@ void CueTableView::keyPressEvent(QKeyEvent* ev) {
             return;
         }
         if (ev->key() == Qt::Key_X) {
+            if (m_showMode) { ev->accept(); return; }
             m_model->clipboard.clear();
             std::vector<int> rows;
             for (const auto& idx : selectionModel()->selectedRows()) {
@@ -666,6 +669,7 @@ void CueTableView::keyPressEvent(QKeyEvent* ev) {
             return;
         }
         if (ev->key() == Qt::Key_V) {
+            if (m_showMode) { ev->accept(); return; }
             if (!m_model->clipboard.empty() && !m_model->sf.cueLists.empty()) {
                 m_model->pushUndo();
                 int ins = (m_selRow >= 0) ? m_selRow + 1 : m_model->cues().cueCount();
@@ -684,6 +688,7 @@ void CueTableView::keyPressEvent(QKeyEvent* ev) {
             return;
         }
         if (ev->key() == Qt::Key_D) {
+            if (m_showMode) { ev->accept(); return; }
             // Delete (clear) the cue number of all selected cues.
             const auto selected = selectionModel()->selectedRows();
             if (!selected.isEmpty()) {
@@ -1148,6 +1153,8 @@ void CueTableView::contextMenuEvent(QContextMenuEvent* ev) {
             menu.addSeparator();
         }
 
+        if (m_showMode) { menu.exec(ev->globalPos()); return; }
+
         // Edit actions
         auto* actCut  = menu.addAction("Cut");
         auto* actCopy = menu.addAction("Copy");
@@ -1213,7 +1220,7 @@ void CueTableView::contextMenuEvent(QContextMenuEvent* ev) {
         menu.addSeparator();
     }
 
-    if (!m_model->clipboard.empty()) {
+    if (!m_showMode && !m_model->clipboard.empty()) {
         auto* actPaste = menu.addAction("Paste after");
         connect(actPaste, &QAction::triggered, this, [this, row]() {
             if (m_model->sf.cueLists.empty()) return;
@@ -1234,7 +1241,7 @@ void CueTableView::contextMenuEvent(QContextMenuEvent* ev) {
     }
 
     // "Create Group from Selection" — available when 2+ rows are selected.
-    {
+    if (!m_showMode) {
         const auto selRows = selectionModel()->selectedRows();
         if (selRows.size() >= 2) {
             auto* actGroup = menu.addAction("Create Group from Selection");
@@ -1248,6 +1255,7 @@ void CueTableView::contextMenuEvent(QContextMenuEvent* ev) {
         }
     }
 
+    if (!m_showMode) {
     // Add cue submenu — insert after currently selected cue (not right-click row).
     // Insert after the selected cue's entire subtree (skip Group children).
     int insertAt = (m_selRow >= 0) ? m_selRow + 1 : rowCount();
@@ -1300,6 +1308,7 @@ void CueTableView::contextMenuEvent(QContextMenuEvent* ev) {
             addCueOfType(type, insertAt, autoTarget);
         });
     }
+    } // !m_showMode add-cue block
 
     menu.exec(ev->globalPos());
 }
@@ -1315,6 +1324,7 @@ static double parseDuration(const QString& txt) {
 
 void CueTableView::onCellChanged(int row, int col) {
     if (m_refreshing) return;
+    if (m_showMode) return;
     auto* it = item(row, col);
     if (!it) return;
     const QString txt = it->text().trimmed();
