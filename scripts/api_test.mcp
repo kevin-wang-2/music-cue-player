@@ -140,6 +140,22 @@
           "targetCueNumber": "5"
         },
         {
+          "type": "deactivate",
+          "cueNumber": "9.6",
+          "name": "Deactivate ch=0 slot=0",
+          "preWait": 0.0,
+          "pluginChannel": 0,
+          "pluginSlot": 0
+        },
+        {
+          "type": "reactivate",
+          "cueNumber": "9.7",
+          "name": "Reactivate ch=0 slot=0",
+          "preWait": 0.0,
+          "pluginChannel": 0,
+          "pluginSlot": 0
+        },
+        {
           "type": "scriptlet",
           "cueNumber": "10",
           "name": "Run API Test",

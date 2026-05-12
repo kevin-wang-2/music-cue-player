@@ -395,6 +395,9 @@ void MainWindow::buildIconBar() {
         { nullptr, nullptr, nullptr },
         { "📷", "Add Snapshot cue",       "snapshot"    },
         { "∿",  "Add Automation cue",     "automation"  },
+        { nullptr, nullptr, nullptr },
+        { "⏸",  "Add Deactivate cue",    "deactivate"  },
+        { "▶",  "Add Reactivate cue",    "reactivate"  },
     };
     for (const auto& b : cueBtns) {
         if (!b.type) {
@@ -1064,6 +1067,7 @@ void MainWindow::loadShowFile(const QString& path) {
     m_model->baseDir  = std::filesystem::path(m_model->showPath).parent_path().string();
     m_model->dirty    = false;
     m_model->applyOscSettings();
+    m_model->syncListCount();          // ensure m_cueLists matches sf.cueLists before applyMixing
     m_model->buildChannelPluginChains();
     m_model->applyMixing();
     m_model->rebuildSendTopology();
@@ -1132,6 +1136,8 @@ void MainWindow::updateCueInfo() {
             case mcp::CueType::Scriptlet:    detail += "Script";   break;
             case mcp::CueType::Snapshot:     detail += "Snapshot";   break;
             case mcp::CueType::Automation:   detail += "Automation"; break;
+            case mcp::CueType::Deactivate:   detail += "Deactivate"; break;
+            case mcp::CueType::Reactivate:   detail += "Reactivate"; break;
             case mcp::CueType::Group:  break;  // handled above
         }
     }

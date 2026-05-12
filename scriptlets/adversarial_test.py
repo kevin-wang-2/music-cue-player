@@ -17,6 +17,7 @@ def run():
     import mcp.error
     import mcp.event
     import mcp.time
+    import mcp.mix_console as mc
     from mcp.time import Time
 
     results = []
@@ -236,7 +237,7 @@ def run():
             break
         cl.delete_cue(remaining[0])
     mcp.cue_list.delete_cue_list(cl)
-    note(f"test list deleted")
+    note("test list deleted")
 
     expect_exc("delete_cue_list(stale list) — double-delete",
                lambda: mcp.cue_list.delete_cue_list(cl))
@@ -248,6 +249,144 @@ def run():
                lambda: cl.delete_cue(cue_b))
     expect_exc("cl.insert_cue_at(cue_b, 'memo') on deleted list",
                lambda: cl.insert_cue_at(cue_b, "memo"))
+
+    # ══════════════════════════════════════════════════════════════════════
+    # 11. mcp.mix_console — bad inputs to module-level functions
+    # ══════════════════════════════════════════════════════════════════════
+    section("mcp.mix_console — module-level bad inputs")
+
+    expect_exc("get_channel(None)",
+               lambda: mc.get_channel(None))
+    expect_exc("get_channel('x')",
+               lambda: mc.get_channel("x"))
+    expect_exc("get_channel([])",
+               lambda: mc.get_channel([]))
+
+    expect_exc("remove_channel(None)",
+               lambda: mc.remove_channel(None))
+    expect_exc("remove_channel('x')",
+               lambda: mc.remove_channel("x"))
+    expect_exc("remove_channel([])",
+               lambda: mc.remove_channel([]))
+
+    expect_exc("get_param(None)",
+               lambda: mc.get_param(None))
+    expect_exc("get_param(42)",
+               lambda: mc.get_param(42))
+    expect_exc("set_param(None, 0.0)",
+               lambda: mc.set_param(None, 0.0))
+    expect_exc("set_param('/mixer/0/fader', 'not-a-float')",
+               lambda: mc.set_param("/mixer/0/fader", "not-a-float"))
+    expect_exc("set_param('/mixer/0/fader', None)",
+               lambda: mc.set_param("/mixer/0/fader", None))
+
+    expect_exc("load_snapshot(None)",
+               lambda: mc.load_snapshot(None))
+    expect_exc("load_snapshot('x')",
+               lambda: mc.load_snapshot("x"))
+    expect_exc("load_snapshot(-9999)  ← nonexistent",
+               lambda: mc.load_snapshot(-9999))
+    expect_exc("save_snapshot(None)",
+               lambda: mc.save_snapshot(None))
+    expect_exc("save_snapshot('x')",
+               lambda: mc.save_snapshot("x"))
+    expect_exc("delete_snapshot(None)",
+               lambda: mc.delete_snapshot(None))
+    expect_exc("delete_snapshot(-9999)  ← nonexistent",
+               lambda: mc.delete_snapshot(-9999))
+
+    expect_exc("set_snapshot_scope(None, '/mixer/0/fader')",
+               lambda: mc.set_snapshot_scope(None, "/mixer/0/fader"))
+    expect_exc("set_snapshot_scope(0, None)",
+               lambda: mc.set_snapshot_scope(0, None))
+    expect_exc("check_snapshot_scope(None)",
+               lambda: mc.check_snapshot_scope(None))
+
+    # ══════════════════════════════════════════════════════════════════════
+    # 12. mcp.mix_console — Channel bad inputs
+    # ══════════════════════════════════════════════════════════════════════
+    section("mcp.mix_console — Channel bad inputs")
+
+    # Append a temp channel to probe; clean up after.
+    adv_ch = mc.append_channel()
+    note(f"appended temp channel ch={adv_ch.ch}")
+
+    expect_exc("channel.fader = 'x'  ← non-numeric string",
+               lambda: setattr(adv_ch, "fader", "x"))
+    expect_exc("channel.delay = 'x'",
+               lambda: setattr(adv_ch, "delay", "x"))
+    expect_exc("channel.name = None",
+               lambda: setattr(adv_ch, "name", None))
+    expect_exc("channel.name = 42",
+               lambda: setattr(adv_ch, "name", 42))
+
+    expect_exc("channel.get_crosspoint(None)",
+               lambda: adv_ch.get_crosspoint(None))
+    expect_exc("channel.get_crosspoint('x')",
+               lambda: adv_ch.get_crosspoint("x"))
+    expect_exc("channel.set_crosspoint(None, 0.0)",
+               lambda: adv_ch.set_crosspoint(None, 0.0))
+    expect_exc("channel.set_crosspoint(0, 'x')",
+               lambda: adv_ch.set_crosspoint(0, "x"))
+
+    expect_exc("channel.get_plugin_slot(None)",
+               lambda: adv_ch.get_plugin_slot(None))
+    expect_exc("channel.get_plugin_slot('x')",
+               lambda: adv_ch.get_plugin_slot("x"))
+    expect_exc("channel.get_send_slot(None)",
+               lambda: adv_ch.get_send_slot(None))
+    expect_exc("channel.get_send_slot('x')",
+               lambda: adv_ch.get_send_slot("x"))
+
+    # ══════════════════════════════════════════════════════════════════════
+    # 13. mcp.mix_console — PluginSlot bad inputs
+    # ══════════════════════════════════════════════════════════════════════
+    section("mcp.mix_console — PluginSlot bad inputs")
+
+    ps = adv_ch.get_plugin_slot(0)
+
+    expect_exc("plugin_slot.load(None)",
+               lambda: ps.load(None))
+    expect_exc("plugin_slot.load(42)",
+               lambda: ps.load(42))
+    expect_exc("plugin_slot.get_param(None)",
+               lambda: ps.get_param(None))
+    expect_exc("plugin_slot.get_param(42)",
+               lambda: ps.get_param(42))
+    expect_exc("plugin_slot.set_param(None, 0.0)",
+               lambda: ps.set_param(None, 0.0))
+    expect_exc("plugin_slot.set_param('id', 'x')",
+               lambda: ps.set_param("id", "x"))
+
+    # ══════════════════════════════════════════════════════════════════════
+    # 14. mcp.mix_console — SendSlot bad inputs
+    # ══════════════════════════════════════════════════════════════════════
+    section("mcp.mix_console — SendSlot bad inputs")
+
+    ss = adv_ch.get_send_slot(0)
+
+    expect_exc("send_slot.level = 'x'",
+               lambda: setattr(ss, "level", "x"))
+    expect_exc("send_slot.engage(None)",
+               lambda: ss.engage(None))
+    expect_exc("send_slot.engage('x')",
+               lambda: ss.engage("x"))
+
+    # Cleanup the temp channel.
+    mc.remove_channel(adv_ch)
+    note("temp channel removed")
+
+    # ══════════════════════════════════════════════════════════════════════
+    # 15. Channel / PluginSlot direct instantiation guard
+    # ══════════════════════════════════════════════════════════════════════
+    section("mcp.mix_console — direct instantiation guard")
+
+    expect_exc("Channel()  ← direct instantiation forbidden",
+               lambda: mc.Channel())
+    expect_exc("PluginSlot()  ← direct instantiation forbidden",
+               lambda: mc.PluginSlot())
+    expect_exc("SendSlot()  ← direct instantiation forbidden",
+               lambda: mc.SendSlot())
 
     # ══════════════════════════════════════════════════════════════════════
     # Report

@@ -35,6 +35,13 @@ public:
     explicit Scheduler(AudioEngine& engine);
     ~Scheduler();
 
+    // Stop the scheduler thread and clear all pending events.
+    // Idempotent — safe to call multiple times or before the destructor.
+    // Must be called while all objects referenced by scheduled callbacks
+    // are still alive (i.e. before any CueList referencing this scheduler
+    // is destroyed).
+    void shutdown();
+
     Scheduler(const Scheduler&) = delete;
     Scheduler& operator=(const Scheduler&) = delete;
 

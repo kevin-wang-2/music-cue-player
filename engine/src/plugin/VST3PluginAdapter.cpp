@@ -1305,13 +1305,25 @@ void VST3PluginAdapter::setResizeCallback(std::function<void(int w, int h)> cb) 
 
 // ── bypass ────────────────────────────────────────────────────────────────────
 
+bool VST3PluginAdapter::hasNativeBypass() const {
+    return m_impl->bypassParamId != vst3::kNoParamId;
+}
+
 void VST3PluginAdapter::setNativeBypass(bool bypass) {
     auto* impl = m_impl.get();
     if (impl->bypassParamId == vst3::kNoParamId || !impl->controller) return;
     const double norm = bypass ? 1.0 : 0.0;
+    // Update controller so the plugin editor reflects the new state immediately.
     impl->controller->setParamNormalized(impl->bypassParamId, norm);
-    impl->pendingParams.push_back({impl->bypassParamId, norm});
+    impl->paramValueCache[impl->bypassParamId] = static_cast<float>(norm);
+    // Queue for delivery to the audio processor on the next process() call.
+    {
+        std::lock_guard<std::mutex> lk(impl->paramsMutex);
+        impl->pendingParams.push_back({impl->bypassParamId, norm});
+    }
     impl->nativeBypassed = bypass;
+    // Notify host UI watchers so they can refresh their parameter display.
+    if (impl->onParamChanged) impl->onParamChanged();
 }
 bool VST3PluginAdapter::getNativeBypass() const { return m_impl->nativeBypassed; }
 

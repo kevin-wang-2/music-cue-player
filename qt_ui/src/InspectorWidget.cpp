@@ -505,6 +505,7 @@ InspectorWidget::InspectorWidget(AppModel* model, QWidget* parent)
     buildTimelineTab();
     buildScriptTab();
     buildSnapshotTab();
+    buildPluginTargetTab();
     buildAutomationTab();
     buildNetworkTab();
     buildMidiTab();
@@ -1303,10 +1304,13 @@ void InspectorWidget::setCueIndex(int idx) {
     const bool isMidiCue     = c && c->type == mcp::CueType::Midi;
     const bool isTimecodeCue = c && c->type == mcp::CueType::Timecode;
     const bool isScriptlet   = c && c->type == mcp::CueType::Scriptlet;
-    const bool isSnapshot    = c && c->type == mcp::CueType::Snapshot;
-    m_tabs->setTabVisible(m_tabs->indexOf(m_scriptPage),       isScriptlet);
-    m_tabs->setTabVisible(m_tabs->indexOf(m_snapshotPage),     isSnapshot);
-    m_tabs->setTabVisible(m_tabs->indexOf(m_automationPage),   isAutomation);
+    const bool isSnapshot       = c && c->type == mcp::CueType::Snapshot;
+    const bool isPluginTarget   = c && (c->type == mcp::CueType::Deactivate ||
+                                        c->type == mcp::CueType::Reactivate);
+    m_tabs->setTabVisible(m_tabs->indexOf(m_scriptPage),        isScriptlet);
+    m_tabs->setTabVisible(m_tabs->indexOf(m_snapshotPage),      isSnapshot);
+    m_tabs->setTabVisible(m_tabs->indexOf(m_pluginTargetPage),  isPluginTarget);
+    m_tabs->setTabVisible(m_tabs->indexOf(m_automationPage),    isAutomation);
     m_tabs->setTabVisible(m_tabs->indexOf(m_markerPage),    isMarkerCue);
     m_tabs->setTabVisible(m_tabs->indexOf(m_networkPage),   isNetworkCue);
     m_tabs->setTabVisible(m_tabs->indexOf(m_midiPage),      isMidiCue);
@@ -1375,9 +1379,10 @@ void InspectorWidget::setCueIndex(int idx) {
         loadMode();
         if (isTimeline) m_timelineView->setGroupCueIndex(idx);
     }
-    if (isScriptlet)   loadScript();
-    if (isSnapshot)    loadSnapshotTab();
-    if (isAutomation)  loadAutomationTab();
+    if (isScriptlet)    loadScript();
+    if (isSnapshot)     loadSnapshotTab();
+    if (isPluginTarget) loadPluginTargetTab();
+    if (isAutomation)   loadAutomationTab();
     if (isNetworkCue)  loadNetwork();
     if (isMidiCue)     loadMidi();
     if (isTimecodeCue) loadTimecode();
@@ -2248,6 +2253,66 @@ void InspectorWidget::loadSnapshotTab() {
             selectIdx = m_comboSnapshot->count() - 1;
     }
     m_comboSnapshot->setCurrentIndex(selectIdx);
+    m_loading = false;
+}
+
+void InspectorWidget::buildPluginTargetTab() {
+    m_pluginTargetPage = new QWidget;
+    auto* form = new QFormLayout(m_pluginTargetPage);
+    form->setContentsMargins(8, 8, 8, 8);
+    form->setSpacing(6);
+
+    m_comboPluginTargetCh = new QComboBox;
+    m_comboPluginTargetCh->setToolTip("Which mixer channel the target plugin sits on");
+    form->addRow(tr("Channel:"), m_comboPluginTargetCh);
+
+    m_spinPluginTargetSlot = new QSpinBox;
+    m_spinPluginTargetSlot->setRange(0, 15);
+    m_spinPluginTargetSlot->setToolTip("Plugin slot index (0-based)");
+    form->addRow(tr("Slot:"), m_spinPluginTargetSlot);
+
+    m_tabs->addTab(m_pluginTargetPage, tr("Plugin"));
+
+    connect(m_comboPluginTargetCh, QOverload<int>::of(&QComboBox::currentIndexChanged),
+            this, [this](int) {
+        if (m_loading || m_cueIdx < 0) return;
+        const int ch   = m_comboPluginTargetCh->currentData().toInt();
+        const int slot = m_spinPluginTargetSlot->value();
+        m_model->cues().setCuePluginSlot(m_cueIdx, ch, slot);
+        ShowHelpers::syncSfFromCues(*m_model);
+        emit cueEdited();
+    });
+    connect(m_spinPluginTargetSlot, QOverload<int>::of(&QSpinBox::valueChanged),
+            this, [this](int slot) {
+        if (m_loading || m_cueIdx < 0) return;
+        const int ch = m_comboPluginTargetCh->currentData().toInt();
+        m_model->cues().setCuePluginSlot(m_cueIdx, ch, slot);
+        ShowHelpers::syncSfFromCues(*m_model);
+        emit cueEdited();
+    });
+}
+
+void InspectorWidget::loadPluginTargetTab() {
+    if (m_cueIdx < 0) return;
+    const auto* c = m_model->cues().cueAt(m_cueIdx);
+    if (!c) return;
+
+    m_loading = true;
+    m_comboPluginTargetCh->clear();
+    const auto& channels = m_model->sf.audioSetup.channels;
+    for (int i = 0; i < (int)channels.size(); ++i) {
+        const QString label = QString("%1: %2").arg(i)
+                              .arg(QString::fromStdString(channels[static_cast<size_t>(i)].name));
+        m_comboPluginTargetCh->addItem(label, i);
+    }
+    // Select current channel
+    const int ch = c->pluginChannel;
+    int selIdx = 0;
+    for (int i = 0; i < m_comboPluginTargetCh->count(); ++i) {
+        if (m_comboPluginTargetCh->itemData(i).toInt() == ch) { selIdx = i; break; }
+    }
+    m_comboPluginTargetCh->setCurrentIndex(selIdx);
+    m_spinPluginTargetSlot->setValue(c->pluginSlot >= 0 ? c->pluginSlot : 0);
     m_loading = false;
 }
 

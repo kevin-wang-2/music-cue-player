@@ -191,6 +191,10 @@ static ShowFile::CueData parseCue(const json& j) {
     // Snapshot cue
     c.snapshotId = jget<int>(j, "snapshotId", -1);
 
+    // Deactivate / Reactivate cues
+    c.pluginChannel = jget<int>(j, "pluginChannel", -1);
+    c.pluginSlot    = jget<int>(j, "pluginSlot",    -1);
+
     // Automation cue
     c.automationPath     = jget<std::string>(j, "automationPath", "");
     c.automationDuration = jget<double>     (j, "automationDuration", 5.0);
@@ -416,6 +420,11 @@ static json cueToJson(const ShowFile::CueData& c) {
             }
             j["automationCurve"] = arr;
         }
+    }
+
+    if (c.type == "deactivate" || c.type == "reactivate") {
+        if (c.pluginChannel >= 0) j["pluginChannel"] = c.pluginChannel;
+        if (c.pluginSlot    >= 0) j["pluginSlot"]    = c.pluginSlot;
     }
 
     if (c.type == "network") {

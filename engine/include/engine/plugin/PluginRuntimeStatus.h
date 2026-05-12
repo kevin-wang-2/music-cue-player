@@ -8,7 +8,8 @@ enum class PluginRuntimeStatus {
     Failed,            // Found but instantiation or initialization failed
     UnsupportedLayout, // Channel layout not supported by this plugin
     StateRestoreFailed,// Plugin loaded OK but saved state could not be applied
-    Disabled           // Explicitly disabled; slot present but bypassed
+    Disabled,          // Explicitly disabled; slot present but bypassed
+    Deactivated        // Instance destroyed by Deactivate cue; will resume on Reactivate
 };
 
 inline const char* toString(PluginRuntimeStatus s) {
@@ -19,6 +20,7 @@ inline const char* toString(PluginRuntimeStatus s) {
     case PluginRuntimeStatus::UnsupportedLayout:  return "unsupportedLayout";
     case PluginRuntimeStatus::StateRestoreFailed: return "stateRestoreFailed";
     case PluginRuntimeStatus::Disabled:           return "disabled";
+    case PluginRuntimeStatus::Deactivated:        return "deactivated";
     }
     return "unknown";
 }

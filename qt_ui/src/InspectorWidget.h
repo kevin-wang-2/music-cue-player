@@ -77,6 +77,8 @@ private:
     void buildScriptTab();
     void buildSnapshotTab();
     void loadSnapshotTab();
+    void buildPluginTargetTab();
+    void loadPluginTargetTab();
     void buildAutomationTab();
     void loadAutomationTab();
     // Read the current value of a parameter path from sf.audioSetup (for default curve seeding).
@@ -203,6 +205,11 @@ private:
     // Snapshot tab
     QWidget*    m_snapshotPage{nullptr};
     QComboBox*  m_comboSnapshot{nullptr};
+
+    // Deactivate / Reactivate tab
+    QWidget*    m_pluginTargetPage{nullptr};
+    QComboBox*  m_comboPluginTargetCh{nullptr};
+    QSpinBox*   m_spinPluginTargetSlot{nullptr};
 
     // Automation tab
     QWidget*        m_automationPage{nullptr};

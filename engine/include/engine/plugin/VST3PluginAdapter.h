@@ -73,8 +73,9 @@ public:
     void setResizeCallback(std::function<void(int w, int h)> cb);
 
     // ── Bypass bridging ──────────────────────────────────────────────────────
-    void setNativeBypass(bool bypass);
-    bool getNativeBypass() const;
+    bool hasNativeBypass()            const override;
+    void setNativeBypass(bool bypass)       override;
+    bool getNativeBypass()            const;
 
 private:
     explicit VST3PluginAdapter();

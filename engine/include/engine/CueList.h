@@ -468,6 +468,23 @@ public:
     using PluginAccessor = std::function<std::shared_ptr<mcp::plugin::AudioProcessor>(int ch, int slot)>;
     void setPluginAccessor(PluginAccessor acc) { m_pluginAccessor = std::move(acc); }
 
+    // Callbacks invoked when a Deactivate or Reactivate cue fires.
+    // Signature: void(int channel, int slot)
+    using PluginWrapperCallback = std::function<void(int ch, int slot)>;
+    void setPluginDeactivateCallback(PluginWrapperCallback cb) { m_pluginDeactivateCb = std::move(cb); }
+    void setPluginReactivateCallback(PluginWrapperCallback cb) { m_pluginReactivateCb = std::move(cb); }
+
+    // Append a Deactivate cue.  When fired, calls the deactivate callback for
+    // the plugin at (channel, slot).
+    bool addDeactivateCue(const std::string& name = "", double preWait = 0.0);
+
+    // Append a Reactivate cue.  When fired, calls the reactivate callback for
+    // the plugin at (channel, slot).
+    bool addReactivateCue(const std::string& name = "", double preWait = 0.0);
+
+    // Set the target (channel, slot) for a Deactivate or Reactivate cue.
+    void setCuePluginSlot(int index, int channel, int slot);
+
 private:
     bool fire(int cueIndex);
     int64_t scheduleVoice(int cueIndex);
@@ -566,7 +583,9 @@ private:
     std::vector<Cue> m_cues;
     int m_selectedIndex{0};
     ChannelMap    m_channelMap;
-    PluginAccessor m_pluginAccessor;  // set by AppModel; null = no plugin automation
+    PluginAccessor         m_pluginAccessor;    // set by AppModel; null = no plugin automation
+    PluginWrapperCallback  m_pluginDeactivateCb; // fires on Deactivate cue
+    PluginWrapperCallback  m_pluginReactivateCb; // fires on Reactivate cue
     std::vector<ShowFile::NetworkSetup::Patch> m_networkPatches;
     std::vector<ShowFile::MidiSetup::Patch>    m_midiPatches;
 

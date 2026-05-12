@@ -334,6 +334,10 @@ bool rebuildCueList(AppModel& m, int listIdx, std::string& /*err*/) {
                     cl.addSnapshotCue(cd.name, cd.preWait);
                 } else if (cd.type == "automation") {
                     cl.addAutomationCue(cd.name, cd.preWait);
+                } else if (cd.type == "deactivate") {
+                    cl.addDeactivateCue(cd.name, cd.preWait);
+                } else if (cd.type == "reactivate") {
+                    cl.addReactivateCue(cd.name, cd.preWait);
                 } else if (cd.type == "network") {
                     cl.addNetworkCue(cd.name, cd.preWait);
                 } else if (cd.type == "midi") {
@@ -374,6 +378,8 @@ bool rebuildCueList(AppModel& m, int listIdx, std::string& /*err*/) {
                         pts.push_back({p.time, p.value, p.isHandle});
                     cl.setCueAutomationCurve(myIdx, pts);
                 }
+                if (cd.type == "deactivate" || cd.type == "reactivate")
+                    cl.setCuePluginSlot(myIdx, cd.pluginChannel, cd.pluginSlot);
                 if (cd.type == "network") {
                     // Resolve patch name → index
                     int patchIdx = -1;
@@ -833,6 +839,20 @@ void syncSfFromCues(AppModel& m, int listIdx) {
                     ++i;
                     break;
                 }
+
+                case mcp::CueType::Deactivate:
+                    cd.type          = "deactivate";
+                    cd.pluginChannel = c->pluginChannel;
+                    cd.pluginSlot    = c->pluginSlot;
+                    ++i;
+                    break;
+
+                case mcp::CueType::Reactivate:
+                    cd.type          = "reactivate";
+                    cd.pluginChannel = c->pluginChannel;
+                    cd.pluginSlot    = c->pluginSlot;
+                    ++i;
+                    break;
             }
 
             dest.push_back(std::move(cd));
@@ -1427,6 +1447,14 @@ static mcp::Cue buildEngineCue(
         cue.type = mcp::CueType::Snapshot;
     } else if (cd.type == "automation") {
         cue.type = mcp::CueType::Automation;
+    } else if (cd.type == "deactivate") {
+        cue.type          = mcp::CueType::Deactivate;
+        cue.pluginChannel = cd.pluginChannel;
+        cue.pluginSlot    = cd.pluginSlot;
+    } else if (cd.type == "reactivate") {
+        cue.type          = mcp::CueType::Reactivate;
+        cue.pluginChannel = cd.pluginChannel;
+        cue.pluginSlot    = cd.pluginSlot;
     } else if (cd.type == "network") {
         cue.type = mcp::CueType::Network;
     } else if (cd.type == "midi") {
@@ -1477,6 +1505,8 @@ static void applyCueSetters(
             pts.push_back({p.time, p.value, p.isHandle});
         cl.setCueAutomationCurve(flatIdx, pts);
     }
+    if (cd.type == "deactivate" || cd.type == "reactivate")
+        cl.setCuePluginSlot(flatIdx, cd.pluginChannel, cd.pluginSlot);
     if (cd.type == "network") {
         int patchIdx = -1;
         for (int pi = 0; pi < (int)m.sf.networkSetup.patches.size(); ++pi) {

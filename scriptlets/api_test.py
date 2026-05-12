@@ -1,7 +1,7 @@
 """
 api_test — comprehensive API test for the mcp scripting layer.
 
-Designed to be run from the "Run API Test" scriptlet cue in api_test.json.
+Designed to be run from the "Run API Test" scriptlet cue in api_test.mcp.
 The test creates/deletes a temporary cue list — your existing show is not modified.
 """
 
@@ -193,7 +193,7 @@ def run():
             fail("insert_cue_list_at()", e)
 
     # ══════════════════════════════════════════════════════════════════════
-    # 6. CueList methods
+    # 6. CueList methods (including new cue types)
     # ══════════════════════════════════════════════════════════════════════
     section("CueList methods (temporary list)")
 
@@ -218,12 +218,26 @@ def run():
         except Exception as e:
             fail("insert_cue() second", e)
 
+        # New cue types: deactivate and reactivate
+        try:
+            cue_dact = test_cl.insert_cue("deactivate", cuenumber="T3", cuename="Deactivate Plugin")
+            assert cue_dact.type == "deactivate"
+            ok(f"insert_cue('deactivate') → type={cue_dact.type!r}")
+        except Exception as e:
+            fail("insert_cue('deactivate')", e)
+
+        try:
+            cue_react = test_cl.insert_cue("reactivate", cuenumber="T4", cuename="Reactivate Plugin")
+            assert cue_react.type == "reactivate"
+            ok(f"insert_cue('reactivate') → type={cue_react.type!r}")
+        except Exception as e:
+            fail("insert_cue('reactivate')", e)
+
         try:
             if cue_a:
                 cue_g = test_cl.insert_cue_at(
                     cue_a, "group", cuenumber="T1.5", cuename="Test Group")
                 ok(f"insert_cue_at(after T1) → {cue_g!r}")
-                # insert_cue_at shifted T2 from index 1→2; refresh cue_b to avoid stale index.
                 fresh = test_cl.list_cues()
                 if len(fresh) >= 3:
                     cue_b = fresh[2]
@@ -244,11 +258,10 @@ def run():
             fail("move_cue_at()", e)
 
         try:
-            # Use fresh refs: after move, re-fetch to avoid stale indices.
             fresh = test_cl.list_cues()
             if len(fresh) >= 3 and cue_g:
-                ref_fresh = fresh[1]   # T1.5 group
-                cue_fresh = fresh[2]   # T2
+                ref_fresh = fresh[1]
+                cue_fresh = fresh[2]
                 test_cl.move_cue_at(ref_fresh, cue_fresh, to_group=True)
                 ok(f"move_cue_at(to_group=True) → {[c.number for c in test_cl.list_cues()]}")
         except Exception as e:
@@ -262,8 +275,6 @@ def run():
             fail("delete_cue()", e)
 
         try:
-            # Always re-fetch: deleting a group also removes its children,
-            # so the flat list shrinks by more than one and old indices become stale.
             while True:
                 remaining = test_cl.list_cues()
                 if not remaining:
@@ -388,6 +399,216 @@ def run():
     ok("go() — skipped (would fire the selected cue)")
 
     # ══════════════════════════════════════════════════════════════════════
+    # 11. mcp.mix_console
+    # ══════════════════════════════════════════════════════════════════════
+    section("mcp.mix_console — module import & channel list")
+
+    import mcp.mix_console as mc
+
+    try:
+        channels = mc.list_channels()
+        assert isinstance(channels, list)
+        ok(f"list_channels() → {len(channels)} channel(s)")
+    except Exception as e:
+        fail("list_channels()", e)
+
+    # Append a test channel so we always have one to probe, regardless of show config.
+    test_ch = None
+    pre_count = 0
+    try:
+        pre_count = len(mc.list_channels())
+        test_ch = mc.append_channel()
+        post_count = len(mc.list_channels())
+        assert post_count == pre_count + 1
+        ok(f"append_channel() → {test_ch!r}  total={post_count}")
+    except Exception as e:
+        fail("append_channel()", e)
+
+    section("mcp.mix_console — Channel properties")
+
+    if test_ch is not None:
+        try:
+            ch0 = mc.get_channel(test_ch.ch)
+            ok(f"get_channel({test_ch.ch}) → {ch0!r}")
+        except Exception as e:
+            fail(f"get_channel({test_ch.ch})", e)
+
+        try:
+            old_name = test_ch.name
+            test_ch.name = "_api_test_ch_"
+            assert test_ch.name == "_api_test_ch_"
+            test_ch.name = old_name
+            ok("channel.name round-trip")
+        except Exception as e:
+            fail("channel.name", e)
+
+        try:
+            old_fader = test_ch.fader
+            test_ch.fader = -18.0
+            assert abs(test_ch.fader - -18.0) < 0.5
+            test_ch.fader = old_fader
+            ok(f"channel.fader round-trip (was {old_fader:.1f} dB)")
+        except Exception as e:
+            fail("channel.fader", e)
+
+        try:
+            old_mute = test_ch.mute
+            test_ch.mute = True
+            assert test_ch.mute is True
+            test_ch.mute = False
+            assert test_ch.mute is False
+            test_ch.mute = old_mute
+            ok("channel.mute round-trip")
+        except Exception as e:
+            fail("channel.mute", e)
+
+        try:
+            old_pol = test_ch.polarity
+            test_ch.polarity = True
+            assert test_ch.polarity is True
+            test_ch.polarity = old_pol
+            ok("channel.polarity round-trip")
+        except Exception as e:
+            fail("channel.polarity", e)
+
+        try:
+            old_delay = test_ch.delay
+            test_ch.delay = 5.0
+            assert abs(test_ch.delay - 5.0) < 0.1
+            test_ch.delay = old_delay
+            ok(f"channel.delay round-trip (was {old_delay} ms)")
+        except Exception as e:
+            fail("channel.delay", e)
+
+        try:
+            old_pdc = test_ch.pdc_isolation
+            test_ch.pdc_isolation = True
+            assert test_ch.pdc_isolation is True
+            test_ch.pdc_isolation = old_pdc
+            ok("channel.pdc_isolation round-trip")
+        except Exception as e:
+            fail("channel.pdc_isolation", e)
+
+        try:
+            ls = test_ch.get_link_state()
+            assert isinstance(ls, str)
+            ok(f"channel.get_link_state() → {ls!r}")
+        except Exception as e:
+            fail("channel.get_link_state()", e)
+
+        try:
+            old_xp = test_ch.get_crosspoint(0)
+            test_ch.set_crosspoint(0, -60.0)
+            v = test_ch.get_crosspoint(0)
+            assert abs(v - -60.0) < 1.0
+            test_ch.set_crosspoint(0, old_xp)
+            ok("channel.get_crosspoint / set_crosspoint round-trip")
+        except Exception as e:
+            fail("channel.get_crosspoint / set_crosspoint", e)
+
+    section("mcp.mix_console — PluginSlot & SendSlot")
+
+    if test_ch is not None:
+        try:
+            ps = test_ch.get_plugin_slot(0)
+            ok(f"channel.get_plugin_slot(0) → {ps!r}")
+            params = ps.list_params()
+            assert isinstance(params, list)
+            ok(f"plugin_slot.list_params() → {len(params)} param(s)  "
+               f"(0 expected — no plugin loaded)")
+        except Exception as e:
+            fail("channel.get_plugin_slot / list_params", e)
+
+        try:
+            ss = test_ch.get_send_slot(0)
+            ok(f"channel.get_send_slot(0) → {ss!r}")
+            ok(f"  send_slot.level={ss.level}  mute={ss.mute}  pan={ss.pan}")
+        except Exception as e:
+            fail("channel.get_send_slot", e)
+
+        try:
+            ss = test_ch.get_send_slot(0)
+            old_lv = ss.level
+            ss.level = -6.0
+            assert abs(ss.level - -6.0) < 0.5
+            ss.level = old_lv
+            ok("send_slot.level round-trip")
+        except Exception as e:
+            fail("send_slot.level", e)
+
+        try:
+            ss = test_ch.get_send_slot(0)
+            old_mu = ss.mute
+            ss.mute = True
+            assert ss.mute is True
+            ss.mute = old_mu
+            ok("send_slot.mute round-trip")
+        except Exception as e:
+            fail("send_slot.mute", e)
+
+    section("mcp.mix_console — get_param / set_param")
+
+    if pre_count > 0 or test_ch is not None:
+        target_ch = 0
+        path = f"/mixer/{target_ch}/fader"
+        try:
+            old_v = mc.get_param(path)
+            mc.set_param(path, -24.0)
+            v = mc.get_param(path)
+            assert abs(v - -24.0) < 0.5
+            mc.set_param(path, old_v)
+            ok(f"get_param / set_param round-trip → '{path}'")
+        except Exception as e:
+            fail(f"get_param / set_param ('{path}')", e)
+
+        try:
+            ok(f"get_param('/mixer/{target_ch}/mute') → "
+               f"{mc.get_param('/mixer/' + str(target_ch) + '/mute')}")
+        except Exception as e:
+            fail("get_param mute", e)
+    else:
+        ok("get_param / set_param — skipped (no channels)")
+
+    section("mcp.mix_console — snapshots")
+
+    try:
+        snaps = mc.list_snapshot()
+        assert isinstance(snaps, list)
+        ok(f"list_snapshot() → {len(snaps)} snapshot(s)")
+        for s in snaps:
+            assert "id" in s and "name" in s
+        if snaps:
+            ok(f"  first: id={snaps[0]['id']}  name={snaps[0]['name']!r}")
+    except Exception as e:
+        fail("list_snapshot()", e)
+
+    # scope helpers (no snapshot needed for basic API check)
+    try:
+        snaps = mc.list_snapshot()
+        if snaps:
+            sid = snaps[0]["id"]
+            mc.set_snapshot_scope(sid, "/mixer/0/fader")
+            assert mc.check_snapshot_scope(sid, "/mixer/0/fader") is True
+            mc.unset_snapshot_scope(sid, "/mixer/0/fader")
+            assert mc.check_snapshot_scope(sid, "/mixer/0/fader") is False
+            ok(f"set/unset/check_snapshot_scope on id={sid}")
+        else:
+            ok("snapshot scope API — skipped (no snapshots)")
+    except Exception as e:
+        fail("snapshot scope API", e)
+
+    section("mcp.mix_console — cleanup")
+
+    try:
+        if test_ch is not None:
+            mc.remove_channel(test_ch)
+            after = len(mc.list_channels())
+            assert after == pre_count
+            ok(f"remove_channel() — back to {after} channel(s)")
+    except Exception as e:
+        fail("remove_channel()", e)
+
+    # ══════════════════════════════════════════════════════════════════════
     # Report
     # ══════════════════════════════════════════════════════════════════════
     total  = sum(1 for r in results if "✓" in r or "✗" in r)
@@ -399,5 +620,5 @@ def run():
         summary += f"  ({failed} FAILED)"
 
     report = summary + "\n" + "\n".join(results)
-    print(report)          # full details go to the output / console panel
-    mcp.alert(summary)     # brief one-liner only — safe to dismiss with Enter
+    print(report)
+    mcp.alert(summary)

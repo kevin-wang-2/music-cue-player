@@ -47,6 +47,37 @@
     - [function] set_snapshot_scope(idx, path)
     - [function] unset_snapshot_scope(idx, path)
     - [function] check_snapshot_scope(idx, path="")
+    - [class] Channel: 类似Cue，是用python class表示的channel抽象，注意setter&getter，如果是link channel的情况下，会共享共享的数值（如fader）
+        - [property] name
+        - [property] mute
+        - [property] fader
+        - [property] polarity
+        - [property] delay
+        - [property] crosspoint[output]
+        - [property] pdc_isolation
+        - [function] get_link_state() - 返回"mono", "stereo_left", "stereo_right"
+        - [function] link()
+        - [function] get_plugin_slot(id)
+        - [function] get_send_slot(id)
+    - [function] get_channel(id)
+    - [function] list_channel()
+    - [function] append_channel() - 返回Channel对象
+    - [function] remove_channel()
+    - [class] PluginSlot: 类似Cue, 是用python class表示的plugin slot
+        - [function] load(plugin_id) 如果槽位已有plugin则替换
+        - [function] unload()
+        - [function] deactivate()
+        - [function] reactivate()
+        - [function] list_param() - 返回的数组包括id，名字，类型，最大最小值
+        - [function] set_param(param_id, value)
+        - [function] get_param(param_id, value)
+        **注** 这些param仍然可以在外面用完整路径来找到，这个只是一个shortcut
+    - [class] SendSlot: 类似PluginSlot，只是代表了send信息，注意getter&setter
+        - [property] mute
+        - [property] level
+        - [property] pan - 是一个tuple，可能有0，1，2个元素
+        - [function] engage(target_channel)
+        - [function] disengage()
 
 - [module]event
     - [function] on_cue_fired(callback): 当有一个cue被go或者start的时候（不管prewait），给callback注入cue信息，以下类似

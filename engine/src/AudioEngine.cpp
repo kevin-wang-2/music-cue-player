@@ -603,7 +603,7 @@ static void closeAllStreams(AudioEngineImpl* impl) {
     // Stop and close all PA streams first so callbacks are no longer running.
     for (auto& ds : impl->streams) {
         if (ds->stream) {
-            Pa_StopStream(ds->stream);
+            Pa_AbortStream(ds->stream);  // immediate stop; no drain wait
             Pa_CloseStream(ds->stream);
             ds->stream = nullptr;
         }

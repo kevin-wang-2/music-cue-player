@@ -560,6 +560,34 @@ std::vector<std::pair<std::string, double>> CueList::drainAutomationUpdates() {
     return out;
 }
 
+bool CueList::addDeactivateCue(const std::string& name, double preWait) {
+    Cue cue;
+    cue.type           = CueType::Deactivate;
+    cue.preWaitSeconds = preWait;
+    cue.name           = name.empty() ? "Deactivate Plugin" : name;
+    cue.stableId = m_nextStableId++;
+    m_cues.push_back(std::move(cue));
+    pushSlots();
+    return true;
+}
+
+bool CueList::addReactivateCue(const std::string& name, double preWait) {
+    Cue cue;
+    cue.type           = CueType::Reactivate;
+    cue.preWaitSeconds = preWait;
+    cue.name           = name.empty() ? "Reactivate Plugin" : name;
+    cue.stableId = m_nextStableId++;
+    m_cues.push_back(std::move(cue));
+    pushSlots();
+    return true;
+}
+
+void CueList::setCuePluginSlot(int index, int channel, int slot) {
+    if (index < 0 || index >= (int)m_cues.size()) return;
+    m_cues[static_cast<size_t>(index)].pluginChannel = channel;
+    m_cues[static_cast<size_t>(index)].pluginSlot    = slot;
+}
+
 bool CueList::addNetworkCue(const std::string& name, double preWait) {
     Cue cue;
     cue.type           = CueType::Network;
@@ -2407,6 +2435,18 @@ bool CueList::fire(int idx) {
             }
             break;
         }
+
+        case CueType::Deactivate:
+            if (cue.pluginChannel >= 0 && cue.pluginSlot >= 0 && m_pluginDeactivateCb)
+                m_pluginDeactivateCb(cue.pluginChannel, cue.pluginSlot);
+            result = true;
+            break;
+
+        case CueType::Reactivate:
+            if (cue.pluginChannel >= 0 && cue.pluginSlot >= 0 && m_pluginReactivateCb)
+                m_pluginReactivateCb(cue.pluginChannel, cue.pluginSlot);
+            result = true;
+            break;
     }
 
     if (result && cue.autoFollow) {

@@ -12,7 +12,7 @@
 
 namespace mcp {
 
-enum class CueType { Audio, Start, Stop, Fade, Arm, Devamp, Group, MusicContext, Marker, Network, Midi, Timecode, Goto, Memo, Scriptlet, Snapshot, Automation };
+enum class CueType { Audio, Start, Stop, Fade, Arm, Devamp, Group, MusicContext, Marker, Network, Midi, Timecode, Goto, Memo, Scriptlet, Snapshot, Automation, Deactivate, Reactivate };
 
 // Per-audio-cue channel routing.
 // outLevelDb[o]  — per-output-channel level in dB (0.0 = unity).
@@ -106,6 +106,10 @@ struct Cue {
     // Snapshot cues
     int snapshotId{-1};               // stable snapshot ID to recall; -1 = none
 
+    // Deactivate / Reactivate cues — target plugin slot in the mix console
+    int pluginChannel{-1};  // 0-based channel index (-1 = unset)
+    int pluginSlot   {-1};  // 0-based slot index within the channel chain (-1 = unset)
+
     // Automation cues
     // AutomationParamMode classifies paths: Linear = smooth interpolation (fader, xp),
     // Step = snap to 0/1 (mute, polarity), Forbidden = not user-selectable (delay).
@@ -189,8 +193,10 @@ struct Cue {
         if (type == CueType::Midi)         return midiPatchIdx >= 0;
         if (type == CueType::Timecode)     return tcStartTC < tcEndTC;
         if (type == CueType::Goto)       return targetIndex >= 0;
-        if (type == CueType::Snapshot)   return snapshotId >= 0;
-        if (type == CueType::Automation) return !automationPath.empty() && !automationCurve.empty();
+        if (type == CueType::Snapshot)    return snapshotId >= 0;
+        if (type == CueType::Automation)  return !automationPath.empty() && !automationCurve.empty();
+        if (type == CueType::Deactivate)  return pluginChannel >= 0 && pluginSlot >= 0;
+        if (type == CueType::Reactivate)  return pluginChannel >= 0 && pluginSlot >= 0;
         return true;   // Group, Start, Stop, Arm, Memo, Scriptlet always "loaded"
     }
 };

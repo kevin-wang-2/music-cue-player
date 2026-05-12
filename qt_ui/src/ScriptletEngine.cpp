@@ -48,6 +48,44 @@ static std::function<int(const std::string&)>      s_insertListCb;
 static std::function<int(int, const std::string&)> s_insertListAtCb;
 static std::function<bool(int)>                    s_deleteListCb;
 
+// --- mcp.mix_console callbacks ---
+static std::function<double(const std::string&)>                      s_mixGetParamCb;
+static std::function<void(const std::string&, double)>                s_mixSetParamCb;
+static std::function<std::vector<ScriptletSnapshotEntry>()>           s_snapshotListCb;
+static std::function<bool(int)>                                       s_snapshotLoadCb;
+static std::function<bool(int)>                                       s_snapshotStoreCb;
+static std::function<bool(int)>                                       s_snapshotDeleteCb;
+static std::function<std::vector<std::string>(int)>                   s_snapshotGetScopeCb;
+static std::function<void(int, const std::string&, bool)>             s_snapshotSetScopeCb;
+static std::function<int()>                                           s_channelCountCb;
+static std::function<ScriptletChannelInfo(int)>                       s_channelInfoCb;
+static std::function<void(int, const std::string&)>                   s_channelSetNameCb;
+static std::function<void(int, float)>                                s_channelSetFaderCb;
+static std::function<void(int, bool)>                                 s_channelSetMuteCb;
+static std::function<void(int, bool)>                                 s_channelSetPolarityCb;
+static std::function<void(int, float)>                                s_channelSetDelayCb;
+static std::function<void(int, bool)>                                 s_channelSetPdcCb;
+static std::function<float(int, int)>                                 s_channelGetXpointCb;
+static std::function<void(int, int, float)>                           s_channelSetXpointCb;
+static std::function<void(int, bool)>                                 s_channelLinkCb;
+static std::function<int()>                                           s_appendChannelCb;
+static std::function<bool(int)>                                       s_removeChannelCb;
+static std::function<int(int)>                                        s_pluginSlotCountCb;
+static std::function<std::vector<ScriptletPluginParamInfo>(int, int)> s_pluginListParamsCb;
+static std::function<float(int, int, const std::string&)>             s_pluginGetParamCb;
+static std::function<void(int, int, const std::string&, float)>       s_pluginSetParamCb;
+static std::function<bool(int, int, const std::string&)>              s_pluginLoadCb;
+static std::function<bool(int, int)>                                  s_pluginUnloadCb;
+static std::function<void(int, int)>                                  s_pluginDeactivateScriptletCb;
+static std::function<void(int, int)>                                  s_pluginReactivateScriptletCb;
+static std::function<int(int)>                                        s_channelSendCountCb;
+static std::function<ScriptletSendInfo(int, int)>                     s_sendInfoCb;
+static std::function<void(int, int, bool)>                            s_sendSetMuteCb;
+static std::function<void(int, int, float)>                           s_sendSetLevelCb;
+static std::function<void(int, int, float, float)>                    s_sendSetPanCb;
+static std::function<bool(int, int, int)>                             s_sendEngageCb;
+static std::function<bool(int, int)>                                  s_sendDisengageCb;
+
 // --- other ---
 static std::function<ScriptletMCInfo()>                  s_getMcCb;
 static std::function<ScriptletStateInfo()>               s_getStateCb;
@@ -100,6 +138,7 @@ extern PyTypeObject MCPTimeType;
 typedef struct {
     PyObject_HEAD
     int index;
+    int list_id;  // -1 = active list (s_cueInfoCb); >= 0 = specific list (s_clInfoCb)
 } MCPCueObject;
 
 // Guard: Cue cannot be instantiated from Python; only obtainable via C factories.
@@ -110,8 +149,13 @@ static PyObject* mcp_cue_new_guard(PyTypeObject*, PyObject*, PyObject*) {
 }
 
 static PyObject* mcp_cue_repr(MCPCueObject* self) {
-    if (!s_cueInfoCb) return PyUnicode_FromFormat("<Cue %d>", self->index);
-    const auto info = s_cueInfoCb(self->index);
+    ScriptletCueInfo info;
+    if (self->list_id >= 0 && s_clInfoCb)
+        info = s_clInfoCb(self->list_id, self->index);
+    else if (s_cueInfoCb)
+        info = s_cueInfoCb(self->index);
+    else
+        return PyUnicode_FromFormat("<Cue %d>", self->index);
     return PyUnicode_FromFormat("<Cue %s '%s' (%s)>",
                                 info.number.c_str(),
                                 info.name.c_str(),
@@ -187,6 +231,11 @@ static PyMethodDef kCueMethods[] = {
 // --- Properties (getset) ----------------------------------------------------
 
 static inline bool getInfo(MCPCueObject* self, ScriptletCueInfo& out) {
+    if (self->list_id >= 0) {
+        if (!s_clInfoCb) { PyErr_SetString(PyExc_RuntimeError, "no cue list info callback"); return false; }
+        out = s_clInfoCb(self->list_id, self->index);
+        return true;
+    }
     if (!s_cueInfoCb) { PyErr_SetString(PyExc_RuntimeError, "no cue info callback"); return false; }
     out = s_cueInfoCb(self->index);
     return true;
@@ -478,20 +527,25 @@ static PyObject* PyInit_mcp_time() {
 // mcp.cue helpers
 
 static const char* classForType(const std::string& t) {
-    if (t == "audio")         return "AudioCue";
-    if (t == "start")         return "StartCue";
-    if (t == "stop")          return "StopCue";
-    if (t == "arm")           return "ArmCue";
-    if (t == "fade")          return "FadeCue";
-    if (t == "devamp")        return "DevampCue";
-    if (t == "goto")          return "GotoCue";
-    if (t == "memo")          return "MemoCue";
-    if (t == "scriptlet")     return "ScriptletCue";
-    if (t == "network")       return "NetworkCue";
-    if (t == "midi")          return "MidiCue";
-    if (t == "timecode")      return "TimecodeCue";
-    if (t == "marker")        return "MarkerCue";
-    if (t == "group")         return "GroupCue";
+    if (t == "audio")          return "AudioCue";
+    if (t == "start")          return "StartCue";
+    if (t == "stop")           return "StopCue";
+    if (t == "arm")            return "ArmCue";
+    if (t == "fade")           return "FadeCue";
+    if (t == "devamp")         return "DevampCue";
+    if (t == "goto")           return "GotoCue";
+    if (t == "memo")           return "MemoCue";
+    if (t == "scriptlet")      return "ScriptletCue";
+    if (t == "network")        return "NetworkCue";
+    if (t == "midi")           return "MidiCue";
+    if (t == "timecode")       return "TimecodeCue";
+    if (t == "marker")         return "MarkerCue";
+    if (t == "group")          return "GroupCue";
+    if (t == "snapshot")       return "SnapshotCue";
+    if (t == "automation")     return "AutomationCue";
+    if (t == "music_context")  return "MCCue";
+    if (t == "deactivate")     return "DeactivateCue";
+    if (t == "reactivate")     return "ReactivateCue";
     return "Cue";
 }
 
@@ -514,7 +568,8 @@ static PyObject* makeCueObject(PyObject* cueMod, int idx) {
 
     MCPCueObject* obj = (MCPCueObject*)type->tp_alloc(type, 0);
     if (!obj) return nullptr;
-    obj->index = idx;
+    obj->index   = idx;
+    obj->list_id = -1;
     return (PyObject*)obj;
 }
 
@@ -570,20 +625,25 @@ static PyObject* PyInit_mcp_cue() {
     PyModule_AddObject(mod, "Cue", (PyObject*)&MCPCueType);
 
     static const char* kSubclasses = R"py(
-AudioCue    = type('AudioCue',    (Cue,), {'__doc__': 'Audio playback cue'})
-StartCue    = type('StartCue',    (Cue,), {'__doc__': 'Start/trigger another cue'})
-StopCue     = type('StopCue',     (Cue,), {'__doc__': 'Stop another cue'})
-ArmCue      = type('ArmCue',      (Cue,), {'__doc__': 'Pre-buffer another cue'})
-FadeCue     = type('FadeCue',     (Cue,), {'__doc__': 'Fade another cue'})
-DevampCue   = type('DevampCue',   (Cue,), {'__doc__': 'Exit-vamp / devamp cue'})
-GotoCue     = type('GotoCue',     (Cue,), {'__doc__': 'Jump to a cue number'})
-MemoCue     = type('MemoCue',     (Cue,), {'__doc__': 'Memo / label cue'})
-ScriptletCue= type('ScriptletCue',(Cue,), {'__doc__': 'Python scriptlet cue'})
-NetworkCue  = type('NetworkCue',  (Cue,), {'__doc__': 'Network output cue'})
-MidiCue     = type('MidiCue',     (Cue,), {'__doc__': 'MIDI output cue'})
-TimecodeCue = type('TimecodeCue', (Cue,), {'__doc__': 'LTC/MTC timecode cue'})
-MarkerCue   = type('MarkerCue',   (Cue,), {'__doc__': 'Start from a time marker'})
-GroupCue    = type('GroupCue',    (Cue,), {'__doc__': 'Group / timeline cue'})
+AudioCue      = type('AudioCue',      (Cue,), {'__doc__': 'Audio playback cue'})
+StartCue      = type('StartCue',      (Cue,), {'__doc__': 'Start/trigger another cue'})
+StopCue       = type('StopCue',       (Cue,), {'__doc__': 'Stop another cue'})
+ArmCue        = type('ArmCue',        (Cue,), {'__doc__': 'Pre-buffer another cue'})
+FadeCue       = type('FadeCue',       (Cue,), {'__doc__': 'Fade another cue'})
+DevampCue     = type('DevampCue',     (Cue,), {'__doc__': 'Exit-vamp / devamp cue'})
+GotoCue       = type('GotoCue',       (Cue,), {'__doc__': 'Jump to a cue number'})
+MemoCue       = type('MemoCue',       (Cue,), {'__doc__': 'Memo / label cue'})
+ScriptletCue  = type('ScriptletCue',  (Cue,), {'__doc__': 'Python scriptlet cue'})
+NetworkCue    = type('NetworkCue',    (Cue,), {'__doc__': 'Network output cue'})
+MidiCue       = type('MidiCue',       (Cue,), {'__doc__': 'MIDI output cue'})
+TimecodeCue   = type('TimecodeCue',   (Cue,), {'__doc__': 'LTC/MTC timecode cue'})
+MarkerCue     = type('MarkerCue',     (Cue,), {'__doc__': 'Start from a time marker'})
+GroupCue      = type('GroupCue',      (Cue,), {'__doc__': 'Group / timeline cue'})
+SnapshotCue   = type('SnapshotCue',   (Cue,), {'__doc__': 'Recall a mix snapshot'})
+AutomationCue = type('AutomationCue', (Cue,), {'__doc__': 'Drive a parameter curve'})
+MCCue         = type('MCCue',         (Cue,), {'__doc__': 'Music context cue'})
+DeactivateCue = type('DeactivateCue', (Cue,), {'__doc__': 'Deactivate a plugin slot'})
+ReactivateCue = type('ReactivateCue', (Cue,), {'__doc__': 'Reactivate a plugin slot'})
 )py";
 
     PyObject* modDict = PyModule_GetDict(mod);
@@ -599,6 +659,7 @@ static bool isValidCueType(const char* t) {
     static const char* const kTypes[] = {
         "audio", "memo", "group", "start", "stop", "arm", "devamp",
         "fade", "timecode", "midi", "network", "goto", "marker", "scriptlet",
+        "snapshot", "automation", "deactivate", "reactivate",
         nullptr
     };
     if (!t || !*t) return false;
@@ -640,7 +701,8 @@ static PyObject* makeCueObjectForList(PyObject* cueMod, int list_id, int idx) {
     }
     MCPCueObject* obj = (MCPCueObject*)type->tp_alloc(type, 0);
     if (!obj) return nullptr;
-    obj->index = idx;
+    obj->index   = idx;
+    obj->list_id = list_id;
     return (PyObject*)obj;
 }
 
@@ -660,9 +722,18 @@ static PyMethodDef kCueListMethods[] = {
     {nullptr}
 };
 
+static PyObject* mcp_cuelist_get_name(MCPCueListObject* self, void*) {
+    if (s_listInfoCb) {
+        for (const auto& [id, name] : s_listInfoCb())
+            if (id == self->list_id)
+                return PyUnicode_FromString(name.c_str());
+    }
+    return PyUnicode_FromString("");
+}
+
 static PyGetSetDef kCueListGetSet[] = {
-    {const_cast<char*>("id"), (getter_func)mcp_cuelist_get_id, nullptr,
-     const_cast<char*>("numeric list ID"), nullptr},
+    {const_cast<char*>("id"),   (getter_func)mcp_cuelist_get_id,   nullptr, const_cast<char*>("numeric list ID"), nullptr},
+    {const_cast<char*>("name"), (getter_func)mcp_cuelist_get_name, nullptr, const_cast<char*>("list name"),       nullptr},
     {nullptr}
 };
 
@@ -924,6 +995,18 @@ static PyObject* eventRegister(std::vector<EventCb>& vec, PyObject* arg, bool on
     Py_RETURN_NONE;
 }
 
+static PyObject* eventUnsubscribe(std::vector<EventCb>& vec, PyObject* arg) {
+    if (!PyCallable_Check(arg)) { PyErr_SetString(PyExc_TypeError, "callback must be callable"); return nullptr; }
+    for (auto it = vec.begin(); it != vec.end(); ++it) {
+        if (it->cb == arg) {
+            Py_DECREF(it->cb);
+            vec.erase(it);
+            break;
+        }
+    }
+    Py_RETURN_NONE;
+}
+
 static PyObject* mcp_event_on_cue_fired    (PyObject*, PyObject* a) { return eventRegister(s_cueFiredCbs,    a, false); }
 static PyObject* mcp_event_once_cue_fired  (PyObject*, PyObject* a) { return eventRegister(s_cueFiredCbs,    a, true);  }
 static PyObject* mcp_event_on_cue_selected (PyObject*, PyObject* a) { return eventRegister(s_cueSelectedCbs, a, false); }
@@ -954,6 +1037,26 @@ static PyObject* mcp_event_on_music_event_impl(PyObject*, PyObject* args, bool o
 static PyObject* mcp_event_on_music_event  (PyObject* m, PyObject* a) { return mcp_event_on_music_event_impl(m, a, false); }
 static PyObject* mcp_event_once_music_event(PyObject* m, PyObject* a) { return mcp_event_on_music_event_impl(m, a, true);  }
 
+static PyObject* mcp_event_unsubscribe_cue_fired   (PyObject*, PyObject* a) { return eventUnsubscribe(s_cueFiredCbs,    a); }
+static PyObject* mcp_event_unsubscribe_cue_selected(PyObject*, PyObject* a) { return eventUnsubscribe(s_cueSelectedCbs, a); }
+static PyObject* mcp_event_unsubscribe_cue_inserted(PyObject*, PyObject* a) { return eventUnsubscribe(s_cueInsertedCbs, a); }
+static PyObject* mcp_event_unsubscribe_osc_event   (PyObject*, PyObject* a) { return eventUnsubscribe(s_oscEventCbs,    a); }
+static PyObject* mcp_event_unsubscribe_midi_event  (PyObject*, PyObject* a) { return eventUnsubscribe(s_midiEventCbs,   a); }
+static PyObject* mcp_event_unsubscribe_music_event (PyObject*, PyObject* args) {
+    const char* quant = nullptr;
+    PyObject*   cb    = nullptr;
+    if (!PyArg_ParseTuple(args, "sO", &quant, &cb)) return nullptr;
+    if (!PyCallable_Check(cb)) { PyErr_SetString(PyExc_TypeError, "callback must be callable"); return nullptr; }
+    for (auto it = s_musicEventCbs.begin(); it != s_musicEventCbs.end(); ++it) {
+        if (it->second.cb == cb) {
+            Py_DECREF(it->second.cb);
+            s_musicEventCbs.erase(it);
+            break;
+        }
+    }
+    Py_RETURN_NONE;
+}
+
 static PyObject* mcp_event_clear_all(PyObject*, PyObject*) {
     clearAllEventCallbacks();
     Py_RETURN_NONE;
@@ -970,9 +1073,15 @@ static PyMethodDef kEventMethods[] = {
     {"once_osc_event",       mcp_event_once_osc_event,        METH_O,       "once_osc_event(cb)"},
     {"on_midi_event",        mcp_event_on_midi_event,         METH_O,       "on_midi_event(cb)"},
     {"once_midi_event",      mcp_event_once_midi_event,       METH_O,       "once_midi_event(cb)"},
-    {"on_music_event",       mcp_event_on_music_event,        METH_VARARGS, "on_music_event(quantization, cb)"},
-    {"once_music_event",     mcp_event_once_music_event,      METH_VARARGS, "once_music_event(quantization, cb)"},
-    {"clear_all",            mcp_event_clear_all,             METH_NOARGS,  "clear_all()"},
+    {"on_music_event",             mcp_event_on_music_event,             METH_VARARGS, "on_music_event(quantization, cb)"},
+    {"once_music_event",           mcp_event_once_music_event,           METH_VARARGS, "once_music_event(quantization, cb)"},
+    {"unsubscribe_cue_fired",      mcp_event_unsubscribe_cue_fired,      METH_O,       "unsubscribe_cue_fired(cb)"},
+    {"unsubscribe_cue_selected",   mcp_event_unsubscribe_cue_selected,   METH_O,       "unsubscribe_cue_selected(cb)"},
+    {"unsubscribe_cue_inserted",   mcp_event_unsubscribe_cue_inserted,   METH_O,       "unsubscribe_cue_inserted(cb)"},
+    {"unsubscribe_osc_event",      mcp_event_unsubscribe_osc_event,      METH_O,       "unsubscribe_osc_event(cb)"},
+    {"unsubscribe_midi_event",     mcp_event_unsubscribe_midi_event,     METH_O,       "unsubscribe_midi_event(cb)"},
+    {"unsubscribe_music_event",    mcp_event_unsubscribe_music_event,    METH_VARARGS, "unsubscribe_music_event(quantization, cb)"},
+    {"clear_all",                  mcp_event_clear_all,                  METH_NOARGS,  "clear_all()"},
     {nullptr}
 };
 
@@ -1008,6 +1117,466 @@ static PyObject* PyInit_mcp_error() {
     addErr(s_errNoMasterContext, "mcp.error.NoMasterContextError", "NoMasterContextError");
     addErr(s_errInvalidOp,       "mcp.error.InvalidOperationError","InvalidOperationError");
 
+    return mod;
+}
+
+// ---------------------------------------------------------------------------
+// mcp.mix_console module
+
+// Forward declarations for cross-type references
+extern PyTypeObject MCPPluginSlotType;
+extern PyTypeObject MCPSendSlotType;
+
+typedef struct { PyObject_HEAD int ch; int slot; } MCPPluginSlotObject;
+typedef struct { PyObject_HEAD int ch; } MCPChannelObject;
+
+static PyObject* mcp_channel_new_guard(PyTypeObject*, PyObject*, PyObject*) {
+    PyErr_SetString(PyExc_TypeError, "Channel cannot be instantiated directly; use mcp.mix_console.get_channel()");
+    return nullptr;
+}
+static PyObject* mcp_channel_repr(MCPChannelObject* self) { return PyUnicode_FromFormat("<Channel %d>", self->ch); }
+
+static PyObject* mcp_channel_get_name(MCPChannelObject* self, void*) {
+    if (!s_channelInfoCb) Py_RETURN_NONE;
+    return PyUnicode_FromString(s_channelInfoCb(self->ch).name.c_str());
+}
+static int mcp_channel_set_name(MCPChannelObject* self, PyObject* val, void*) {
+    if (!val || !PyUnicode_Check(val)) { PyErr_SetString(PyExc_TypeError, "name must be a str"); return -1; }
+    const char* s = PyUnicode_AsUTF8(val); if (!s) return -1;
+    if (s_channelSetNameCb) s_channelSetNameCb(self->ch, s);
+    return 0;
+}
+static PyObject* mcp_channel_get_fader(MCPChannelObject* self, void*) {
+    if (!s_channelInfoCb) return PyFloat_FromDouble(0.0);
+    return PyFloat_FromDouble(s_channelInfoCb(self->ch).fader);
+}
+static int mcp_channel_set_fader(MCPChannelObject* self, PyObject* val, void*) {
+    PyObject* f = PyNumber_Float(val); if (!f) return -1;
+    const double v = PyFloat_AsDouble(f); Py_DECREF(f);
+    if (PyErr_Occurred()) return -1;
+    if (s_channelSetFaderCb) s_channelSetFaderCb(self->ch, (float)v);
+    return 0;
+}
+static PyObject* mcp_channel_get_mute(MCPChannelObject* self, void*) {
+    if (!s_channelInfoCb) Py_RETURN_FALSE;
+    return PyBool_FromLong(s_channelInfoCb(self->ch).mute);
+}
+static int mcp_channel_set_mute(MCPChannelObject* self, PyObject* val, void*) {
+    if (s_channelSetMuteCb) s_channelSetMuteCb(self->ch, PyObject_IsTrue(val) != 0);
+    return 0;
+}
+static PyObject* mcp_channel_get_polarity(MCPChannelObject* self, void*) {
+    if (!s_channelInfoCb) Py_RETURN_FALSE;
+    return PyBool_FromLong(s_channelInfoCb(self->ch).polarity);
+}
+static int mcp_channel_set_polarity(MCPChannelObject* self, PyObject* val, void*) {
+    if (s_channelSetPolarityCb) s_channelSetPolarityCb(self->ch, PyObject_IsTrue(val) != 0);
+    return 0;
+}
+static PyObject* mcp_channel_get_delay(MCPChannelObject* self, void*) {
+    if (!s_channelInfoCb) return PyFloat_FromDouble(0.0);
+    return PyFloat_FromDouble(s_channelInfoCb(self->ch).delay);
+}
+static int mcp_channel_set_delay(MCPChannelObject* self, PyObject* val, void*) {
+    PyObject* f = PyNumber_Float(val); if (!f) return -1;
+    const double v = PyFloat_AsDouble(f); Py_DECREF(f);
+    if (PyErr_Occurred()) return -1;
+    if (s_channelSetDelayCb) s_channelSetDelayCb(self->ch, (float)v);
+    return 0;
+}
+static PyObject* mcp_channel_get_pdc_isolation(MCPChannelObject* self, void*) {
+    if (!s_channelInfoCb) Py_RETURN_FALSE;
+    return PyBool_FromLong(s_channelInfoCb(self->ch).pdcIsolation);
+}
+static int mcp_channel_set_pdc_isolation(MCPChannelObject* self, PyObject* val, void*) {
+    if (s_channelSetPdcCb) s_channelSetPdcCb(self->ch, PyObject_IsTrue(val) != 0);
+    return 0;
+}
+
+static PyObject* mcp_channel_get_ch_idx(MCPChannelObject* self, void*) { return PyLong_FromLong(self->ch); }
+
+static PyGetSetDef kChannelGetSet[] = {
+    RO("ch",            mcp_channel_get_ch_idx,                                        "channel index (0-based)"),
+    RW("name",          mcp_channel_get_name,          mcp_channel_set_name,          "channel name"),
+    RW("fader",         mcp_channel_get_fader,         mcp_channel_set_fader,         "fader level in dB"),
+    RW("mute",          mcp_channel_get_mute,          mcp_channel_set_mute,          "mute state"),
+    RW("polarity",      mcp_channel_get_polarity,      mcp_channel_set_polarity,      "phase invert"),
+    RW("delay",         mcp_channel_get_delay,         mcp_channel_set_delay,         "delay in ms"),
+    RW("pdc_isolation", mcp_channel_get_pdc_isolation, mcp_channel_set_pdc_isolation, "PDC isolation"),
+    {nullptr}
+};
+
+static PyObject* mcp_channel_get_link_state(MCPChannelObject* self, PyObject*) {
+    if (!s_channelInfoCb) return PyUnicode_FromString("mono");
+    return PyUnicode_FromString(s_channelInfoCb(self->ch).linkState.c_str());
+}
+static PyObject* mcp_channel_link(MCPChannelObject* self, PyObject* args, PyObject* kwargs) {
+    static const char* kwlist[] = {"link", nullptr};
+    int linked = 1;
+    if (!PyArg_ParseTupleAndKeywords(args, kwargs, "|p", const_cast<char**>(kwlist), &linked)) return nullptr;
+    if (s_channelLinkCb) s_channelLinkCb(self->ch, linked != 0);
+    Py_RETURN_NONE;
+}
+static PyObject* mcp_channel_get_crosspoint(MCPChannelObject* self, PyObject* args) {
+    int out = 0; if (!PyArg_ParseTuple(args, "i", &out)) return nullptr;
+    if (!s_channelGetXpointCb) return PyFloat_FromDouble(0.0);
+    return PyFloat_FromDouble(s_channelGetXpointCb(self->ch, out));
+}
+static PyObject* mcp_channel_set_crosspoint(MCPChannelObject* self, PyObject* args) {
+    int out = 0; double db = 0.0;
+    if (!PyArg_ParseTuple(args, "id", &out, &db)) return nullptr;
+    if (s_channelSetXpointCb) s_channelSetXpointCb(self->ch, out, (float)db);
+    Py_RETURN_NONE;
+}
+static PyObject* mcp_channel_get_plugin_slot(MCPChannelObject* self, PyObject* args);  // defined after MCPPluginSlotType
+static PyObject* mcp_channel_get_send_slot  (MCPChannelObject* self, PyObject* args);  // defined after MCPSendSlotType
+
+static PyMethodDef kChannelMethods[] = {
+    {"get_link_state",  (PyCFunction)mcp_channel_get_link_state,  METH_NOARGS,                    "get_link_state() → str"},
+    {"link",            (PyCFunction)mcp_channel_link,             METH_VARARGS | METH_KEYWORDS,   "link(link=True)"},
+    {"get_crosspoint",  (PyCFunction)mcp_channel_get_crosspoint,  METH_VARARGS,                   "get_crosspoint(out) → float"},
+    {"set_crosspoint",  (PyCFunction)mcp_channel_set_crosspoint,  METH_VARARGS,                   "set_crosspoint(out, db)"},
+    {"get_plugin_slot", (PyCFunction)mcp_channel_get_plugin_slot, METH_VARARGS,                   "get_plugin_slot(id) → PluginSlot"},
+    {"get_send_slot",   (PyCFunction)mcp_channel_get_send_slot,   METH_VARARGS,                   "get_send_slot(id) → SendSlot"},
+    {nullptr}
+};
+
+#pragma GCC diagnostic push
+#pragma GCC diagnostic ignored "-Wmissing-field-initializers"
+static PyTypeObject MCPChannelType = {
+    PyVarObject_HEAD_INIT(nullptr, 0)
+    "mcp.mix_console.Channel", sizeof(MCPChannelObject), 0, nullptr,
+    0, nullptr, nullptr, nullptr, (reprfunc)mcp_channel_repr,
+    nullptr, nullptr, nullptr, nullptr, nullptr, nullptr, nullptr, nullptr, nullptr,
+    Py_TPFLAGS_DEFAULT, "Channel — mix console channel handle",
+    nullptr, nullptr, nullptr, 0, nullptr, nullptr,
+    kChannelMethods, nullptr, kChannelGetSet,
+    nullptr, nullptr, nullptr, nullptr, 0, nullptr, nullptr,
+    mcp_channel_new_guard,
+};
+#pragma GCC diagnostic pop
+
+// --- MCPSendSlotObject ---
+
+typedef struct { PyObject_HEAD int ch; int slot; } MCPSendSlotObject;
+
+static PyObject* mcp_sendslot_new_guard(PyTypeObject*, PyObject*, PyObject*) {
+    PyErr_SetString(PyExc_TypeError, "SendSlot cannot be instantiated directly");
+    return nullptr;
+}
+static PyObject* mcp_sendslot_repr(MCPSendSlotObject* self) {
+    return PyUnicode_FromFormat("<SendSlot ch=%d slot=%d>", self->ch, self->slot);
+}
+static PyObject* mcp_sendslot_get_mute(MCPSendSlotObject* self, void*) {
+    if (!s_sendInfoCb) Py_RETURN_FALSE;
+    return PyBool_FromLong(s_sendInfoCb(self->ch, self->slot).mute);
+}
+static int mcp_sendslot_set_mute(MCPSendSlotObject* self, PyObject* val, void*) {
+    if (s_sendSetMuteCb) s_sendSetMuteCb(self->ch, self->slot, PyObject_IsTrue(val) != 0);
+    return 0;
+}
+static PyObject* mcp_sendslot_get_level(MCPSendSlotObject* self, void*) {
+    if (!s_sendInfoCb) return PyFloat_FromDouble(0.0);
+    return PyFloat_FromDouble(s_sendInfoCb(self->ch, self->slot).level);
+}
+static int mcp_sendslot_set_level(MCPSendSlotObject* self, PyObject* val, void*) {
+    PyObject* f = PyNumber_Float(val); if (!f) return -1;
+    const double v = PyFloat_AsDouble(f); Py_DECREF(f);
+    if (PyErr_Occurred()) return -1;
+    if (s_sendSetLevelCb) s_sendSetLevelCb(self->ch, self->slot, (float)v);
+    return 0;
+}
+static PyObject* mcp_sendslot_get_pan(MCPSendSlotObject* self, void*) {
+    if (!s_sendInfoCb) return Py_BuildValue("(ff)", 0.0f, 0.0f);
+    const auto info = s_sendInfoCb(self->ch, self->slot);
+    return Py_BuildValue("(ff)", info.panL, info.panR);
+}
+static PyObject* mcp_sendslot_get_ch_idx  (MCPSendSlotObject* self, void*) { return PyLong_FromLong(self->ch);   }
+static PyObject* mcp_sendslot_get_slot_idx(MCPSendSlotObject* self, void*) { return PyLong_FromLong(self->slot); }
+
+static PyGetSetDef kSendSlotGetSet[] = {
+    RO("ch",    mcp_sendslot_get_ch_idx,                        "channel index (0-based)"),
+    RO("slot",  mcp_sendslot_get_slot_idx,                      "slot index (0-based)"),
+    RW("mute",  mcp_sendslot_get_mute,  mcp_sendslot_set_mute,  "mute state"),
+    RW("level", mcp_sendslot_get_level, mcp_sendslot_set_level, "send level dB"),
+    RO("pan",   mcp_sendslot_get_pan,                           "pan as (panL, panR)"),
+    {nullptr}
+};
+static PyObject* mcp_sendslot_set_pan_method(MCPSendSlotObject* self, PyObject* args) {
+    double panL = 0.0, panR = 0.0;
+    if (!PyArg_ParseTuple(args, "dd", &panL, &panR)) return nullptr;
+    if (s_sendSetPanCb) s_sendSetPanCb(self->ch, self->slot, (float)panL, (float)panR);
+    Py_RETURN_NONE;
+}
+static PyObject* mcp_sendslot_engage(MCPSendSlotObject* self, PyObject* arg) {
+    int dstCh = -1;
+    if (PyLong_Check(arg)) {
+        dstCh = (int)PyLong_AsLong(arg);
+    } else if (PyObject_IsInstance(arg, (PyObject*)&MCPChannelType)) {
+        dstCh = ((MCPChannelObject*)arg)->ch;
+    } else {
+        PyErr_SetString(PyExc_TypeError, "target_channel must be int or Channel"); return nullptr;
+    }
+    if (!s_sendEngageCb) { PyErr_SetString(PyExc_RuntimeError, "no send engage callback"); return nullptr; }
+    if (!s_sendEngageCb(self->ch, self->slot, dstCh)) { PyErr_SetString(PyExc_RuntimeError, "send engage failed"); return nullptr; }
+    Py_RETURN_NONE;
+}
+static PyObject* mcp_sendslot_disengage(MCPSendSlotObject* self, PyObject*) {
+    if (s_sendDisengageCb) s_sendDisengageCb(self->ch, self->slot);
+    Py_RETURN_NONE;
+}
+static PyMethodDef kSendSlotMethods[] = {
+    {"set_pan",   (PyCFunction)mcp_sendslot_set_pan_method, METH_VARARGS, "set_pan(panL, panR)"},
+    {"engage",    (PyCFunction)mcp_sendslot_engage,         METH_O,       "engage(target_channel)"},
+    {"disengage", (PyCFunction)mcp_sendslot_disengage,      METH_NOARGS,  "disengage()"},
+    {nullptr}
+};
+#pragma GCC diagnostic push
+#pragma GCC diagnostic ignored "-Wmissing-field-initializers"
+PyTypeObject MCPSendSlotType = {
+    PyVarObject_HEAD_INIT(nullptr, 0)
+    "mcp.mix_console.SendSlot", sizeof(MCPSendSlotObject), 0, nullptr,
+    0, nullptr, nullptr, nullptr, (reprfunc)mcp_sendslot_repr,
+    nullptr, nullptr, nullptr, nullptr, nullptr, nullptr, nullptr, nullptr, nullptr,
+    Py_TPFLAGS_DEFAULT, "SendSlot — send bus slot handle",
+    nullptr, nullptr, nullptr, 0, nullptr, nullptr,
+    kSendSlotMethods, nullptr, kSendSlotGetSet,
+    nullptr, nullptr, nullptr, nullptr, 0, nullptr, nullptr,
+    mcp_sendslot_new_guard,
+};
+#pragma GCC diagnostic pop
+
+static PyObject* mcp_channel_get_send_slot(MCPChannelObject* self, PyObject* args) {
+    int slot = 0; if (!PyArg_ParseTuple(args, "i", &slot)) return nullptr;
+    MCPSendSlotObject* obj = (MCPSendSlotObject*)MCPSendSlotType.tp_alloc(&MCPSendSlotType, 0);
+    if (!obj) return nullptr;
+    obj->ch = self->ch; obj->slot = slot;
+    return (PyObject*)obj;
+}
+
+// --- MCPPluginSlotObject ---
+
+static PyObject* mcp_pluginslot_new_guard(PyTypeObject*, PyObject*, PyObject*) {
+    PyErr_SetString(PyExc_TypeError, "PluginSlot cannot be instantiated directly");
+    return nullptr;
+}
+static PyObject* mcp_pluginslot_repr(MCPPluginSlotObject* self) {
+    return PyUnicode_FromFormat("<PluginSlot ch=%d slot=%d>", self->ch, self->slot);
+}
+static PyObject* mcp_pluginslot_load(MCPPluginSlotObject* self, PyObject* args) {
+    const char* id = nullptr; if (!PyArg_ParseTuple(args, "s", &id)) return nullptr;
+    if (!s_pluginLoadCb) { PyErr_SetString(PyExc_RuntimeError, "no plugin load callback"); return nullptr; }
+    if (!s_pluginLoadCb(self->ch, self->slot, id ? id : "")) { PyErr_SetString(PyExc_RuntimeError, "plugin load failed"); return nullptr; }
+    Py_RETURN_NONE;
+}
+static PyObject* mcp_pluginslot_unload(MCPPluginSlotObject* self, PyObject*) {
+    if (s_pluginUnloadCb) s_pluginUnloadCb(self->ch, self->slot); Py_RETURN_NONE;
+}
+static PyObject* mcp_pluginslot_deactivate(MCPPluginSlotObject* self, PyObject*) {
+    if (s_pluginDeactivateScriptletCb) s_pluginDeactivateScriptletCb(self->ch, self->slot); Py_RETURN_NONE;
+}
+static PyObject* mcp_pluginslot_reactivate(MCPPluginSlotObject* self, PyObject*) {
+    if (s_pluginReactivateScriptletCb) s_pluginReactivateScriptletCb(self->ch, self->slot); Py_RETURN_NONE;
+}
+static PyObject* mcp_pluginslot_list_params(MCPPluginSlotObject* self, PyObject*) {
+    if (!s_pluginListParamsCb) return PyList_New(0);
+    const auto params = s_pluginListParamsCb(self->ch, self->slot);
+    PyObject* result = PyList_New((Py_ssize_t)params.size()); if (!result) return nullptr;
+    for (size_t i = 0; i < params.size(); ++i) {
+        const auto& p = params[i];
+        PyObject* d = Py_BuildValue("{s:s,s:s,s:f,s:f,s:f}",
+            "id", p.id.c_str(), "name", p.name.c_str(),
+            "min", p.min, "max", p.max, "current", p.current);
+        if (!d) { Py_DECREF(result); return nullptr; }
+        PyList_SET_ITEM(result, (Py_ssize_t)i, d);
+    }
+    return result;
+}
+static PyObject* mcp_pluginslot_get_param(MCPPluginSlotObject* self, PyObject* args) {
+    const char* id = nullptr; if (!PyArg_ParseTuple(args, "s", &id)) return nullptr;
+    if (!s_pluginGetParamCb) return PyFloat_FromDouble(0.0);
+    return PyFloat_FromDouble(s_pluginGetParamCb(self->ch, self->slot, id ? id : ""));
+}
+static PyObject* mcp_pluginslot_set_param(MCPPluginSlotObject* self, PyObject* args) {
+    const char* id = nullptr; double v = 0.0;
+    if (!PyArg_ParseTuple(args, "sd", &id, &v)) return nullptr;
+    if (s_pluginSetParamCb) s_pluginSetParamCb(self->ch, self->slot, id ? id : "", (float)v);
+    Py_RETURN_NONE;
+}
+static PyObject* mcp_pluginslot_get_ch_idx  (MCPPluginSlotObject* self, void*) { return PyLong_FromLong(self->ch);   }
+static PyObject* mcp_pluginslot_get_slot_idx(MCPPluginSlotObject* self, void*) { return PyLong_FromLong(self->slot); }
+static PyGetSetDef kPluginSlotGetSet[] = {
+    RO("ch",   mcp_pluginslot_get_ch_idx,   "channel index (0-based)"),
+    RO("slot", mcp_pluginslot_get_slot_idx, "slot index (0-based)"),
+    {nullptr}
+};
+
+static PyMethodDef kPluginSlotMethods[] = {
+    {"load",        (PyCFunction)mcp_pluginslot_load,        METH_VARARGS, "load(plugin_id)"},
+    {"unload",      (PyCFunction)mcp_pluginslot_unload,      METH_NOARGS,  "unload()"},
+    {"deactivate",  (PyCFunction)mcp_pluginslot_deactivate,  METH_NOARGS,  "deactivate()"},
+    {"reactivate",  (PyCFunction)mcp_pluginslot_reactivate,  METH_NOARGS,  "reactivate()"},
+    {"list_params", (PyCFunction)mcp_pluginslot_list_params, METH_NOARGS,  "list_params() → [dict]"},
+    {"get_param",   (PyCFunction)mcp_pluginslot_get_param,   METH_VARARGS, "get_param(id) → float"},
+    {"set_param",   (PyCFunction)mcp_pluginslot_set_param,   METH_VARARGS, "set_param(id, value)"},
+    {nullptr}
+};
+#pragma GCC diagnostic push
+#pragma GCC diagnostic ignored "-Wmissing-field-initializers"
+PyTypeObject MCPPluginSlotType = {
+    PyVarObject_HEAD_INIT(nullptr, 0)
+    "mcp.mix_console.PluginSlot", sizeof(MCPPluginSlotObject), 0, nullptr,
+    0, nullptr, nullptr, nullptr, (reprfunc)mcp_pluginslot_repr,
+    nullptr, nullptr, nullptr, nullptr, nullptr, nullptr, nullptr, nullptr, nullptr,
+    Py_TPFLAGS_DEFAULT, "PluginSlot — plugin insert slot handle",
+    nullptr, nullptr, nullptr, 0, nullptr, nullptr,
+    kPluginSlotMethods, nullptr, kPluginSlotGetSet,
+    nullptr, nullptr, nullptr, nullptr, 0, nullptr, nullptr,
+    mcp_pluginslot_new_guard,
+};
+#pragma GCC diagnostic pop
+
+static PyObject* mcp_channel_get_plugin_slot(MCPChannelObject* self, PyObject* args) {
+    int slot = 0; if (!PyArg_ParseTuple(args, "i", &slot)) return nullptr;
+    MCPPluginSlotObject* obj = (MCPPluginSlotObject*)MCPPluginSlotType.tp_alloc(&MCPPluginSlotType, 0);
+    if (!obj) return nullptr;
+    obj->ch = self->ch; obj->slot = slot;
+    return (PyObject*)obj;
+}
+
+// --- Module-level functions ---
+
+static PyObject* py_mix_get_param(PyObject*, PyObject* args) {
+    const char* path = nullptr; if (!PyArg_ParseTuple(args, "s", &path)) return nullptr;
+    if (!s_mixGetParamCb) return PyFloat_FromDouble(0.0);
+    return PyFloat_FromDouble(s_mixGetParamCb(path ? path : ""));
+}
+static PyObject* py_mix_set_param(PyObject*, PyObject* args) {
+    const char* path = nullptr; double v = 0.0;
+    if (!PyArg_ParseTuple(args, "sd", &path, &v)) return nullptr;
+    if (s_mixSetParamCb) s_mixSetParamCb(path ? path : "", v);
+    Py_RETURN_NONE;
+}
+static PyObject* py_mix_list_snapshot(PyObject*, PyObject*) {
+    if (!s_snapshotListCb) return PyList_New(0);
+    const auto snaps = s_snapshotListCb();
+    PyObject* result = PyList_New((Py_ssize_t)snaps.size()); if (!result) return nullptr;
+    for (size_t i = 0; i < snaps.size(); ++i) {
+        PyObject* d = Py_BuildValue("{s:i,s:s}", "id", snaps[i].id, "name", snaps[i].name.c_str());
+        if (!d) { Py_DECREF(result); return nullptr; }
+        PyList_SET_ITEM(result, (Py_ssize_t)i, d);
+    }
+    return result;
+}
+static PyObject* py_mix_load_snapshot(PyObject*, PyObject* args) {
+    int id = 0; if (!PyArg_ParseTuple(args, "i", &id)) return nullptr;
+    if (!s_snapshotLoadCb) { PyErr_SetString(PyExc_RuntimeError, "no snapshot load callback"); return nullptr; }
+    if (!s_snapshotLoadCb(id)) { PyErr_SetString(PyExc_RuntimeError, "snapshot load failed"); return nullptr; }
+    Py_RETURN_NONE;
+}
+static PyObject* py_mix_save_snapshot(PyObject*, PyObject* args) {
+    int id = 0; if (!PyArg_ParseTuple(args, "i", &id)) return nullptr;
+    if (!s_snapshotStoreCb) { PyErr_SetString(PyExc_RuntimeError, "no snapshot store callback"); return nullptr; }
+    if (!s_snapshotStoreCb(id)) { PyErr_SetString(PyExc_RuntimeError, "snapshot store failed"); return nullptr; }
+    Py_RETURN_NONE;
+}
+static PyObject* py_mix_delete_snapshot(PyObject*, PyObject* args) {
+    int id = 0; if (!PyArg_ParseTuple(args, "i", &id)) return nullptr;
+    if (!s_snapshotDeleteCb) { PyErr_SetString(PyExc_RuntimeError, "no snapshot delete callback"); return nullptr; }
+    if (!s_snapshotDeleteCb(id)) { PyErr_SetString(PyExc_RuntimeError, "snapshot delete failed"); return nullptr; }
+    Py_RETURN_NONE;
+}
+static PyObject* py_mix_set_snapshot_scope(PyObject*, PyObject* args) {
+    int id = 0; const char* path = nullptr;
+    if (!PyArg_ParseTuple(args, "is", &id, &path)) return nullptr;
+    if (s_snapshotSetScopeCb) s_snapshotSetScopeCb(id, path ? path : "", true);
+    Py_RETURN_NONE;
+}
+static PyObject* py_mix_unset_snapshot_scope(PyObject*, PyObject* args) {
+    int id = 0; const char* path = nullptr;
+    if (!PyArg_ParseTuple(args, "is", &id, &path)) return nullptr;
+    if (s_snapshotSetScopeCb) s_snapshotSetScopeCb(id, path ? path : "", false);
+    Py_RETURN_NONE;
+}
+static PyObject* py_mix_check_snapshot_scope(PyObject*, PyObject* args, PyObject* kwargs) {
+    static const char* kwlist[] = {"id", "path", nullptr};
+    int id = 0; const char* path = "";
+    if (!PyArg_ParseTupleAndKeywords(args, kwargs, "i|s", const_cast<char**>(kwlist), &id, &path)) return nullptr;
+    if (!s_snapshotGetScopeCb) Py_RETURN_FALSE;
+    const auto scope = s_snapshotGetScopeCb(id);
+    if (!path || !*path) return PyBool_FromLong(!scope.empty());
+    for (const auto& s : scope) if (s == path) Py_RETURN_TRUE;
+    Py_RETURN_FALSE;
+}
+static PyObject* py_mix_get_channel(PyObject*, PyObject* args) {
+    int ch = 0; if (!PyArg_ParseTuple(args, "i", &ch)) return nullptr;
+    MCPChannelObject* obj = (MCPChannelObject*)MCPChannelType.tp_alloc(&MCPChannelType, 0);
+    if (!obj) return nullptr;
+    obj->ch = ch;
+    return (PyObject*)obj;
+}
+static PyObject* py_mix_list_channels(PyObject*, PyObject*) {
+    const int count = s_channelCountCb ? s_channelCountCb() : 0;
+    PyObject* result = PyList_New(count); if (!result) return nullptr;
+    for (int i = 0; i < count; ++i) {
+        MCPChannelObject* obj = (MCPChannelObject*)MCPChannelType.tp_alloc(&MCPChannelType, 0);
+        if (!obj) { Py_DECREF(result); return nullptr; }
+        obj->ch = i;
+        PyList_SET_ITEM(result, i, (PyObject*)obj);
+    }
+    return result;
+}
+static PyObject* py_mix_append_channel(PyObject*, PyObject*) {
+    if (!s_appendChannelCb) { PyErr_SetString(PyExc_RuntimeError, "no append channel callback"); return nullptr; }
+    const int ch = s_appendChannelCb();
+    if (ch < 0) { PyErr_SetString(PyExc_RuntimeError, "append channel failed"); return nullptr; }
+    MCPChannelObject* obj = (MCPChannelObject*)MCPChannelType.tp_alloc(&MCPChannelType, 0);
+    if (!obj) return nullptr;
+    obj->ch = ch;
+    return (PyObject*)obj;
+}
+static PyObject* py_mix_remove_channel(PyObject*, PyObject* arg) {
+    int ch = -1;
+    if (PyLong_Check(arg)) { ch = (int)PyLong_AsLong(arg); }
+    else if (PyObject_IsInstance(arg, (PyObject*)&MCPChannelType)) { ch = ((MCPChannelObject*)arg)->ch; }
+    else { PyErr_SetString(PyExc_TypeError, "arg must be int or Channel"); return nullptr; }
+    if (!s_removeChannelCb) { PyErr_SetString(PyExc_RuntimeError, "no remove channel callback"); return nullptr; }
+    if (!s_removeChannelCb(ch)) { PyErr_SetString(PyExc_RuntimeError, "remove channel failed"); return nullptr; }
+    Py_RETURN_NONE;
+}
+
+static PyMethodDef kMixConsoleMethods[] = {
+    {"get_param",            py_mix_get_param,                                  METH_VARARGS,                   "get_param(path) → float"},
+    {"set_param",            py_mix_set_param,                                  METH_VARARGS,                   "set_param(path, value)"},
+    {"list_snapshot",        py_mix_list_snapshot,                              METH_NOARGS,                    "list_snapshot() → [dict]"},
+    {"load_snapshot",        py_mix_load_snapshot,                              METH_VARARGS,                   "load_snapshot(id)"},
+    {"save_snapshot",        py_mix_save_snapshot,                              METH_VARARGS,                   "save_snapshot(id)"},
+    {"delete_snapshot",      py_mix_delete_snapshot,                            METH_VARARGS,                   "delete_snapshot(id)"},
+    {"set_snapshot_scope",   py_mix_set_snapshot_scope,                         METH_VARARGS,                   "set_snapshot_scope(id, path)"},
+    {"unset_snapshot_scope", py_mix_unset_snapshot_scope,                       METH_VARARGS,                   "unset_snapshot_scope(id, path)"},
+    {"check_snapshot_scope", (PyCFunction)py_mix_check_snapshot_scope,          METH_VARARGS | METH_KEYWORDS,   "check_snapshot_scope(id, path='') → bool"},
+    {"get_channel",          py_mix_get_channel,                                METH_VARARGS,                   "get_channel(id) → Channel"},
+    {"list_channels",        py_mix_list_channels,                              METH_NOARGS,                    "list_channels() → [Channel]"},
+    {"append_channel",       py_mix_append_channel,                             METH_NOARGS,                    "append_channel() → Channel"},
+    {"remove_channel",       py_mix_remove_channel,                             METH_O,                         "remove_channel(channel)"},
+    {nullptr}
+};
+
+#pragma GCC diagnostic push
+#pragma GCC diagnostic ignored "-Wmissing-field-initializers"
+static PyModuleDef kMixConsoleModuleDef = {
+    PyModuleDef_HEAD_INIT, "mcp.mix_console", "mcp mix console API", -1, kMixConsoleMethods
+};
+#pragma GCC diagnostic pop
+
+static PyObject* PyInit_mcp_mix_console() {
+    if (PyType_Ready(&MCPChannelType)    < 0) return nullptr;
+    if (PyType_Ready(&MCPPluginSlotType) < 0) return nullptr;
+    if (PyType_Ready(&MCPSendSlotType)   < 0) return nullptr;
+    PyObject* mod = PyModule_Create(&kMixConsoleModuleDef); if (!mod) return nullptr;
+    Py_INCREF(&MCPChannelType);    PyModule_AddObject(mod, "Channel",    (PyObject*)&MCPChannelType);
+    Py_INCREF(&MCPPluginSlotType); PyModule_AddObject(mod, "PluginSlot", (PyObject*)&MCPPluginSlotType);
+    Py_INCREF(&MCPSendSlotType);   PyModule_AddObject(mod, "SendSlot",   (PyObject*)&MCPSendSlotType);
     return mod;
 }
 
@@ -1166,11 +1735,12 @@ static PyObject* PyInit_mcp() {
         PyModule_AddObject(mod, std::strrchr(name, '.') + 1, sub);  // steals
     };
 
-    registerSub("mcp.cue",      PyInit_mcp_cue());
-    registerSub("mcp.cue_list", PyInit_mcp_cue_list());
-    registerSub("mcp.event",    PyInit_mcp_event());
-    registerSub("mcp.time",     PyInit_mcp_time());
-    registerSub("mcp.error",    PyInit_mcp_error());
+    registerSub("mcp.cue",         PyInit_mcp_cue());
+    registerSub("mcp.cue_list",    PyInit_mcp_cue_list());
+    registerSub("mcp.event",       PyInit_mcp_event());
+    registerSub("mcp.time",        PyInit_mcp_time());
+    registerSub("mcp.error",       PyInit_mcp_error());
+    registerSub("mcp.mix_console", PyInit_mcp_mix_console());
 
     return mod;
 }
@@ -1223,6 +1793,47 @@ void ScriptletEngine::setMusicalToSecondsCallback(std::function<double(int, int,
 
 void ScriptletEngine::setListInfoCallback    (std::function<std::vector<std::pair<int,std::string>>()> cb) { s_listInfoCb     = std::move(cb); }
 void ScriptletEngine::setActiveListIdCallback(std::function<int()> cb)                                     { s_activeListIdCb = std::move(cb); }
+
+void ScriptletEngine::setMixGetParamCallback(std::function<double(const std::string&)> cb)               { s_mixGetParamCb  = std::move(cb); }
+void ScriptletEngine::setMixSetParamCallback(std::function<void(const std::string&, double)> cb)         { s_mixSetParamCb  = std::move(cb); }
+
+void ScriptletEngine::setSnapshotListCallback  (std::function<std::vector<ScriptletSnapshotEntry>()> cb)            { s_snapshotListCb     = std::move(cb); }
+void ScriptletEngine::setSnapshotLoadCallback  (std::function<bool(int)> cb)                                        { s_snapshotLoadCb     = std::move(cb); }
+void ScriptletEngine::setSnapshotStoreCallback (std::function<bool(int)> cb)                                        { s_snapshotStoreCb    = std::move(cb); }
+void ScriptletEngine::setSnapshotDeleteCallback(std::function<bool(int)> cb)                                        { s_snapshotDeleteCb   = std::move(cb); }
+void ScriptletEngine::setSnapshotGetScopeCallback(std::function<std::vector<std::string>(int)> cb)                  { s_snapshotGetScopeCb = std::move(cb); }
+void ScriptletEngine::setSnapshotSetScopeCallback(std::function<void(int, const std::string&, bool)> cb)            { s_snapshotSetScopeCb = std::move(cb); }
+
+void ScriptletEngine::setChannelCountCallback      (std::function<int()> cb)                              { s_channelCountCb       = std::move(cb); }
+void ScriptletEngine::setChannelInfoCallback       (std::function<ScriptletChannelInfo(int)> cb)          { s_channelInfoCb        = std::move(cb); }
+void ScriptletEngine::setChannelSetNameCallback    (std::function<void(int, const std::string&)> cb)      { s_channelSetNameCb     = std::move(cb); }
+void ScriptletEngine::setChannelSetFaderCallback   (std::function<void(int, float)> cb)                   { s_channelSetFaderCb    = std::move(cb); }
+void ScriptletEngine::setChannelSetMuteCallback    (std::function<void(int, bool)> cb)                    { s_channelSetMuteCb     = std::move(cb); }
+void ScriptletEngine::setChannelSetPolarityCallback(std::function<void(int, bool)> cb)                    { s_channelSetPolarityCb = std::move(cb); }
+void ScriptletEngine::setChannelSetDelayCallback   (std::function<void(int, float)> cb)                   { s_channelSetDelayCb    = std::move(cb); }
+void ScriptletEngine::setChannelSetPdcCallback     (std::function<void(int, bool)> cb)                    { s_channelSetPdcCb      = std::move(cb); }
+void ScriptletEngine::setChannelGetXpointCallback  (std::function<float(int, int)> cb)                    { s_channelGetXpointCb   = std::move(cb); }
+void ScriptletEngine::setChannelSetXpointCallback  (std::function<void(int, int, float)> cb)              { s_channelSetXpointCb   = std::move(cb); }
+void ScriptletEngine::setChannelLinkCallback       (std::function<void(int, bool)> cb)                    { s_channelLinkCb        = std::move(cb); }
+void ScriptletEngine::setAppendChannelCallback     (std::function<int()> cb)                              { s_appendChannelCb      = std::move(cb); }
+void ScriptletEngine::setRemoveChannelCallback     (std::function<bool(int)> cb)                          { s_removeChannelCb      = std::move(cb); }
+
+void ScriptletEngine::setPluginSlotCountCallback  (std::function<int(int)> cb)                                            { s_pluginSlotCountCb          = std::move(cb); }
+void ScriptletEngine::setPluginListParamsCallback (std::function<std::vector<ScriptletPluginParamInfo>(int, int)> cb)      { s_pluginListParamsCb         = std::move(cb); }
+void ScriptletEngine::setPluginGetParamCallback   (std::function<float(int, int, const std::string&)> cb)                 { s_pluginGetParamCb           = std::move(cb); }
+void ScriptletEngine::setPluginSetParamCallback   (std::function<void(int, int, const std::string&, float)> cb)           { s_pluginSetParamCb           = std::move(cb); }
+void ScriptletEngine::setPluginLoadCallback       (std::function<bool(int, int, const std::string&)> cb)                  { s_pluginLoadCb               = std::move(cb); }
+void ScriptletEngine::setPluginUnloadCallback     (std::function<bool(int, int)> cb)                                      { s_pluginUnloadCb             = std::move(cb); }
+void ScriptletEngine::setPluginDeactivateScriptletCallback(std::function<void(int, int)> cb)                              { s_pluginDeactivateScriptletCb = std::move(cb); }
+void ScriptletEngine::setPluginReactivateScriptletCallback(std::function<void(int, int)> cb)                              { s_pluginReactivateScriptletCb = std::move(cb); }
+
+void ScriptletEngine::setChannelSendCountCallback(std::function<int(int)> cb)                             { s_channelSendCountCb = std::move(cb); }
+void ScriptletEngine::setSendInfoCallback        (std::function<ScriptletSendInfo(int, int)> cb)          { s_sendInfoCb         = std::move(cb); }
+void ScriptletEngine::setSendSetMuteCallback     (std::function<void(int, int, bool)> cb)                 { s_sendSetMuteCb      = std::move(cb); }
+void ScriptletEngine::setSendSetLevelCallback    (std::function<void(int, int, float)> cb)                { s_sendSetLevelCb     = std::move(cb); }
+void ScriptletEngine::setSendSetPanCallback      (std::function<void(int, int, float, float)> cb)         { s_sendSetPanCb       = std::move(cb); }
+void ScriptletEngine::setSendEngageCallback      (std::function<bool(int, int, int)> cb)                  { s_sendEngageCb       = std::move(cb); }
+void ScriptletEngine::setSendDisengageCallback   (std::function<bool(int, int)> cb)                       { s_sendDisengageCb    = std::move(cb); }
 
 // ---------------------------------------------------------------------------
 // Event firing

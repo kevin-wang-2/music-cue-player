@@ -200,6 +200,11 @@ signals:
     void selectionChanged(int index);
     void playbackStateChanged();    // voices started/stopped
     void mixStateChanged();         // sf.audioSetup changed (snapshot recall, automation, etc.)
+    // Emitted before a plugin slot's processor is destroyed (deactivate/reactivate).
+    // Consumers must close any open editor for (ch, slot) before returning.
+    void pluginSlotAboutToChange(int ch, int slot);
+    // Emitted after deactivate/reactivate completes — UI should refresh (ch, slot).
+    void pluginSlotChanged(int ch, int slot);
     void dirtyChanged(bool dirty);
     void engineStatusChanged();
     // Emitted when an external trigger fires a cue (for UI highlight feedback)
@@ -231,6 +236,12 @@ public:
     // Sync live external plugin state back into sf.audioSetup.
     // Call before saving to ensure stateBlob + paramSnapshot are up-to-date.
     void syncPluginStatesToShowFile();
+
+    // Deactivate / reactivate the plugin wrapper at (ch, slot).
+    // deactivatePlugin() destroys the processor while preserving the PDC ring.
+    // reactivatePlugin() reinstantiates the plugin and crossfades back to it.
+    void deactivatePlugin(int ch, int slot);
+    void reactivatePlugin(int ch, int slot);
 
     // Apply bypass + parameters from sf to existing plugin instances WITHOUT
     // rebuilding chains. Used by snapshot recall to avoid reloading plugins.

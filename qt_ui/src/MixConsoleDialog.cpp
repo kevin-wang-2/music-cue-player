@@ -569,6 +569,14 @@ MixConsoleDialog::MixConsoleDialog(AppModel* model, QWidget* parent)
     connect(m_model, &AppModel::mixStateChanged,
             this, &MixConsoleDialog::resetAllPluginCaches);
 
+    // Close any open editor before the processor is destroyed (prevents dangling-pointer crash).
+    connect(m_model, &AppModel::pluginSlotAboutToChange,
+            this, &MixConsoleDialog::closePluginEditor);
+
+    // Rebuild plugin section UI after deactivate/reactivate so buttons reflect new state.
+    connect(m_model, &AppModel::pluginSlotChanged,
+            this, [this](int ch, int) { rebuildPluginSection(ch); });
+
     updateSnapToolbar();
 }
 
@@ -2202,6 +2210,7 @@ static QString pluginSlotLabel(const PluginSlot& sl,
 
     using S = mcp::plugin::PluginRuntimeStatus;
     if (sl.disabled || status == S::Disabled)           return "⊝ " + name; // ⊝
+    if (status == S::Deactivated)                       return "⏸ " + name; // ⏸
     if (sl.bypassed)                                    return "⊘ " + name; // ⊘
     if (status == S::Missing || status == S::Failed)    return "✕ " + name; // ✕
     if (status == S::StateRestoreFailed)                return "⚠ " + name; // ⚠
@@ -2228,6 +2237,7 @@ static QString pluginSlotStyle(const PluginSlot& sl,
         return "QPushButton { background:#2a2a2a; color:#555; font-size:10px; "
                "text-align:left; padding-left:4px; border:1px dashed #444; }";
     if (sl.disabled || status == S::Disabled)           return css("#2a2a2a","#666","#555");
+    if (status == S::Deactivated)                       return css("#1e2030","#7788bb","#445588");
     if (status == S::Missing || status == S::Failed)    return css("#3a2020","#c88","#7a3a3a");
     if (status == S::StateRestoreFailed)                return css("#3a3020","#cc8","#7a6a3a");
     if (sl.bypassed)                                    return css("#2a2a10","#aa9","#6a5a2a");
@@ -2366,6 +2376,8 @@ void MixConsoleDialog::addPluginSlotButton(QVBoxLayout* bl, Strip& s, int ch, in
         const auto& ps = m_model->sf.audioSetup.channels[static_cast<size_t>(ch)].plugins;
         const bool hp = (slot < static_cast<int>(ps.size())) && !ps[static_cast<size_t>(slot)].pluginId.empty();
         if (hp) {
+            auto w = m_model->channelPlugin(ch, slot);
+            if (w && w->isDeactivated()) return;  // editor unavailable while deactivated
             const bool pin = QApplication::keyboardModifiers() & Qt::ShiftModifier;
             openPluginEditor(ch, slot, pin);
         } else {

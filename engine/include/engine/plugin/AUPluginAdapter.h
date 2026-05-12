@@ -82,9 +82,9 @@ public:
     void notifyViewRefresh();
 
     // ── Bypass bridging ──────────────────────────────────────────────────────
-    // Sync the AU's native kAudioUnitProperty_BypassEffect with the host bypass.
-    // Call setNativeBypass() whenever our PluginWrapper::setBypassed() changes.
-    void setNativeBypass(bool bypass);
+    // All AUs support kAudioUnitProperty_BypassEffect natively.
+    bool hasNativeBypass() const override { return true; }
+    void setNativeBypass(bool bypass) override;
     bool getNativeBypass() const;
 
     // Watch for kAudioUnitProperty_BypassEffect changes originating from within

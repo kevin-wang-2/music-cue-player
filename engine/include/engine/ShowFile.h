@@ -98,6 +98,10 @@ struct ShowFile {
         std::string networkPatchName;   // name of the target NetworkSetup patch
         std::string networkCommand;     // command string (OSC or plain text)
 
+        // Deactivate / Reactivate cues
+        int pluginChannel{-1};  // 0-based channel index
+        int pluginSlot   {-1};  // 0-based slot index within the channel chain
+
         // MIDI cues
         std::string midiPatchName;      // name of the target MidiSetup patch
         std::string midiMessageType;    // "note_on"|"note_off"|"program_change"|"control_change"|"pitchbend"

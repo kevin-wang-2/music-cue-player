@@ -13,11 +13,16 @@ Scheduler::Scheduler(AudioEngine& engine) : m_engine(engine) {
     m_thread = std::thread(&Scheduler::threadLoop, this);
 }
 
-Scheduler::~Scheduler() {
+void Scheduler::shutdown() {
     m_running.store(false, std::memory_order_relaxed);
     m_cv.notify_all();
     if (m_thread.joinable()) m_thread.join();
+    std::lock_guard<std::mutex> lk(m_mutex);
+    m_events.clear();
+    m_ramps.clear();
 }
+
+Scheduler::~Scheduler() { shutdown(); }
 
 int Scheduler::schedule(int64_t targetFrame, Callback cb, std::string label) {
     std::lock_guard<std::mutex> lk(m_mutex);

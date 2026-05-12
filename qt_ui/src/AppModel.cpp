@@ -124,6 +124,10 @@ AppModel::AppModel(QObject* parent)
             case mcp::CueType::Goto:         info.type = "goto";          break;
             case mcp::CueType::Memo:         info.type = "memo";          break;
             case mcp::CueType::Scriptlet:    info.type = "scriptlet";     break;
+            case mcp::CueType::Snapshot:     info.type = "snapshot";      break;
+            case mcp::CueType::Automation:   info.type = "automation";    break;
+            case mcp::CueType::Deactivate:   info.type = "deactivate";    break;
+            case mcp::CueType::Reactivate:   info.type = "reactivate";    break;
         }
         if (c->type == mcp::CueType::Audio) {
             info.path      = c->path;
@@ -391,6 +395,362 @@ AppModel::AppModel(QObject* parent)
         return sf.cueLists.empty() ? -1 : sf.cueLists[m_activeListIdx].numericId;
     });
 
+    // --- mcp.mix_console callbacks ---
+
+    // Helper: parse "/mixer/{ch}" prefix, return ch or -1.
+    auto parseMixerCh = [](const std::string& path) -> int {
+        if (path.size() <= 7 || path.compare(0, 7, "/mixer/") != 0) return -1;
+        size_t slash = path.find('/', 7);
+        try { return std::stoi(path.substr(7, slash == std::string::npos ? std::string::npos : slash - 7)); }
+        catch (...) { return -1; }
+    };
+
+    scriptlet->setMixGetParamCallback([this, parseMixerCh](const std::string& path) -> double {
+        auto& as = sf.audioSetup;
+        const int ch = parseMixerCh(path);
+        if (ch < 0 || ch >= (int)as.channels.size()) return 0.0;
+        auto& chan = as.channels[static_cast<size_t>(ch)];
+        if (path.find("/send/") != std::string::npos) {
+            auto sp = path.find("/send/");
+            const std::string rest = path.substr(sp + 6);
+            const auto sl = rest.find('/');
+            if (sl == std::string::npos) return 0.0;
+            int slot = -1;
+            try { slot = std::stoi(rest.substr(0, sl)); } catch (...) {}
+            const std::string param = rest.substr(sl + 1);
+            if (slot < 0 || slot >= (int)chan.sends.size()) return 0.0;
+            auto& s = chan.sends[static_cast<size_t>(slot)];
+            if (param == "level") return s.levelDb;
+            if (param == "mute")  return s.muted ? 1.0 : 0.0;
+            if (param == "panL")  return s.panL;
+            if (param == "panR")  return s.panR;
+        } else if (path.find("/fader")    != std::string::npos) return chan.masterGainDb;
+          else if (path.find("/mute")     != std::string::npos) return chan.mute ? 1.0 : 0.0;
+          else if (path.find("/polarity") != std::string::npos) return chan.phaseInvert ? 1.0 : 0.0;
+          else if (path.find("/delay")    != std::string::npos) return chan.delayMs;
+          else if (path.find("/crosspoint/") != std::string::npos) {
+              auto cp = path.find("/crosspoint/");
+              int out = -1;
+              try { out = std::stoi(path.substr(cp + 12)); } catch (...) {}
+              for (const auto& xe : as.xpEntries)
+                  if (xe.ch == ch && xe.out == out) return xe.db;
+          }
+        return 0.0;
+    });
+
+    scriptlet->setMixSetParamCallback([this, parseMixerCh](const std::string& path, double value) {
+        auto& as = sf.audioSetup;
+        const int ch = parseMixerCh(path);
+        if (ch < 0 || ch >= (int)as.channels.size()) return;
+        auto& chan = as.channels[static_cast<size_t>(ch)];
+        bool sendChanged = false;
+        if (path.find("/send/") != std::string::npos) {
+            auto sp = path.find("/send/");
+            const std::string rest = path.substr(sp + 6);
+            const auto sl = rest.find('/');
+            if (sl != std::string::npos) {
+                int slot = -1;
+                try { slot = std::stoi(rest.substr(0, sl)); } catch (...) {}
+                const std::string param = rest.substr(sl + 1);
+                if (slot >= 0 && slot < (int)chan.sends.size()) {
+                    auto& s = chan.sends[static_cast<size_t>(slot)];
+                    if      (param == "level") s.levelDb = static_cast<float>(value);
+                    else if (param == "mute")  s.muted   = (value >= 0.5);
+                    else if (param == "panL")  s.panL    = static_cast<float>(value);
+                    else if (param == "panR")  s.panR    = static_cast<float>(value);
+                    sendChanged = true;
+                }
+            }
+        } else if (path.find("/fader")    != std::string::npos) chan.masterGainDb = static_cast<float>(value);
+          else if (path.find("/mute")     != std::string::npos) chan.mute         = (value >= 0.5);
+          else if (path.find("/polarity") != std::string::npos) chan.phaseInvert  = (value >= 0.5);
+          else if (path.find("/delay")    != std::string::npos) chan.delayMs      = value;
+          else if (path.find("/crosspoint/") != std::string::npos) {
+              auto cp = path.find("/crosspoint/");
+              int out = -1;
+              try { out = std::stoi(path.substr(cp + 12)); } catch (...) {}
+              if (out >= 0) {
+                  bool found = false;
+                  for (auto& xe : as.xpEntries)
+                      if (xe.ch == ch && xe.out == out) { xe.db = static_cast<float>(value); found = true; break; }
+                  if (!found) as.xpEntries.push_back({ch, out, static_cast<float>(value)});
+              }
+          }
+        snapshots.markDirty(path);
+        markDirty();
+        if (sendChanged) rebuildSendGains();
+        applyMixing();
+        emit mixStateChanged();
+    });
+
+    // Snapshot operations
+    scriptlet->setSnapshotListCallback([this]() -> std::vector<ScriptletSnapshotEntry> {
+        std::vector<ScriptletSnapshotEntry> result;
+        for (const auto& s : sf.snapshotList.snapshots)
+            if (s) result.push_back({s->id, s->name});
+        return result;
+    });
+    scriptlet->setSnapshotLoadCallback([this](int id) -> bool {
+        if (!snapshots.recallById(id)) return false;
+        applyMixing();
+        markDirty();
+        emit mixStateChanged();
+        return true;
+    });
+    scriptlet->setSnapshotStoreCallback([this](int id) -> bool {
+        auto* snap = sf.snapshotList.findById(id);
+        if (!snap) return false;
+        syncPluginStatesToShowFile();
+        snapshots.storeAll();
+        markDirty();
+        emit mixStateChanged();
+        return true;
+    });
+    scriptlet->setSnapshotDeleteCallback([this](int id) -> bool {
+        for (auto& s : sf.snapshotList.snapshots)
+            if (s && s->id == id) { s = std::nullopt; markDirty(); emit mixStateChanged(); return true; }
+        return false;
+    });
+    scriptlet->setSnapshotGetScopeCallback([this](int id) -> std::vector<std::string> {
+        const auto* snap = sf.snapshotList.findById(id);
+        return snap ? snap->scope : std::vector<std::string>{};
+    });
+    scriptlet->setSnapshotSetScopeCallback([this](int id, const std::string& path, bool add) {
+        auto* snap = sf.snapshotList.findById(id);
+        if (!snap) return;
+        if (add) {
+            if (std::find(snap->scope.begin(), snap->scope.end(), path) == snap->scope.end())
+                snap->scope.push_back(path);
+        } else {
+            snap->scope.erase(std::remove(snap->scope.begin(), snap->scope.end(), path), snap->scope.end());
+        }
+        markDirty();
+    });
+
+    // Channel operations
+    scriptlet->setChannelCountCallback([this]() { return (int)sf.audioSetup.channels.size(); });
+    scriptlet->setChannelInfoCallback([this](int ch) -> ScriptletChannelInfo {
+        auto& as = sf.audioSetup;
+        ScriptletChannelInfo info;
+        if (ch < 0 || ch >= (int)as.channels.size()) return info;
+        auto& c = as.channels[static_cast<size_t>(ch)];
+        info.name      = c.name;
+        info.fader     = c.masterGainDb;
+        info.mute      = c.mute;
+        info.polarity  = c.phaseInvert;
+        info.delay     = static_cast<float>(c.delayMs);
+        info.pdcIsolation = c.pdcIsolated;
+        if (c.linkedStereo) {
+            info.linkState = "stereo_left";
+            if (ch > 0 && as.channels[static_cast<size_t>(ch - 1)].linkedStereo)
+                info.linkState = "stereo_right";
+        } else {
+            info.linkState = "mono";
+        }
+        info.pluginSlotCount = (int)c.plugins.size();
+        info.sendSlotCount   = (int)c.sends.size();
+        return info;
+    });
+    scriptlet->setChannelSetNameCallback([this](int ch, const std::string& name) {
+        auto& as = sf.audioSetup;
+        if (ch < 0 || ch >= (int)as.channels.size()) return;
+        as.channels[static_cast<size_t>(ch)].name = name;
+        markDirty(); emit mixStateChanged();
+    });
+    scriptlet->setChannelSetFaderCallback([this](int ch, float db) {
+        auto& as = sf.audioSetup;
+        if (ch < 0 || ch >= (int)as.channels.size()) return;
+        as.channels[static_cast<size_t>(ch)].masterGainDb = db;
+        snapshots.markDirty("/mixer/" + std::to_string(ch) + "/fader");
+        markDirty(); applyMixing(); emit mixStateChanged();
+    });
+    scriptlet->setChannelSetMuteCallback([this](int ch, bool mute) {
+        auto& as = sf.audioSetup;
+        if (ch < 0 || ch >= (int)as.channels.size()) return;
+        as.channels[static_cast<size_t>(ch)].mute = mute;
+        snapshots.markDirty("/mixer/" + std::to_string(ch) + "/mute");
+        markDirty(); applyMixing(); emit mixStateChanged();
+    });
+    scriptlet->setChannelSetPolarityCallback([this](int ch, bool pol) {
+        auto& as = sf.audioSetup;
+        if (ch < 0 || ch >= (int)as.channels.size()) return;
+        as.channels[static_cast<size_t>(ch)].phaseInvert = pol;
+        snapshots.markDirty("/mixer/" + std::to_string(ch) + "/polarity");
+        markDirty(); applyMixing(); emit mixStateChanged();
+    });
+    scriptlet->setChannelSetDelayCallback([this](int ch, float ms) {
+        auto& as = sf.audioSetup;
+        if (ch < 0 || ch >= (int)as.channels.size()) return;
+        as.channels[static_cast<size_t>(ch)].delayMs = ms;
+        markDirty(); applyMixing(); emit mixStateChanged();
+    });
+    scriptlet->setChannelSetPdcCallback([this](int ch, bool isolated) {
+        auto& as = sf.audioSetup;
+        if (ch < 0 || ch >= (int)as.channels.size()) return;
+        as.channels[static_cast<size_t>(ch)].pdcIsolated = isolated;
+        markDirty(); rebuildPDC(); emit mixStateChanged();
+    });
+    scriptlet->setChannelGetXpointCallback([this](int ch, int out) -> float {
+        for (const auto& xe : sf.audioSetup.xpEntries)
+            if (xe.ch == ch && xe.out == out) return xe.db;
+        return (ch == out) ? 0.0f : -144.0f;
+    });
+    scriptlet->setChannelSetXpointCallback([this](int ch, int out, float db) {
+        auto& xp = sf.audioSetup.xpEntries;
+        bool found = false;
+        for (auto& xe : xp)
+            if (xe.ch == ch && xe.out == out) { xe.db = db; found = true; break; }
+        if (!found) xp.push_back({ch, out, db});
+        snapshots.markDirty("/mixer/" + std::to_string(ch) + "/crosspoint/" + std::to_string(out));
+        markDirty(); applyMixing(); emit mixStateChanged();
+    });
+    scriptlet->setChannelLinkCallback([this](int ch, bool link) {
+        auto& as = sf.audioSetup;
+        if (ch < 0 || ch >= (int)as.channels.size()) return;
+        as.channels[static_cast<size_t>(ch)].linkedStereo = link;
+        markDirty(); emit mixStateChanged();
+    });
+    scriptlet->setAppendChannelCallback([this]() -> int {
+        auto& as = sf.audioSetup;
+        mcp::ShowFile::AudioSetup::Channel ch;
+        ch.name = "Ch " + std::to_string(as.channels.size() + 1);
+        as.channels.push_back(ch);
+        const int newIdx = static_cast<int>(as.channels.size()) - 1;
+        as.xpEntries.push_back({newIdx, newIdx, 0.0f});
+        buildChannelPluginChains();
+        markDirty(); emit mixStateChanged();
+        return newIdx;
+    });
+    scriptlet->setRemoveChannelCallback([this](int ch) -> bool {
+        auto& as = sf.audioSetup;
+        if (ch < 0 || ch >= (int)as.channels.size()) return false;
+        as.channels.erase(as.channels.begin() + ch);
+        auto& xp = as.xpEntries;
+        xp.erase(std::remove_if(xp.begin(), xp.end(),
+            [ch](const mcp::ShowFile::AudioSetup::XpEntry& xe) { return xe.ch == ch; }), xp.end());
+        for (auto& xe : xp) if (xe.ch > ch) --xe.ch;
+        buildChannelPluginChains();
+        markDirty(); emit mixStateChanged();
+        return true;
+    });
+
+    // Plugin slot operations
+    scriptlet->setPluginSlotCountCallback([this](int ch) -> int {
+        auto& as = sf.audioSetup;
+        if (ch < 0 || ch >= (int)as.channels.size()) return 0;
+        return (int)as.channels[static_cast<size_t>(ch)].plugins.size();
+    });
+    scriptlet->setPluginListParamsCallback([this](int ch, int slot) -> std::vector<ScriptletPluginParamInfo> {
+        const auto& w = channelPlugin(ch, slot);
+        if (!w || !w->getProcessor()) return {};
+        std::vector<ScriptletPluginParamInfo> result;
+        for (const auto& p : w->getProcessor()->getParameters()) {
+            ScriptletPluginParamInfo info;
+            info.id   = p.id; info.name = p.name;
+            info.min  = p.minValue; info.max = p.maxValue;
+            info.current = w->getProcessor()->getParameterValue(p.id);
+            result.push_back(info);
+        }
+        return result;
+    });
+    scriptlet->setPluginGetParamCallback([this](int ch, int slot, const std::string& id) -> float {
+        const auto& w = channelPlugin(ch, slot);
+        if (!w || !w->getProcessor()) return 0.0f;
+        return w->getProcessor()->getParameterValue(id);
+    });
+    scriptlet->setPluginSetParamCallback([this](int ch, int slot, const std::string& id, float v) {
+        const auto& w = channelPlugin(ch, slot);
+        if (!w || !w->getProcessor()) return;
+        w->getProcessor()->setParameterValue(id, v);
+        auto& as = sf.audioSetup;
+        if (ch < (int)as.channels.size() && slot < (int)as.channels[static_cast<size_t>(ch)].plugins.size())
+            as.channels[static_cast<size_t>(ch)].plugins[static_cast<size_t>(slot)].parameters[id] = v;
+        markDirty();
+    });
+    scriptlet->setPluginLoadCallback([this](int ch, int slot, const std::string& pluginId) -> bool {
+        auto& as = sf.audioSetup;
+        if (ch < 0 || ch >= (int)as.channels.size()) return false;
+        auto& pslots = as.channels[static_cast<size_t>(ch)].plugins;
+        while ((int)pslots.size() <= slot) pslots.push_back({});
+        pslots[static_cast<size_t>(slot)].pluginId = pluginId;
+        buildChannelPluginChains();
+        markDirty(); emit mixStateChanged();
+        return true;
+    });
+    scriptlet->setPluginUnloadCallback([this](int ch, int slot) -> bool {
+        auto& as = sf.audioSetup;
+        if (ch < 0 || ch >= (int)as.channels.size()) return false;
+        auto& pslots = as.channels[static_cast<size_t>(ch)].plugins;
+        if (slot < 0 || slot >= (int)pslots.size()) return false;
+        pslots[static_cast<size_t>(slot)] = {};
+        buildChannelPluginChains();
+        markDirty(); emit mixStateChanged();
+        return true;
+    });
+    scriptlet->setPluginDeactivateScriptletCallback([this](int ch, int slot) { deactivatePlugin(ch, slot); });
+    scriptlet->setPluginReactivateScriptletCallback([this](int ch, int slot) { reactivatePlugin(ch, slot); });
+
+    // Send slot operations
+    scriptlet->setChannelSendCountCallback([this](int ch) -> int {
+        auto& as = sf.audioSetup;
+        if (ch < 0 || ch >= (int)as.channels.size()) return 0;
+        return (int)as.channels[static_cast<size_t>(ch)].sends.size();
+    });
+    scriptlet->setSendInfoCallback([this](int ch, int slot) -> ScriptletSendInfo {
+        ScriptletSendInfo info;
+        auto& as = sf.audioSetup;
+        if (ch < 0 || ch >= (int)as.channels.size()) return info;
+        auto& sends = as.channels[static_cast<size_t>(ch)].sends;
+        if (slot < 0 || slot >= (int)sends.size()) return info;
+        auto& s = sends[static_cast<size_t>(slot)];
+        info.mute = s.muted; info.level = s.levelDb;
+        info.panL = s.panL; info.panR = s.panR;
+        info.dstChannel = s.dstChannel;
+        return info;
+    });
+    scriptlet->setSendSetMuteCallback([this](int ch, int slot, bool mute) {
+        auto& as = sf.audioSetup;
+        if (ch < 0 || ch >= (int)as.channels.size() || slot < 0) return;
+        auto& sends = as.channels[static_cast<size_t>(ch)].sends;
+        while ((int)sends.size() <= slot) sends.emplace_back();
+        sends[static_cast<size_t>(slot)].muted = mute; rebuildSendGains(); markDirty();
+    });
+    scriptlet->setSendSetLevelCallback([this](int ch, int slot, float db) {
+        auto& as = sf.audioSetup;
+        if (ch < 0 || ch >= (int)as.channels.size() || slot < 0) return;
+        auto& sends = as.channels[static_cast<size_t>(ch)].sends;
+        while ((int)sends.size() <= slot) sends.emplace_back();
+        sends[static_cast<size_t>(slot)].levelDb = db; rebuildSendGains(); markDirty();
+    });
+    scriptlet->setSendSetPanCallback([this](int ch, int slot, float panL, float panR) {
+        auto& as = sf.audioSetup;
+        if (ch < 0 || ch >= (int)as.channels.size()) return;
+        auto& sends = as.channels[static_cast<size_t>(ch)].sends;
+        if (slot >= 0 && slot < (int)sends.size()) {
+            sends[static_cast<size_t>(slot)].panL = panL;
+            sends[static_cast<size_t>(slot)].panR = panR;
+            rebuildSendGains(); markDirty();
+        }
+    });
+    scriptlet->setSendEngageCallback([this](int ch, int slot, int dstCh) -> bool {
+        auto& as = sf.audioSetup;
+        if (ch < 0 || ch >= (int)as.channels.size()) return false;
+        auto& sends = as.channels[static_cast<size_t>(ch)].sends;
+        while ((int)sends.size() <= slot) sends.push_back({});
+        sends[static_cast<size_t>(slot)].dstChannel = dstCh;
+        rebuildSendGains(); markDirty(); emit mixStateChanged();
+        return true;
+    });
+    scriptlet->setSendDisengageCallback([this](int ch, int slot) -> bool {
+        auto& as = sf.audioSetup;
+        if (ch < 0 || ch >= (int)as.channels.size()) return false;
+        auto& sends = as.channels[static_cast<size_t>(ch)].sends;
+        if (slot < 0 || slot >= (int)sends.size()) return false;
+        sends[static_cast<size_t>(slot)].dstChannel = -1;
+        rebuildSendGains(); markDirty(); emit mixStateChanged();
+        return true;
+    });
+
     // --- Show Information state ---
 
     connect(this, &AppModel::cueFired, this, [this](int idx) {
@@ -422,6 +782,12 @@ AppModel::AppModel(QObject* parent)
 }
 
 AppModel::~AppModel() {
+    // Join the Scheduler thread BEFORE member destructors run.
+    // Scheduler callbacks capture CueList pointers; if the thread is still
+    // alive when m_cueLists (declared after scheduler in the class body,
+    // so destroyed before it) is torn down, those pointers become dangling.
+    scheduler.shutdown();
+
     for (auto& cl : m_cueLists) cl->panic();
 }
 
@@ -980,8 +1346,17 @@ void AppModel::buildChannelPluginChains() {
         const auto& w = sv[static_cast<size_t>(slot)];
         return w ? w->getProcessorShared() : nullptr;
     };
-    for (int i = 0; i < static_cast<int>(m_cueLists.size()); ++i)
+    mcp::CueList::PluginWrapperCallback deactivateCb = [this](int ch, int slot) {
+        deactivatePlugin(ch, slot);
+    };
+    mcp::CueList::PluginWrapperCallback reactivateCb = [this](int ch, int slot) {
+        reactivatePlugin(ch, slot);
+    };
+    for (int i = 0; i < static_cast<int>(m_cueLists.size()); ++i) {
         m_cueLists[static_cast<size_t>(i)]->setPluginAccessor(acc);
+        m_cueLists[static_cast<size_t>(i)]->setPluginDeactivateCallback(deactivateCb);
+        m_cueLists[static_cast<size_t>(i)]->setPluginReactivateCallback(reactivateCb);
+    }
 }
 
 std::shared_ptr<mcp::plugin::PluginWrapper> AppModel::channelPlugin(int ch, int slot) const {
@@ -994,7 +1369,64 @@ std::shared_ptr<mcp::plugin::PluginWrapper> AppModel::channelPlugin(int ch, int 
 mcp::plugin::PluginRuntimeStatus AppModel::channelPluginStatus(int ch, int slot) const {
     const auto& w = channelPlugin(ch, slot);
     if (!w) return mcp::plugin::PluginRuntimeStatus::Ok;
+    if (w->isDeactivated()) return mcp::plugin::PluginRuntimeStatus::Deactivated;
+    if (!w->getProcessor()) return mcp::plugin::PluginRuntimeStatus::Ok;
     return mcp::plugin::NativePluginBackend::statusOf(*w->getProcessor());
+}
+
+void AppModel::deactivatePlugin(int ch, int slot) {
+    const auto& w = channelPlugin(ch, slot);
+    if (!w || w->isDeactivated()) return;
+    emit pluginSlotAboutToChange(ch, slot);
+    w->deactivate();
+    rebuildPDC();
+    emit mixStateChanged();
+    emit pluginSlotChanged(ch, slot);
+}
+
+void AppModel::reactivatePlugin(int ch, int slot) {
+    const auto& w = channelPlugin(ch, slot);
+    if (!w || !w->isDeactivated()) return;
+    emit pluginSlotAboutToChange(ch, slot);
+
+    auto& as = sf.audioSetup;
+    if (ch >= static_cast<int>(as.channels.size())) return;
+    auto& pSlots = as.channels[static_cast<size_t>(ch)].plugins;
+    if (slot >= static_cast<int>(pSlots.size())) return;
+    auto& sl = pSlots[static_cast<size_t>(slot)];
+
+    // Determine stereo channel count.
+    const bool isStereo = (ch + 1 < static_cast<int>(as.channels.size()))
+                          && as.channels[static_cast<size_t>(ch)].linkedStereo;
+    const int numCh = isStereo ? 2 : 1;
+
+    std::unique_ptr<mcp::plugin::AudioProcessor> proc;
+    if (sl.isExternal()) {
+        mcp::plugin::ExternalPluginReference ref;
+        ref.backend     = sl.extBackend;
+        ref.pluginId    = sl.pluginId;
+        ref.path        = sl.extPath;
+        ref.name        = sl.extName;
+        ref.vendor      = sl.extVendor;
+        ref.version     = sl.extVersion;
+        ref.numChannels = sl.extNumChannels > 0 ? sl.extNumChannels : numCh;
+        // Use saved state from the wrapper (captured at deactivate time).
+        ref.stateBlob     = w->savedState().stateData;
+        for (const auto& [id, val] : w->savedState().parameters)
+            ref.paramSnapshot[id] = static_cast<float>(val);
+        proc = m_nativeBackend.load(ref);
+    } else {
+        if (sl.pluginId.empty()) return;
+        proc = pluginFactory.create(sl.pluginId);
+        if (!proc) return;
+        // Saved state will be applied by PluginWrapper::reactivate() automatically.
+    }
+
+    if (!proc) return;
+    w->reactivate(std::move(proc));
+    rebuildPDC();
+    emit mixStateChanged();
+    emit pluginSlotChanged(ch, slot);
 }
 
 void AppModel::syncPluginStatesToShowFile() {
@@ -1004,14 +1436,19 @@ void AppModel::syncPluginStatesToShowFile() {
         for (int s = 0; s < static_cast<int>(pslots.size()); ++s) {
             auto& sl = pslots[static_cast<size_t>(s)];
             const auto& w = channelPlugin(ch, s);
-            if (!w || !w->getProcessor()) continue;
+            if (!w) continue;
             if (sl.isExternal()) {
-                const auto state = w->getProcessor()->getState();
+                // Use savedState() for deactivated slots so we don't lose state.
+                const auto state = w->isDeactivated()
+                    ? w->savedState()
+                    : (w->getProcessor() ? w->getProcessor()->getState()
+                                         : w->savedState());
                 sl.extStateBlob     = state.stateData;
                 sl.extParamSnapshot.clear();
                 for (const auto& [id, val] : state.parameters)
-                    sl.extParamSnapshot[id] = val;
+                    sl.extParamSnapshot[id] = static_cast<float>(val);
             } else {
+                if (!w->getProcessor()) continue;
                 // Sync live processor values → sl.parameters so snapshots capture
                 // the current state even if the editor was never opened.
                 for (const auto& p : w->getProcessor()->getParameters())

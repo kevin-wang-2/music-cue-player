@@ -37,6 +37,17 @@ public:
     virtual void suspend() {}
     virtual void resume()  {}
 
+    // Returns true if the processor has its own native bypass mechanism
+    // (kAudioUnitProperty_BypassEffect for AU, kIsBypass param for VST3).
+    // When true, PluginWrapper keeps calling process() so the plugin handles
+    // the bypass transition and tail; the host audio path is not bypassed.
+    virtual bool hasNativeBypass() const { return false; }
+
+    // Notify the plugin of host-level bypass (default: no-op).
+    // Called from the control thread; the change is queued for delivery to
+    // the audio processor on the next process() block.
+    virtual void setNativeBypass(bool) {}
+
     // Algorithmic latency introduced by this processor, in samples.
     virtual int getLatencySamples() const { return 0; }
 
