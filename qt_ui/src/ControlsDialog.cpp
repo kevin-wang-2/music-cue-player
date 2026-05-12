@@ -173,6 +173,6 @@ void ControlsDialog::save() {
         entry.osc.enabled  = r.oscEnable->isChecked();
         entry.osc.path     = r.oscPath->text().toStdString();
     }
-    m_model->dirty = true;
+    m_model->markDirty();
     emit m_model->dirtyChanged(true);
 }

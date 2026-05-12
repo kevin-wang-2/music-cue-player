@@ -1512,7 +1512,7 @@ void InspectorWidget::replaceAudioFile(const QString& newAbsPath) {
     sfCue->path = pathToStore;
 
     ShowHelpers::reloadEngineCueAudio(*m_model, m_model->activeListIdx(), m_cueIdx);
-    m_model->dirty = true;
+    m_model->markDirty();
 
     // Update the path widget immediately (show the resolved absolute path)
     static_cast<AudioPathWidget*>(m_audioPathWidget)->setPath(newAbsPath);
@@ -3226,7 +3226,7 @@ void InspectorWidget::saveTriggers() {
     tr.osc.enabled = m_chkOscTrigEnable->isChecked();
     tr.osc.path    = oscPath;
 
-    m_model->dirty = true;
+    m_model->markDirty();
     emit m_model->dirtyChanged(true);
 }
 

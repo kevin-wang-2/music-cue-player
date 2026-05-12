@@ -7,21 +7,13 @@
 #endif
 #ifdef MCP_HAVE_VST3
 #  include "engine/plugin/VST3PluginAdapter.h"
+#  include "engine/plugin/VST3Scanner.h"
 #endif
 
 #include <cstdio>
 #include <cstring>
 #include <filesystem>
 #include <string>
-#ifdef MCP_HAVE_VST3
-#  include "pluginterfaces/base/ipluginbase.h"
-#  if defined(__APPLE__) || defined(__linux__)
-#    include <dlfcn.h>
-#  elif defined(_WIN32)
-#    define WIN32_LEAN_AND_MEAN
-#    include <windows.h>
-#  endif
-#endif
 
 namespace mcp::plugin {
 
@@ -115,89 +107,50 @@ std::unique_ptr<AudioProcessor> NativePluginBackend::loadVST3(
     return makeMissing(ref, PluginRuntimeStatus::Missing,
                        "VST3 support was not compiled in");
 #else
-    if (ref.path.empty())
+    if (ref.pluginId.size() <= 5 || ref.pluginId.compare(0, 5, "vst3:") != 0)
         return makeMissing(ref, PluginRuntimeStatus::Failed,
-                           "VST3 plugin has no bundle path: " + ref.pluginId);
+                           "Invalid VST3 plugin ID: " + ref.pluginId);
 
-    // Parse class index from pluginId "vst3:<hex>" — we need the classIndex
-    // which is stored in the ref (via VST3Entry.classIndex → extNumChannels field
-    // encodes it; we re-scan to find it).  Simpler: try classIndex 0..15 and
-    // match by UID stored in pluginId.
-    const std::string uid = (ref.pluginId.size() > 5)
-                            ? ref.pluginId.substr(5) : "";  // strip "vst3:"
-
-    // Try loading from classIndex embedded in ref (extNumChannels is channels,
-    // not the index).  We scan the bundle to find the matching class.
+    // UID is the universal, cross-platform identifier (plugin-assigned GUID).
+    // The stored path is a hint only — it may be stale (moved plugin, different
+    // machine, different OS install prefix).  Resolution order:
+    //   1. Stored path exists and contains a class matching this UID → use it.
+    //   2. Scan platform default VST3 directories for any bundle with matching UID.
+    //   3. Not found → Missing.
+    std::string bundlePath;
     int classIndex = 0;
-#  if defined(__APPLE__) || defined(__linux__)
-    {
-        // Quick scan to find correct classIndex by UID match
-        std::string binPath = ref.path;
-        const std::string name =
-            std::filesystem::path(ref.path).stem().string();
-#    ifdef __APPLE__
-        binPath = ref.path + "/Contents/MacOS/" + name;
-#    else
-        binPath = ref.path + "/Contents/x86_64-linux/" + name + ".so";
-#    endif
-        void* h = nullptr;
-        if (std::filesystem::exists(binPath))
-            h = dlopen(binPath.c_str(), RTLD_LAZY | RTLD_LOCAL);
-        if (h) {
-            using FactFn = Steinberg::IPluginFactory*(*)();
-            auto* fn = (FactFn)dlsym(h, "GetPluginFactory");
-            if (fn) {
-                auto* fac = fn();
-                if (fac) {
-                    char hexbuf[33];
-                    for (int ci = 0; ci < fac->countClasses(); ++ci) {
-                        Steinberg::PClassInfo info;
-                        if (fac->getClassInfo(ci, &info) != Steinberg::kResultOk) continue;
-                        for (int k = 0; k < 16; ++k)
-                            std::snprintf(hexbuf + k*2, 3, "%02x",
-                                          static_cast<unsigned char>(info.cid[k]));
-                        hexbuf[32] = '\0';
-                        if (uid == hexbuf) { classIndex = ci; break; }
-                    }
-                    fac->release();
-                }
-            }
-            dlclose(h);
-        }
-    }
-#  elif defined(_WIN32)
-    {
-        std::string binPath = ref.path + "/Contents/x86_64-win/" +
-            std::filesystem::path(ref.path).stem().string() + ".vst3";
-        HMODULE h = LoadLibraryA(binPath.c_str());
-        if (h) {
-            using FactFn = Steinberg::IPluginFactory*(*)();
-            auto* fn = (FactFn)GetProcAddress(h, "GetPluginFactory");
-            if (fn) {
-                auto* fac = fn();
-                if (fac) {
-                    char hexbuf[33];
-                    for (int ci = 0; ci < fac->countClasses(); ++ci) {
-                        Steinberg::PClassInfo info;
-                        if (fac->getClassInfo(ci, &info) != Steinberg::kResultOk) continue;
-                        for (int k = 0; k < 16; ++k)
-                            std::snprintf(hexbuf + k*2, 3, "%02x",
-                                          static_cast<unsigned char>(info.cid[k]));
-                        hexbuf[32] = '\0';
-                        if (uid == hexbuf) { classIndex = ci; break; }
-                    }
-                    fac->release();
-                }
-            }
-            FreeLibrary(h);
-        }
-    }
-#  endif
 
-    auto adapter = VST3PluginAdapter::create(ref.path, classIndex, ref.numChannels);
+    auto tryBundle = [&](const std::string& bp) -> bool {
+        for (const auto& e : VST3Scanner::scanBundle(bp)) {
+            if (e.pluginId == ref.pluginId) {
+                bundlePath = bp;
+                classIndex = e.classIndex;
+                return true;
+            }
+        }
+        return false;
+    };
+
+    // 1. Fast path: stored path
+    if (!ref.path.empty() && std::filesystem::exists(ref.path))
+        tryBundle(ref.path);
+
+    // 2. Fallback: full scan by UID across default install locations
+    if (bundlePath.empty()) {
+        for (const auto& bp : VST3Scanner::findBundles(VST3Scanner::defaultPaths())) {
+            if (tryBundle(bp)) break;
+        }
+    }
+
+    if (bundlePath.empty())
+        return makeMissing(ref, PluginRuntimeStatus::Missing,
+                           "VST3 plugin not found (ID: " + ref.pluginId +
+                           ", last known path: " + ref.path + ")");
+
+    auto adapter = VST3PluginAdapter::create(bundlePath, classIndex, ref.numChannels);
     if (!adapter)
         return makeMissing(ref, PluginRuntimeStatus::Missing,
-                           "Failed to load VST3 plugin: " + ref.path);
+                           "Failed to load VST3 plugin: " + bundlePath);
 
     // Restore state
     if (!ref.stateBlob.empty() || !ref.paramSnapshot.empty()) {

@@ -1376,7 +1376,7 @@ void CueTableView::replaceAudioForRow(int row, const QString& absPath) {
     sfCue->path = pathToStore;
 
     ShowHelpers::reloadEngineCueAudio(*m_model, m_model->activeListIdx(), row);
-    m_model->dirty = true;
+    m_model->markDirty();
 
     m_selRow = row;
     refresh();

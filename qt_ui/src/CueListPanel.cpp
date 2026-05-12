@@ -159,7 +159,7 @@ void CueListPanel::onListDoubleClicked(int row) {
     cld.name = name.trimmed().toStdString();
     if (auto* item = m_list->item(row))
         item->setText(name.trimmed());
-    m_model->dirty = true;
+    m_model->markDirty();
     emit m_model->dirtyChanged(true);
     emit m_model->cueListsChanged();
 }
@@ -178,7 +178,7 @@ void CueListPanel::onAddList() {
     m_model->sf.cueLists.push_back(std::move(cld));
     m_model->insertEngineList(static_cast<int>(m_model->sf.cueLists.size()) - 1);
 
-    m_model->dirty = true;
+    m_model->markDirty();
     emit m_model->dirtyChanged(true);
     emit m_model->cueListsChanged();
 
@@ -202,7 +202,7 @@ void CueListPanel::onDeleteList() {
     m_model->sf.cueLists.erase(m_model->sf.cueLists.begin() + row);
     m_model->removeEngineList(row);
 
-    m_model->dirty = true;
+    m_model->markDirty();
     emit m_model->dirtyChanged(true);
     emit m_model->cueListsChanged();
 

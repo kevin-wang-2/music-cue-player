@@ -160,7 +160,7 @@ void ScriptletLibraryDialog::saveCurrentCode(const QString& code) {
     if (uid < 0) return;   // built-in or nothing selected — never write
     m_model->sf.scriptletLibrary.entries[uid].code = code.toStdString();
     m_model->applyScriptletLibrary();
-    m_model->dirty = true;
+    m_model->markDirty();
     emit m_model->dirtyChanged(true);
 }
 
@@ -191,7 +191,7 @@ void ScriptletLibraryDialog::onAdd() {
     entry.name = name.toStdString();
     m_model->sf.scriptletLibrary.entries.push_back(std::move(entry));
     m_model->applyScriptletLibrary();
-    m_model->dirty = true;
+    m_model->markDirty();
     emit m_model->dirtyChanged(true);
 
     refreshList();
@@ -213,7 +213,7 @@ void ScriptletLibraryDialog::onRemove() {
     m_model->sf.scriptletLibrary.entries.erase(
         m_model->sf.scriptletLibrary.entries.begin() + uid);
     m_model->applyScriptletLibrary();
-    m_model->dirty = true;
+    m_model->markDirty();
     emit m_model->dirtyChanged(true);
     refreshList();
 }
@@ -255,7 +255,7 @@ void ScriptletLibraryDialog::onRename() {
 
     m_model->sf.scriptletLibrary.entries[uid].name = newName.toStdString();
     m_model->applyScriptletLibrary();
-    m_model->dirty = true;
+    m_model->markDirty();
     emit m_model->dirtyChanged(true);
     refreshList();
     m_list->setCurrentRow(m_builtinCount + uid);

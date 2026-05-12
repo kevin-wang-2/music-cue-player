@@ -526,7 +526,7 @@ void PluginManagerDialog::onAULoadIntoSlot() {
     sl.disabled        = false;
     sl.loadFailCount   = 0;
 
-    m_model->dirty = true;
+    m_model->markDirty();
     m_model->buildChannelPluginChains();
     m_model->applyMixing();
     accept();
@@ -850,7 +850,7 @@ void PluginManagerDialog::onVST3LoadIntoSlot() {
     sl.disabled        = false;
     sl.loadFailCount   = 0;
 
-    m_model->dirty = true;
+    m_model->markDirty();
     m_model->buildChannelPluginChains();
     m_model->applyMixing();
     accept();

@@ -215,7 +215,7 @@ AppModel::AppModel(QObject* parent)
         cd.name      = name;
         std::string err;
         ShowHelpers::insertEngineCue(*this, li, -1 /*append*/, std::move(cd), err);
-        dirty = true;
+        markDirty();
         emit cueListChanged();
         const int newIdx = m_cueLists[static_cast<size_t>(li)]->cueCount() - 1;
         scriptlet->fireCueInsertedEvent(newIdx);
@@ -235,7 +235,7 @@ AppModel::AppModel(QObject* parent)
         cd.name      = name;
         std::string err;
         ShowHelpers::insertEngineCue(*this, li, refIdx + 1, std::move(cd), err);
-        dirty = true;
+        markDirty();
         emit cueListChanged();
         scriptlet->fireCueInsertedEvent(refIdx + 1);
         return refIdx + 1;
@@ -262,7 +262,7 @@ AppModel::AppModel(QObject* parent)
             ShowHelpers::sfFixTargetsForReorder(sf, li, cueIdx, blockSize, dstRow);
             cl.moveCueTo(cueIdx, dstRow);
         }
-        dirty = true;
+        markDirty();
         emit cueListChanged();
         return true;
     });
@@ -272,7 +272,7 @@ AppModel::AppModel(QObject* parent)
         if (li < 0 || idx < 0 || idx >= m_cueLists[static_cast<size_t>(li)]->cueCount()) return false;
         pushUndo();
         ShowHelpers::removeEngineCue(*this, li, idx);
-        dirty = true;
+        markDirty();
         emit cueListChanged();
         return true;
     });
@@ -287,8 +287,7 @@ AppModel::AppModel(QObject* parent)
         const int newId = cld.numericId;
         sf.cueLists.push_back(std::move(cld));
         insertEngineList(static_cast<int>(sf.cueLists.size()) - 1);
-        dirty = true;
-        emit dirtyChanged(true);
+        markDirty();
         emit cueListsChanged();
         return newId;
     });
@@ -303,8 +302,7 @@ AppModel::AppModel(QObject* parent)
         const int newId = cld.numericId;
         sf.cueLists.insert(sf.cueLists.begin() + refLi + 1, std::move(cld));
         insertEngineList(refLi + 1);
-        dirty = true;
-        emit dirtyChanged(true);
+        markDirty();
         emit cueListsChanged();
         return newId;
     });
@@ -318,8 +316,7 @@ AppModel::AppModel(QObject* parent)
         removeEngineList(li);
         const int newActive = std::min(m_activeListIdx, (int)sf.cueLists.size() - 1);
         setActiveList(newActive);
-        dirty = true;
-        emit dirtyChanged(true);
+        markDirty();
         emit cueListsChanged();
         return true;
     });
@@ -513,7 +510,7 @@ void AppModel::tick() {
         for (const auto& [cueIdx, snapId] : cl->drainPendingSnapshots()) {
             if (snapId >= 0 && snapshots.recallById(snapId)) {
                 applyMixing();
-                dirty = true;
+                markDirty();
                 mixChanged = true;
             }
         }
@@ -578,7 +575,7 @@ void AppModel::tick() {
                 }
             }
             mixChanged = true;
-            dirty = true;
+            markDirty();
         }
     }
     if (sendChanged) rebuildSendGains();
@@ -662,8 +659,8 @@ void AppModel::tick() {
     }
 }
 
-void AppModel::storeSnapshot()    { syncPluginStatesToShowFile(); snapshots.store();    dirty = true; }
-void AppModel::storeSnapshotAll() { syncPluginStatesToShowFile(); snapshots.storeAll(); dirty = true; }
+void AppModel::storeSnapshot()    { syncPluginStatesToShowFile(); snapshots.store();    markDirty(); }
+void AppModel::storeSnapshotAll() { syncPluginStatesToShowFile(); snapshots.storeAll(); markDirty(); }
 
 void AppModel::recallSnapshot()
 {
@@ -671,7 +668,7 @@ void AppModel::recallSnapshot()
     ShowHelpers::applyChannelMap(*this);
     applyOutputDsp();
     applyPluginParamStates();
-    dirty = true;
+    markDirty();
     emit mixStateChanged();
 }
 
@@ -681,7 +678,7 @@ void AppModel::recallSnapshotById(int id)
     ShowHelpers::applyChannelMap(*this);
     applyOutputDsp();
     applyPluginParamStates();
-    dirty = true;
+    markDirty();
     emit mixStateChanged();
 }
 

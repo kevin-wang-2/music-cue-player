@@ -885,7 +885,7 @@ void syncSfFromCues(AppModel& m, int listIdx) {
         restore(m.sf.cueLists[static_cast<size_t>(listIdx)].cues);
     }
 
-    m.dirty = true;
+    m.markDirty();
 }
 
 void syncAllSfFromCues(AppModel& m) {
@@ -1222,7 +1222,7 @@ void applyMediaFixes(AppModel& m, const std::vector<MissingEntry>& fixes) {
             }
         }
     }
-    m.dirty = true;
+    m.markDirty();
 }
 
 int countAudioCues(const AppModel& m) {

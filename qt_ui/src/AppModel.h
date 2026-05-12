@@ -52,6 +52,10 @@ public:
     std::string   showPath;   // empty = unsaved
     std::string   baseDir;
     bool          dirty{false};
+
+    void markDirty() {
+        if (!dirty) { dirty = true; emit dirtyChanged(true); }
+    }
     bool          engineOk{false};
     std::string   engineError;
 

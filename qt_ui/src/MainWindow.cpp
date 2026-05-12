@@ -746,7 +746,7 @@ void MainWindow::onOpenSettings() {
     m_model->sf.oscServer       = dlg.oscResult();
     m_model->sf.systemControls  = dlg.controlsResult();
     m_model->applyOscSettings();
-    m_model->dirty = true;
+    m_model->markDirty();
     emit m_model->dirtyChanged(true);
 
     // Re-initialize engine when multi-device config is present
@@ -777,7 +777,7 @@ void MainWindow::onOpenSettings() {
 
 
 void MainWindow::onCueListModified() {
-    m_model->dirty = true;
+    m_model->markDirty();
     emit m_model->dirtyChanged(true);
     m_cueTable->refresh();
     m_actUndo->setEnabled(m_model->canUndo());
@@ -798,7 +798,7 @@ void MainWindow::onUndo() {
         ShowHelpers::rebuildAllCueLists(*m_model, err);
     else
         ShowHelpers::reapplyParamsFromSF(*m_model);
-    m_model->dirty = true;
+    m_model->markDirty();
     emit m_model->dirtyChanged(true);
     m_cueTable->refresh();
     // Reload inspector so faders/spinboxes/waveform reflect the restored state.
@@ -825,7 +825,7 @@ void MainWindow::onRedo() {
         ShowHelpers::rebuildAllCueLists(*m_model, err);
     else
         ShowHelpers::reapplyParamsFromSF(*m_model);
-    m_model->dirty = true;
+    m_model->markDirty();
     emit m_model->dirtyChanged(true);
     m_cueTable->refresh();
     const int row      = m_cueTable->selectedRow();

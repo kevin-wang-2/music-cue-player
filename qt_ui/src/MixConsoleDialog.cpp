@@ -768,8 +768,7 @@ void MixConsoleDialog::buildConsole()
                 for (auto& ss : m_strips)
                     if (ss.ch == ch && ss.pdcIsoBtn)
                         ss.pdcIsoBtn->setStyleSheet(on ? kPhaseOn : kPhaseOff);
-                m_model->dirty = true;
-                emit m_model->dirtyChanged(true);
+                m_model->markDirty();
                 m_model->rebuildPDC();
             });
             vl->addWidget(s.pdcIsoBtn);
@@ -1294,7 +1293,7 @@ void MixConsoleDialog::commitNameEdit(int ch, bool isSlave)
     auto& channels = m_model->sf.audioSetup.channels;
     if (targetCh >= 0 && targetCh < static_cast<int>(channels.size()))
         channels[static_cast<size_t>(targetCh)].name = le->text().toStdString();
-    m_model->dirty = true;
+    m_model->markDirty();
 
     le->setReadOnly(true);
     le->setFocusPolicy(Qt::NoFocus);
@@ -1399,7 +1398,7 @@ void MixConsoleDialog::applyLink(int ch, bool linked)
     auto& channels = m_model->sf.audioSetup.channels;
     if (ch < 0 || ch >= static_cast<int>(channels.size())) return;
     channels[static_cast<size_t>(ch)].linkedStereo = linked;
-    m_model->dirty = true;
+    m_model->markDirty();
 
     const int scrollX = m_scroll->horizontalScrollBar()->value();
     const int scrollY = m_scroll->verticalScrollBar()->value();
@@ -1426,7 +1425,7 @@ void MixConsoleDialog::addChannel()
         for (const auto& d : as.devices) nPhys += d.channelCount;
     const int newIdx = static_cast<int>(as.channels.size()) - 1;
     as.xpEntries.push_back({newIdx, newIdx, 0.0f});
-    m_model->dirty = true;
+    m_model->markDirty();
     QTimer::singleShot(0, this, [this]() {
         refresh();
         raise();
@@ -1465,7 +1464,7 @@ void MixConsoleDialog::removeSelectedChannels()
             xe.ch = newIdx[static_cast<size_t>(xe.ch)];
 
     m_selectedChs.clear();
-    m_model->dirty = true;
+    m_model->markDirty();
     QTimer::singleShot(0, this, [this]() {
         refresh();
         raise();
@@ -1576,7 +1575,7 @@ void MixConsoleDialog::openSnapshotList()
                 auto* nameEdit = new QLineEdit(QString::fromStdString(snap.name));
                 connect(nameEdit, &QLineEdit::editingFinished, dlg, [this, &snap, nameEdit]() {
                     snap.name = nameEdit->text().toStdString();
-                    m_model->dirty = true;
+                    m_model->markDirty();
                     updateSnapToolbar();
                 });
 
@@ -1592,7 +1591,7 @@ void MixConsoleDialog::openSnapshotList()
                 delBtn->setAutoDefault(false); delBtn->setDefault(false);
                 connect(delBtn, &QPushButton::clicked, dlg, [this, pBuildList, i]() {
                     m_model->sf.snapshotList.snapshots[static_cast<size_t>(i)] = std::nullopt;
-                    m_model->dirty = true;
+                    m_model->markDirty();
                     updateSnapToolbar();
                     (*pBuildList)();
                 });
@@ -1928,7 +1927,7 @@ void MixConsoleDialog::openScopeEditor(int snapIdx)
         }
 
         snap.scope = std::move(newScope);
-        m_model->dirty = true;
+        m_model->markDirty();
         dlg->accept();
     });
 
@@ -2392,7 +2391,7 @@ void MixConsoleDialog::addPluginSlotButton(QVBoxLayout* bl, Strip& s, int ch, in
                     au->setNativeBypass(sl2.bypassed);
 #endif
             }
-            m_model->dirty = true;
+            m_model->markDirty();
             m_model->snapshots.markDirty("/mixer/" + std::to_string(ch) + "/plugin/" + std::to_string(slot));
             rebuildPluginSection(ch);
         });
@@ -2413,7 +2412,7 @@ void MixConsoleDialog::addPluginSlotButton(QVBoxLayout* bl, Strip& s, int ch, in
             auto& sl2 = m_model->sf.audioSetup.channels[static_cast<size_t>(ch)].plugins[static_cast<size_t>(slot)];
             sl2.disabled = !isDisabled;
             if (isDisabled) sl2.loadFailCount = 0; // reset on manual enable
-            m_model->dirty = true;
+            m_model->markDirty();
             m_model->buildChannelPluginChains();
             m_model->applyMixing();
             rebuildPluginSection(ch);
@@ -2515,7 +2514,7 @@ void MixConsoleDialog::openPluginPicker(int ch, int slot) {
                 pSlots2.emplace_back();
             pSlots2[static_cast<size_t>(slot)].pluginId   = id;
             pSlots2[static_cast<size_t>(slot)].parameters = {};
-            m_model->dirty = true;
+            m_model->markDirty();
             m_model->buildChannelPluginChains();
             m_model->applyMixing();
             rebuildPluginSection(ch);
@@ -2581,7 +2580,7 @@ void MixConsoleDialog::openPluginPicker(int ch, int slot) {
                     sl2.extStateBlob.clear();
                     sl2.extParamSnapshot.clear();
                     sl2.parameters.clear();
-                    m_model->dirty = true;
+                    m_model->markDirty();
                     m_model->buildChannelPluginChains();
                     m_model->applyMixing();
                     rebuildPluginSection(ch);
@@ -2642,7 +2641,7 @@ void MixConsoleDialog::openPluginPicker(int ch, int slot) {
                     sl2.extStateBlob.clear();
                     sl2.extParamSnapshot.clear();
                     sl2.parameters.clear();
-                    m_model->dirty = true;
+                    m_model->markDirty();
                     m_model->buildChannelPluginChains();
                     m_model->applyMixing();
                     rebuildPluginSection(ch);
@@ -2759,7 +2758,7 @@ void MixConsoleDialog::diffAndMarkPluginDirty(int ch, int slot) {
             cached = cur;
             psl.extParamSnapshot[id] = cur;
             m_model->snapshots.markDirty(slotBase + "/" + id);
-            m_model->dirty = true;
+            m_model->markDirty();
         }
     }
 }
@@ -2783,7 +2782,7 @@ void MixConsoleDialog::removePlugin(int ch, int slot) {
     pSlots.erase(pSlots.begin() + slot);
     while (!pSlots.empty() && pSlots.back().pluginId.empty())
         pSlots.pop_back();
-    m_model->dirty = true;
+    m_model->markDirty();
     m_model->buildChannelPluginChains();
     m_model->applyMixing();
     rebuildPluginSection(ch);
@@ -2812,7 +2811,7 @@ void MixConsoleDialog::executeDragDrop(int srcCh, int srcSlot, int dstCh, int ds
         dstPlugins[static_cast<size_t>(dstSlot)] = srcPlugins[static_cast<size_t>(srcSlot)];
         while (!dstPlugins.empty() && dstPlugins.back().pluginId.empty())
             dstPlugins.pop_back();
-        m_model->dirty = true;
+        m_model->markDirty();
         m_model->buildChannelPluginChains();
         m_model->applyMixing();
         rebuildPluginSection(dstCh);
@@ -2828,7 +2827,7 @@ void MixConsoleDialog::executeDragDrop(int srcCh, int srcSlot, int dstCh, int ds
             srcPlugins.pop_back();
         while (!dstPlugins.empty() && dstPlugins.back().pluginId.empty())
             dstPlugins.pop_back();
-        m_model->dirty = true;
+        m_model->markDirty();
         m_model->buildChannelPluginChains();
         m_model->applyMixing();
         rebuildPluginSection(srcCh);
@@ -2909,7 +2908,7 @@ void MixConsoleDialog::openPluginEditor(int ch, int slot, bool pinToTop) {
                         au->setNativeBypass(on);
 #endif
                 }
-                m_model->dirty = true;
+                m_model->markDirty();
                 m_model->snapshots.markDirty("/mixer/" + std::to_string(ch) + "/plugin/" + std::to_string(slot));
                 rebuildPluginSection(ch);
             }
@@ -2941,7 +2940,7 @@ void MixConsoleDialog::openPluginEditor(int ch, int slot, bool pinToTop) {
                     slBp.bypassed = nativeBp;
                     auto w3 = m_model->channelPlugin(ch, slot);
                     if (w3) w3->setBypassed(nativeBp);
-                    m_model->dirty = true;
+                    m_model->markDirty();
                     m_model->snapshots.markDirty("/mixer/" + std::to_string(ch) + "/plugin/" + std::to_string(slot));
                     // Update host bypass button to match plugin's native state.
                     if (bypassBtnPtr) {
@@ -2968,7 +2967,7 @@ void MixConsoleDialog::openPluginEditor(int ch, int slot, bool pinToTop) {
                         pSlots4[static_cast<size_t>(slot)].bypassed = nativeBp;
                         auto w4 = m_model->channelPlugin(ch, slot);
                         if (w4) w4->setBypassed(nativeBp);
-                        m_model->dirty = true;
+                        m_model->markDirty();
                         m_model->snapshots.markDirty("/mixer/" + std::to_string(ch) +
                                                      "/plugin/" + std::to_string(slot));
                         if (bypassBtnPtr) {
@@ -3120,7 +3119,7 @@ void MixConsoleDialog::openPluginEditor(int ch, int slot, bool pinToTop) {
                     pSlots2[static_cast<size_t>(slot)].parameters[pid] =
                         static_cast<float>(v);
             }
-            m_model->dirty = true;
+            m_model->markDirty();
             m_model->snapshots.markDirty("/mixer/" + std::to_string(ch) + "/plugin/" + std::to_string(slot));
         });
     }
@@ -3330,7 +3329,7 @@ void MixConsoleDialog::openSendEditor(int ch, int slot)
         if (slot >= static_cast<int>(s2.size())) return;
         s2[static_cast<size_t>(slot)].muted = on;
         muteBtn->setText(on ? "Muted" : "Active");
-        m_model->dirty = true;
+        m_model->markDirty();
         m_model->snapshots.markDirty(sendParamPath(ch, slot, "mute"));
         m_model->rebuildSendGains();
         rebuildSendSection(ch);
@@ -3350,7 +3349,7 @@ void MixConsoleDialog::openSendEditor(int ch, int slot)
         auto& s2 = m_model->sf.audioSetup.channels[static_cast<size_t>(ch)].sends;
         if (slot >= static_cast<int>(s2.size())) return;
         s2[static_cast<size_t>(slot)].levelDb = db;
-        m_model->dirty = true;
+        m_model->markDirty();
         m_model->snapshots.markDirty(sendParamPath(ch, slot, "level"));
         m_model->rebuildSendGains();
         rebuildSendSection(ch);  // refresh button label
@@ -3390,7 +3389,7 @@ void MixConsoleDialog::openSendEditor(int ch, int slot)
             [this, ch, slot](float v) {
                 auto& s2 = m_model->sf.audioSetup.channels[static_cast<size_t>(ch)].sends;
                 if (slot < static_cast<int>(s2.size())) s2[static_cast<size_t>(slot)].panL = v;
-                m_model->dirty = true;
+                m_model->markDirty();
                 m_model->snapshots.markDirty(sendParamPath(ch, slot, "panL"));
                 m_model->rebuildSendGains();
             }), 0, Qt::AlignHCenter);
@@ -3399,7 +3398,7 @@ void MixConsoleDialog::openSendEditor(int ch, int slot)
             [this, ch, slot](float v) {
                 auto& s2 = m_model->sf.audioSetup.channels[static_cast<size_t>(ch)].sends;
                 if (slot < static_cast<int>(s2.size())) s2[static_cast<size_t>(slot)].panL = v;
-                m_model->dirty = true;
+                m_model->markDirty();
                 m_model->snapshots.markDirty(sendParamPath(ch, slot, "panL"));
                 m_model->rebuildSendGains();
             }), 0, Qt::AlignHCenter);
@@ -3407,7 +3406,7 @@ void MixConsoleDialog::openSendEditor(int ch, int slot)
             [this, ch, slot](float v) {
                 auto& s2 = m_model->sf.audioSetup.channels[static_cast<size_t>(ch)].sends;
                 if (slot < static_cast<int>(s2.size())) s2[static_cast<size_t>(slot)].panR = v;
-                m_model->dirty = true;
+                m_model->markDirty();
                 m_model->snapshots.markDirty(sendParamPath(ch, slot, "panR"));
                 m_model->rebuildSendGains();
             }), 0, Qt::AlignHCenter);
@@ -3469,7 +3468,7 @@ void MixConsoleDialog::openSendPicker(int ch, int slot)
             sends[static_cast<size_t>(slot)].panL       = (srcStereo && dstStereo) ? -1.0f : 0.0f;
             sends[static_cast<size_t>(slot)].panR       = (srcStereo && dstStereo) ? +1.0f : 0.0f;
             sends[static_cast<size_t>(slot)].muted      = false;
-            m_model->dirty = true;
+            m_model->markDirty();
             m_model->rebuildSendTopology();
             rebuildSendSection(ch);
         });
@@ -3489,7 +3488,7 @@ void MixConsoleDialog::removeSend(int ch, int slot)
     if (slot < 0 || slot >= static_cast<int>(sends.size())) return;
     closeSendEditor(ch, slot);
     sends.erase(sends.begin() + slot);
-    m_model->dirty = true;
+    m_model->markDirty();
     m_model->rebuildSendTopology();
     rebuildSendSection(ch);
 }
