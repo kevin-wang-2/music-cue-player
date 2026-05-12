@@ -1,8 +1,10 @@
 #pragma once
 
 #include "engine/TriggerData.h"
+#include <QDialog>
 #include <QTabWidget>
 #include <QWidget>
+#include <map>
 #include <vector>
 
 class AppModel;
@@ -46,6 +48,7 @@ public:
 
     // Call when selection changes (rebuilds the whole inspector).
     void setCueIndex(int idx);
+
     // Call on timer tick to update the waveform playhead.
     void updatePlayhead();
     // Clear the timeline arm cursor (call after GO fires or panic/stop).
@@ -293,6 +296,21 @@ private:
     // OSC trigger
     QCheckBox*  m_chkOscTrigEnable{nullptr};
     QLineEdit*  m_editOscPath{nullptr};
+
+    // Pop-out support
+    struct PopoutInfo {
+        QDialog*  dialog{nullptr};
+        QWidget*  placeholder{nullptr};
+        int       tabIdx{-1};
+        QString   tabTitle;
+    };
+    std::map<QWidget*, PopoutInfo> m_popouts;
+    QPushButton* m_popoutBtn{nullptr};
+
+    bool isComplexTab(QWidget* page) const;
+    void updatePopoutBtn();
+    void popoutCurrentTab();
+    void closePopout(QWidget* page);
 
     bool m_loading{false};   // guard re-entrant signals during load
     bool m_hotkeyCapturing{false};

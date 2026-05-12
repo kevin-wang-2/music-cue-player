@@ -598,6 +598,36 @@ void MainWindow::buildMenuBar() {
     connect(m_actListPanel, &QAction::toggled, this, [this](bool on) {
         m_listPanel->setVisible(on);
     });
+
+    m_windowMenu = mb->addMenu("&Window");
+    connect(m_windowMenu, &QMenu::aboutToShow, this, &MainWindow::refreshWindowMenu);
+}
+
+void MainWindow::refreshWindowMenu() {
+    m_windowMenu->clear();
+
+    QList<QWidget*> floating;
+    for (QWidget* w : QApplication::topLevelWidgets()) {
+        if (w == this) continue;
+        if (!w->isVisible()) continue;
+        if (w->windowTitle().isEmpty()) continue;
+        floating.append(w);
+    }
+
+    if (floating.isEmpty()) {
+        auto* act = m_windowMenu->addAction(tr("No open windows"));
+        act->setEnabled(false);
+        return;
+    }
+
+    for (QWidget* w : floating) {
+        auto* act = m_windowMenu->addAction(w->windowTitle(), [w]() {
+            w->raise();
+            w->activateWindow();
+        });
+        act->setCheckable(true);
+        act->setChecked(w->isActiveWindow());
+    }
 }
 
 // ── slots ──────────────────────────────────────────────────────────────────

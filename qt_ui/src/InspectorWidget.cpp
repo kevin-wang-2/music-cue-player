@@ -493,6 +493,15 @@ InspectorWidget::InspectorWidget(AppModel* model, QWidget* parent)
     m_tabs = new QTabWidget(this);
     lay->addWidget(m_tabs);
 
+    m_popoutBtn = new QPushButton("⧉", m_tabs);
+    m_popoutBtn->setFixedSize(22, 22);
+    m_popoutBtn->setFlat(true);
+    m_popoutBtn->setToolTip(tr("Open in separate window"));
+    m_popoutBtn->hide();
+    m_tabs->setCornerWidget(m_popoutBtn, Qt::TopRightCorner);
+    connect(m_popoutBtn, &QPushButton::clicked, this, &InspectorWidget::popoutCurrentTab);
+    connect(m_tabs, &QTabWidget::currentChanged, this, [this](int) { updatePopoutBtn(); });
+
     buildBasicTab();
     buildMarkerTab();
     buildMCTab();
@@ -3430,4 +3439,100 @@ bool InspectorWidget::eventFilter(QObject* obj, QEvent* ev) {
         return true;
     }
     return QWidget::eventFilter(obj, ev);
+}
+
+// ── pop-out support ────────────────────────────────────────────────────────
+
+bool InspectorWidget::isComplexTab(QWidget* page) const {
+    return page == m_timePage     ||
+           page == m_timelinePage ||
+           page == m_mcPage       ||
+           page == m_automationPage;
+}
+
+void InspectorWidget::updatePopoutBtn() {
+    QWidget* w = m_tabs->currentWidget();
+    if (!w) { m_popoutBtn->hide(); return; }
+
+    for (auto& [page, info] : m_popouts) {
+        if (info.placeholder == w) {
+            m_popoutBtn->setToolTip(tr("Bring to front"));
+            m_popoutBtn->show();
+            return;
+        }
+    }
+
+    if (isComplexTab(w)) {
+        m_popoutBtn->setToolTip(tr("Open in separate window"));
+        m_popoutBtn->show();
+    } else {
+        m_popoutBtn->hide();
+    }
+}
+
+void InspectorWidget::popoutCurrentTab() {
+    QWidget* w = m_tabs->currentWidget();
+    if (!w) return;
+
+    for (auto& [page, info] : m_popouts) {
+        if (info.placeholder == w) {
+            info.dialog->raise();
+            info.dialog->activateWindow();
+            return;
+        }
+    }
+
+    if (!isComplexTab(w)) return;
+
+    QWidget* page   = w;
+    int      tabIdx = m_tabs->currentIndex();
+    QString  title  = m_tabs->tabText(tabIdx);
+
+    auto* placeholder = new QLabel(tr("Open in separate window  ⧉"), m_tabs);
+    placeholder->setAlignment(Qt::AlignCenter);
+    placeholder->setStyleSheet("color: #666; font-size: 12px;");
+
+    m_tabs->removeTab(tabIdx);
+    m_tabs->insertTab(tabIdx, placeholder, title);
+    m_tabs->setCurrentIndex(tabIdx);
+
+    auto* dialog = new QDialog(window(), Qt::Window);
+    dialog->setWindowTitle(title);
+    dialog->resize(900, 620);
+    auto* dlay = new QVBoxLayout(dialog);
+    dlay->setContentsMargins(0, 0, 0, 0);
+    page->setParent(dialog);
+    dlay->addWidget(page);
+    page->show();
+
+    m_popouts[page] = { dialog, placeholder, tabIdx, title };
+
+    connect(dialog, &QDialog::finished, this, [this, page](int) {
+        closePopout(page);
+    });
+
+    dialog->show();
+    updatePopoutBtn();
+}
+
+void InspectorWidget::closePopout(QWidget* page) {
+    auto it = m_popouts.find(page);
+    if (it == m_popouts.end()) return;
+
+    PopoutInfo info = it->second;
+    m_popouts.erase(it);
+
+    int phIdx = m_tabs->indexOf(info.placeholder);
+
+    m_tabs->removeTab(phIdx);
+    info.placeholder->deleteLater();
+
+    page->setParent(m_tabs);
+    m_tabs->insertTab(phIdx, page, info.tabTitle);
+    m_tabs->setTabVisible(phIdx, true);
+    m_tabs->setCurrentIndex(phIdx);
+
+    info.dialog->deleteLater();
+
+    updatePopoutBtn();
 }

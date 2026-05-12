@@ -13,6 +13,7 @@ class MixConsoleDialog;
 class ProjectStatusDialog;
 class ScriptletLibraryDialog;
 class ShowInfoDialog;
+class QMenu;
 class QSplitter;
 class QTimer;
 class QToolButton;
@@ -100,4 +101,7 @@ private:
     QAction* m_actRedo{nullptr};
     QAction* m_actInspector{nullptr};
     QAction* m_actListPanel{nullptr};
+
+    QMenu*   m_windowMenu{nullptr};
+    void refreshWindowMenu();
 };
