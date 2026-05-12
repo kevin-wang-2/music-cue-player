@@ -18,6 +18,7 @@ class PluginWrapper {
 public:
     enum class Status { Idle, Prepared, Error };
 
+    // Takes ownership of processor; stored internally as shared_ptr.
     explicit PluginWrapper(std::unique_ptr<AudioProcessor> processor);
 
     // Control-thread methods.
@@ -41,12 +42,13 @@ public:
     Status getStatus()         const { return m_status; }
 
     // Direct access to the wrapped processor for parameter/state operations.
-    AudioProcessor* getProcessor() const { return m_processor.get(); }
+    AudioProcessor*                    getProcessor()       const { return m_processor.get(); }
+    std::shared_ptr<AudioProcessor>    getProcessorShared() const { return m_processor; }
 
 private:
     static float dbToLinear(float db);
 
-    std::unique_ptr<AudioProcessor> m_processor;
+    std::shared_ptr<AudioProcessor> m_processor;
     Status m_status          {Status::Idle};
     bool   m_bypassed        {false};
     float  m_inputGainLinear {1.0f};

@@ -111,6 +111,7 @@ struct Cue {
     // Step = snap to 0/1 (mute, polarity), Forbidden = not user-selectable (delay).
     enum class AutomationParamMode { Linear, Step, Forbidden };
     static AutomationParamMode automationParamMode(const std::string& path) {
+        if (path.find("/plugin/") != std::string::npos) return AutomationParamMode::Linear;
         if (path.find("/delay") != std::string::npos) return AutomationParamMode::Forbidden;
         if (path.find("/mute")  != std::string::npos) return AutomationParamMode::Step;
         if (path.find("/polarity") != std::string::npos) return AutomationParamMode::Step;

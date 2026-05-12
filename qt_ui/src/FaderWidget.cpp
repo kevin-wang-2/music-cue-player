@@ -1,5 +1,6 @@
 #include "FaderWidget.h"
 
+#include <QEvent>
 #include <QLabel>
 #include <QLineEdit>
 #include <QMouseEvent>
@@ -25,6 +26,7 @@ FaderWidget::FaderWidget(const QString& label, QWidget* parent)
     m_slider->setValue(dbToSlider(0.0f));
     m_slider->setFixedWidth(28);
     m_slider->setMinimumHeight(80);
+    m_slider->installEventFilter(this);
     connect(m_slider, &QSlider::valueChanged, this, &FaderWidget::onSliderMoved);
     connect(m_slider, &QSlider::sliderPressed, this, [this]() {
         if (!m_toggleable) emit dragStarted();
@@ -222,4 +224,14 @@ void FaderWidget::onEditFinished() {
     dB = std::max(kFaderMin, std::min(kFaderMax, dB));
     setValue(dB);
     emit valueChanged(dB);
+}
+
+bool FaderWidget::eventFilter(QObject* obj, QEvent* ev)
+{
+    if (obj == m_slider && ev->type() == QEvent::MouseButtonDblClick) {
+        setValue(0.0f);
+        emit valueChanged(0.0f);
+        return true;
+    }
+    return QWidget::eventFilter(obj, ev);
 }

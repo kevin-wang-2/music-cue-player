@@ -1,6 +1,7 @@
 #include "engine/CueList.h"
 #include "engine/AudioMath.h"
 #include "engine/IAudioSource.h"
+#include "engine/plugin/AudioProcessor.h"
 #include "engine/StreamReader.h"
 #include "LtcStreamReader.h"
 #include "MtcGenerator.h"
@@ -20,6 +21,39 @@
 // Defined outside namespace mcp so the friend specifiers resolve to ::mcp_detail.
 
 namespace mcp_detail {
+
+// Send slot params queue updates only; the AppModel drain path applies them to
+// sf.audioSetup and calls rebuildSendGains() on the main thread.
+class SendParamBase : public mcp::AutoParam {
+protected:
+    mcp::CueList* m_list;
+    int           m_ch, m_slot;
+    std::string   m_path;
+public:
+    SendParamBase(mcp::CueList* list, int ch, int slot, std::string path)
+        : m_list(list), m_ch(ch), m_slot(slot), m_path(std::move(path)) {}
+
+    void setValue(double value) override {
+        std::lock_guard<std::mutex> lk(m_list->m_scriptletMutex);
+        m_list->m_pendingAutomationUpdates.emplace_back(m_path, value);
+    }
+};
+
+class SendLevelParam final : public SendParamBase {
+public:
+    using SendParamBase::SendParamBase;
+    Domain domain() const override { return Domain::FaderTaper; }
+};
+class SendMuteParam final : public SendParamBase {
+public:
+    using SendParamBase::SendParamBase;
+    Domain domain() const override { return Domain::Linear; }
+};
+class SendPanParam final : public SendParamBase {
+public:
+    using SendParamBase::SendParamBase;
+    Domain domain() const override { return Domain::Linear; }
+};
 
 class ChannelFaderParam final : public mcp::AutoParam {
     mcp::CueList* m_list;
@@ -115,6 +149,46 @@ public:
                           : ((dB <= -60.0f) ? 0.0f : mcp::lut::dBToLinear(dB));
         cm.fold[idx]      = xpLin * lin;
         m_list->pushFoldToEngine();
+        { std::lock_guard<std::mutex> lk(m_list->m_scriptletMutex);
+          m_list->m_pendingAutomationUpdates.emplace_back(m_path, value); }
+    }
+};
+
+class PluginParamAutoParam final : public mcp::AutoParam {
+    mcp::CueList*  m_list;
+    int            m_ch;
+    int            m_slot;
+    std::string    m_paramId;
+    std::string    m_path;
+    // Cached weak_ptr to avoid map lookup on every setValue().
+    mutable std::weak_ptr<mcp::plugin::AudioProcessor> m_weakProc;
+public:
+    PluginParamAutoParam(mcp::CueList* list, int ch, int slot,
+                         std::string paramId, std::string path)
+        : m_list(list), m_ch(ch), m_slot(slot),
+          m_paramId(std::move(paramId)), m_path(std::move(path))
+    {
+        if (m_list->m_pluginAccessor)
+            m_weakProc = m_list->m_pluginAccessor(ch, slot);
+    }
+
+    Domain domain() const override {
+        auto proc = m_weakProc.lock();
+        if (!proc && m_list->m_pluginAccessor)
+            m_weakProc = proc = m_list->m_pluginAccessor(m_ch, m_slot);
+        if (proc) {
+            for (const auto& info : proc->getParameters())
+                if (info.id == m_paramId) return info.domain;
+        }
+        return Domain::Linear;
+    }
+
+    void setValue(double value) override {
+        auto proc = m_weakProc.lock();
+        if (!proc && m_list->m_pluginAccessor)
+            m_weakProc = proc = m_list->m_pluginAccessor(m_ch, m_slot);
+        if (!proc) return;
+        proc->setParameterValue(m_paramId, static_cast<float>(value));
         { std::lock_guard<std::mutex> lk(m_list->m_scriptletMutex);
           m_list->m_pendingAutomationUpdates.emplace_back(m_path, value); }
     }
@@ -1413,6 +1487,28 @@ std::unique_ptr<AutoParam> CueList::makeAutoParam(const std::string& path) {
     const int slave   = (chSz < m_channelMap.stereoSlave.size())
                       ? m_channelMap.stereoSlave[chSz] : -1;
 
+    // Send slot parameters: /mixer/{ch}/send/{slot}/{param}
+    // Must be checked before the bare /fader and /mute checks to avoid false matches.
+    const std::string sendMid = "/send/";
+    const auto sendIt = path.find(sendMid, 7);
+    if (sendIt != std::string::npos) {
+        const std::string rest = path.substr(sendIt + sendMid.size());
+        const auto slashPos = rest.find('/');
+        if (slashPos != std::string::npos) {
+            int slot = -1;
+            try { slot = std::stoi(rest.substr(0, slashPos)); } catch (...) {}
+            const std::string paramId = rest.substr(slashPos + 1);
+            if (slot >= 0) {
+                if (paramId == "level")
+                    return std::make_unique<mcp_detail::SendLevelParam>(this, ch, slot, path);
+                if (paramId == "mute")
+                    return std::make_unique<mcp_detail::SendMuteParam>(this, ch, slot, path);
+                if (paramId == "panL" || paramId == "panR")
+                    return std::make_unique<mcp_detail::SendPanParam>(this, ch, slot, path);
+            }
+        }
+    }
+
     if (path.find("/fader") != std::string::npos)
         return std::make_unique<mcp_detail::ChannelFaderParam>(this, ch, slave, path);
 
@@ -1426,6 +1522,22 @@ std::unique_ptr<AutoParam> CueList::makeAutoParam(const std::string& path) {
         try { out = std::stoi(path.substr(it2 + xpMid.size())); } catch (...) {}
         if (out >= 0 && out < m_channelMap.numPhys)
             return std::make_unique<mcp_detail::CrosspointParam>(this, ch, out, path);
+    }
+
+    // Plugin parameter: /mixer/{ch}/plugin/{slot}/{paramId}
+    const std::string pluginMid = "/plugin/";
+    const auto pit = path.find(pluginMid, 7 + std::to_string(ch).size());
+    if (pit != std::string::npos && m_pluginAccessor) {
+        const std::string rest = path.substr(pit + pluginMid.size());
+        const auto sl2 = rest.find('/');
+        if (sl2 != std::string::npos) {
+            int slot = -1;
+            try { slot = std::stoi(rest.substr(0, sl2)); } catch (...) {}
+            const std::string paramId = rest.substr(sl2 + 1);
+            if (slot >= 0 && !paramId.empty())
+                return std::make_unique<mcp_detail::PluginParamAutoParam>(
+                    this, ch, slot, paramId, path);
+        }
     }
 
     return nullptr;  // polarity and other params: no live audio effect

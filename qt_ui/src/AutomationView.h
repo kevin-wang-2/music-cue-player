@@ -1,8 +1,10 @@
 #pragma once
 
+#include "engine/AutoParam.h"
 #include "engine/Cue.h"
 #include "engine/MusicContext.h"
 #include <QWidget>
+#include <QString>
 #include <vector>
 
 // Curve editor for Automation cues.
@@ -29,6 +31,12 @@ public:
     void setParamMode   (mcp::Cue::AutomationParamMode mode);
     void setMusicContext(const mcp::MusicContext* mc);  // null = no MC / no grid
     void setQuantize    (int mode);                     // 0=none 1=bar 2=beat
+
+    // Override value range and unit label for plugin/custom parameters.
+    // Call resetParamRange() to go back to defaults (fader range).
+    void setParamRange  (double minVal, double maxVal, const QString& unit = "");
+    void setParamDomain (mcp::AutoParam::Domain domain);  // controls reference lines
+    void resetParamRange();                               // back to fader defaults
 
     const std::vector<mcp::Cue::AutomationPoint>& points() const { return m_pts; }
 
@@ -81,6 +89,12 @@ private:
     mcp::Cue::AutomationParamMode m_mode{mcp::Cue::AutomationParamMode::Linear};
     const mcp::MusicContext*      m_mc{nullptr};
     int                           m_quantize{0};
+
+    bool                    m_useCustomRange{false};
+    double                  m_customMin{0.0};
+    double                  m_customMax{1.0};
+    QString                 m_unit;
+    mcp::AutoParam::Domain  m_domain{mcp::AutoParam::Domain::Linear};
 
     int  m_dragIdx{-1};     // index in m_pts being dragged, or -1
     bool m_dragging{false};

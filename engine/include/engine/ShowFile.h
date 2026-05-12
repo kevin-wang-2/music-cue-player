@@ -240,6 +240,47 @@ struct ShowFile {
             bool   delayInSamples{false};  // false = ms mode, true = samples mode
             double delayMs{0.0};
             int    delaySamples{0};
+            bool   pdcIsolated{false};   // PDC: own plugin latency not propagated downstream
+            // Plugin slots (up to 16; order = slot index; vacant slots have empty pluginId).
+            struct PluginSlot {
+                std::string pluginId;                     // empty = vacant
+                std::map<std::string, float> parameters;  // internal param values
+
+                // External plugin fields — populated when pluginId starts with "au:" / "vst3:"
+                // (Kept flat to avoid a dependency on ExternalPluginReference in ShowFile.h)
+                std::string extBackend;            // "au", "vst3"
+                std::string extName;               // display name
+                std::string extVendor;
+                std::string extVersion;
+                int         extNumChannels{2};
+                std::vector<uint8_t>         extStateBlob;      // binary state (AU plist, …)
+                std::map<std::string, float> extParamSnapshot;   // normalized [0,1] fallback
+
+                // ── Runtime control (persisted) ───────────────────────────────
+                bool  bypassed{false};        // slot-level bypass; persisted
+                bool  disabled{false};        // safe-load: skip instantiation; state preserved
+                int   loadFailCount{0};       // consecutive load failures; auto-disables at 3
+                float manualTailSec{-1.0f};   // tail override: -1 = use plugin value
+
+                bool isExternal() const { return !extBackend.empty(); }
+            };
+            std::vector<PluginSlot> plugins;  // order = slot index; sparse is fine
+
+            // Send slots: channel-to-channel sends (post-fader, pre-destination-DSP).
+            // At most kMaxSendSlots per channel; vacant when dstChannel == -1.
+            static constexpr int kMaxSendSlots = 16;
+            struct SendSlot {
+                int   dstChannel{-1};    // -1 = vacant; logical channel index (or master of linked pair)
+                float levelDb{0.0f};     // send level in dB (0 = unity)
+                float panL{0.0f};        // pan for mono src or left of stereo src (-1..+1, 0 = center)
+                float panR{0.0f};        // pan for right of stereo src (stereo→stereo only)
+                bool  muted{false};
+                // send_type enum reserved for pre-fader variant (not implemented)
+                // PrePost preFader{PostFader};
+
+                bool isActive() const { return dstChannel >= 0; }
+            };
+            std::vector<SendSlot> sends;  // order = slot index; vacant slots have dstChannel == -1
         };
         std::vector<Channel> channels;
         // Sparse crosspoint: channel[ch] → physOut[out], dB.
@@ -299,12 +340,16 @@ struct ShowFile {
     // can reference it by ID rather than by position (position changes on delete).
     //
     // Parameter path scheme (prefix-match hierarchy):
-    //   /mixer/{ch}                 — entire channel
-    //   /mixer/{ch}/delay           — delay (ms/samples)
-    //   /mixer/{ch}/polarity        — phase invert
-    //   /mixer/{ch}/mute            — mute
-    //   /mixer/{ch}/fader           — master gain
-    //   /mixer/{ch}/crosspoint/{out}— one crosspoint send
+    //   /mixer/{ch}                     — entire channel
+    //   /mixer/{ch}/delay               — delay (ms/samples)
+    //   /mixer/{ch}/polarity            — phase invert
+    //   /mixer/{ch}/mute                — mute
+    //   /mixer/{ch}/fader               — master gain
+    //   /mixer/{ch}/crosspoint/{out}    — one crosspoint send
+    //   /mixer/{ch}/send/{slot}/mute    — send slot mute
+    //   /mixer/{ch}/send/{slot}/level   — send slot level (dB)
+    //   /mixer/{ch}/send/{slot}/panL    — send slot pan L
+    //   /mixer/{ch}/send/{slot}/panR    — send slot pan R
     struct SnapshotList {
         struct Snapshot {
             int         id{0};       // stable identifier — referenced by future SnapshotCue
@@ -325,6 +370,25 @@ struct ShowFile {
                 std::optional<float>  faderDb;
                 // Only crosspoints whose /crosspoint/{out} path was in scope at store time.
                 std::vector<XpSend>   xpSends;
+                // Plugin slot states whose /plugin/{slot} path was in scope at store time.
+                struct PluginParamState {
+                    int                          slot{0};
+                    std::optional<bool>          bypassed;
+                    std::map<std::string, float> parameters;       // internal plugin params
+                    std::vector<uint8_t>         extStateBlob;     // AU/external state blob
+                    std::map<std::string, float> extParamSnapshot; // AU param fallback
+                };
+                std::vector<PluginParamState> pluginStates;
+
+                // Send slot states whose /send/{slot}/... path was in scope at store time.
+                struct SendState {
+                    int   slot{0};
+                    std::optional<bool>  muted;
+                    std::optional<float> levelDb;
+                    std::optional<float> panL;
+                    std::optional<float> panR;
+                };
+                std::vector<SendState> sendStates;
             };
             std::vector<ChannelState> channels;
         };

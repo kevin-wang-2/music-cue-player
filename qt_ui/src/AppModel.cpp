@@ -3,6 +3,12 @@
 
 #include "engine/Cue.h"
 #include "engine/MusicContext.h"
+#include "engine/plugin/ExternalPluginReference.h"
+#include "engine/plugin/MissingPluginProcessor.h"
+#include "engine/plugin/PluginState.h"
+#ifdef __APPLE__
+#  include "engine/plugin/AUPluginAdapter.h"
+#endif
 
 #include <QDir>
 #include <QFile>
@@ -515,6 +521,7 @@ void AppModel::tick() {
 
     // Sync sf.audioSetup from automation updates produced by scheduler callbacks.
     // Audio is already updated at scheduler precision; we only update sf for UI display.
+    bool sendChanged = false;
     for (auto& cl : m_cueLists) {
         for (const auto& [path, value] : cl->drainAutomationUpdates()) {
             auto& as = sf.audioSetup;
@@ -527,7 +534,28 @@ void AppModel::tick() {
             }
             if (ch < 0 || ch >= (int)as.channels.size()) continue;
             auto& chan = as.channels[static_cast<size_t>(ch)];
-            if (path.find("/fader") != std::string::npos) {
+            // Send slot params must be checked first — their paths also contain /mute etc.
+            if (path.find("/send/") != std::string::npos) {
+                const std::string sendMid = "/send/";
+                const auto it2 = path.find(sendMid);
+                if (it2 != std::string::npos) {
+                    const std::string rest = path.substr(it2 + sendMid.size());
+                    const auto sl = rest.find('/');
+                    if (sl != std::string::npos) {
+                        int slot = -1;
+                        try { slot = std::stoi(rest.substr(0, sl)); } catch (...) {}
+                        const std::string param = rest.substr(sl + 1);
+                        if (slot >= 0 && slot < (int)chan.sends.size()) {
+                            auto& s = chan.sends[static_cast<size_t>(slot)];
+                            if      (param == "level") s.levelDb = static_cast<float>(value);
+                            else if (param == "mute")  s.muted   = (value >= 0.5);
+                            else if (param == "panL")  s.panL    = static_cast<float>(value);
+                            else if (param == "panR")  s.panR    = static_cast<float>(value);
+                            sendChanged = true;
+                        }
+                    }
+                }
+            } else if (path.find("/fader") != std::string::npos) {
                 chan.masterGainDb = static_cast<float>(value);
             } else if (path.find("/mute") != std::string::npos) {
                 chan.mute = (value >= 0.5);
@@ -553,6 +581,7 @@ void AppModel::tick() {
             dirty = true;
         }
     }
+    if (sendChanged) rebuildSendGains();
     if (mixChanged) {
         // Do NOT call applyMixing() here — audio was already updated by the scheduler.
         emit mixStateChanged();
@@ -633,17 +662,65 @@ void AppModel::tick() {
     }
 }
 
-void AppModel::storeSnapshot()    { snapshots.store();    dirty = true; }
-void AppModel::storeSnapshotAll() { snapshots.storeAll(); dirty = true; }
+void AppModel::storeSnapshot()    { syncPluginStatesToShowFile(); snapshots.store();    dirty = true; }
+void AppModel::storeSnapshotAll() { syncPluginStatesToShowFile(); snapshots.storeAll(); dirty = true; }
 
 void AppModel::recallSnapshot()
 {
-    if (snapshots.recall()) { applyMixing(); dirty = true; emit mixStateChanged(); }
+    if (!snapshots.recall()) return;
+    ShowHelpers::applyChannelMap(*this);
+    applyOutputDsp();
+    applyPluginParamStates();
+    dirty = true;
+    emit mixStateChanged();
 }
 
 void AppModel::recallSnapshotById(int id)
 {
-    if (snapshots.recallById(id)) { applyMixing(); dirty = true; emit mixStateChanged(); }
+    if (!snapshots.recallById(id)) return;
+    ShowHelpers::applyChannelMap(*this);
+    applyOutputDsp();
+    applyPluginParamStates();
+    dirty = true;
+    emit mixStateChanged();
+}
+
+void AppModel::applyPluginParamStates()
+{
+    const auto& as = sf.audioSetup;
+    const int nCh = static_cast<int>(as.channels.size());
+    for (int ch = 0; ch < nCh; ++ch) {
+        if (static_cast<size_t>(ch) >= m_channelPlugins.size()) continue;
+        const auto& chPlugins = m_channelPlugins[static_cast<size_t>(ch)];
+        const auto& pSlots = as.channels[static_cast<size_t>(ch)].plugins;
+        for (int s = 0; s < static_cast<int>(pSlots.size()); ++s) {
+            if (static_cast<size_t>(s) >= chPlugins.size()) continue;
+            const auto& wrapper = chPlugins[static_cast<size_t>(s)];
+            if (!wrapper) continue;
+            const auto& sl = pSlots[static_cast<size_t>(s)];
+            wrapper->setBypassed(sl.bypassed);
+#ifdef __APPLE__
+            if (auto* au = dynamic_cast<mcp::plugin::AUPluginAdapter*>(wrapper->getProcessor()))
+                au->setNativeBypass(sl.bypassed);
+#endif
+            auto* proc = wrapper->getProcessor();
+            if (!proc) continue;
+            mcp::plugin::PluginState state;
+            state.pluginId = sl.pluginId;
+            if (sl.isExternal()) {
+                state.backend  = mcp::plugin::PluginBackend::AU;
+                state.stateData = sl.extStateBlob;
+                for (const auto& [k, v] : sl.extParamSnapshot)
+                    state.parameters[k] = v;
+            } else {
+                state.backend = mcp::plugin::PluginBackend::Internal;
+                for (const auto& [k, v] : sl.parameters)
+                    state.parameters[k] = v;
+            }
+            if (!state.stateData.empty() || !state.parameters.empty())
+                proc->setState(state);
+        }
+    }
 }
 
 void AppModel::applyOscSettings() {
@@ -694,6 +771,254 @@ void AppModel::applyOutputDsp() {
 void AppModel::applyMixing() {
     ShowHelpers::applyChannelMap(*this);
     applyOutputDsp();
+    rebuildSendGains();
+}
+
+void AppModel::rebuildSendTopology() {
+    sendRouter.rebuildTopology(sf.audioSetup);
+    rebuildPDC();
+}
+
+void AppModel::rebuildSendGains() {
+    sendRouter.rebuildGains(sf.audioSetup);
+    rebuildPDC();
+}
+
+void AppModel::rebuildPDC() {
+    const auto& as = sf.audioSetup;
+    const int nCh = static_cast<int>(as.channels.size());
+
+    const auto& cm = sendRouter.compiled();
+    // Guard: topology not yet built — don't overwrite the engine's current valid state.
+    if (static_cast<int>(cm.channelOrder.size()) != nCh) return;
+
+    // 1. Compute per-channel plugin latency (sum across all non-bypassed slots).
+    //    For linked stereo pairs the plugin chain lives on the master (ch) and processes
+    //    both channels together, so the slave (ch+1) has the same latency as the master.
+    std::vector<int> pluginDelay(static_cast<size_t>(nCh), 0);
+    for (int ch = 0; ch < nCh; ++ch) {
+        if (ch < static_cast<int>(m_channelPlugins.size())) {
+            int total = 0;
+            for (const auto& wp : m_channelPlugins[static_cast<size_t>(ch)]) {
+                if (wp) total += wp->getLatencySamples();
+            }
+            pluginDelay[static_cast<size_t>(ch)] = total;
+        }
+    }
+    // Propagate master delay to slave for linked stereo pairs.
+    for (int ch = 0; ch + 1 < nCh; ++ch) {
+        if (as.channels[static_cast<size_t>(ch)].linkedStereo)
+            pluginDelay[static_cast<size_t>(ch + 1)] = pluginDelay[static_cast<size_t>(ch)];
+    }
+
+    // 2. Compute totalDelay and voice fold delay in topo order.
+    //    Each channel's input summing node aligns all incoming sends+voices to
+    //    maxIncoming = max(0, totalDelay[srcCh] for all srcCh that send to this ch).
+    std::vector<int> totalDelay(static_cast<size_t>(nCh), 0);
+    std::vector<int> voiceDelay(static_cast<size_t>(nCh), 0);  // = maxIncoming[ch]
+
+    for (const int ch : cm.channelOrder) {
+        if (ch < 0 || ch >= nCh) continue;
+        int maxIn = 0;
+        for (const auto& edge : cm.edges) {
+            if (edge.dstCh == ch && edge.srcCh >= 0 && edge.srcCh < nCh)
+                maxIn = std::max(maxIn, totalDelay[static_cast<size_t>(edge.srcCh)]);
+        }
+        voiceDelay[static_cast<size_t>(ch)] = maxIn;
+        // PDC-isolated channels don't propagate their own plugin latency downstream.
+        const bool isolated = ch < static_cast<int>(as.channels.size())
+                              && as.channels[static_cast<size_t>(ch)].pdcIsolated;
+        totalDelay[static_cast<size_t>(ch)] = maxIn + (isolated ? 0 : pluginDelay[static_cast<size_t>(ch)]);
+    }
+
+    // 3. Compute output alignment delays.
+    int maxTotal = 0;
+    for (int d : totalDelay) maxTotal = std::max(maxTotal, d);
+    std::vector<int> outputDelay(static_cast<size_t>(nCh), 0);
+    for (int ch = 0; ch < nCh; ++ch)
+        outputDelay[static_cast<size_t>(ch)] = maxTotal - totalDelay[static_cast<size_t>(ch)];
+
+    // 4. Build new CompiledMixState with PDC edge delays and per-channel PDC delays.
+    mcp::CompiledMixState newState = cm;
+    newState.pdcVoiceDelay  = voiceDelay;
+    newState.pdcOutputDelay = outputDelay;
+    for (auto& edge : newState.edges) {
+        const int src = edge.srcCh, dst = edge.dstCh;
+        if (src >= 0 && src < nCh && dst >= 0 && dst < nCh)
+            edge.delaySamples = std::max(0, voiceDelay[static_cast<size_t>(dst)]
+                                            - totalDelay[static_cast<size_t>(src)]);
+        else
+            edge.delaySamples = 0;
+    }
+
+    // 5. Flush PDC rings when any delay values changed.
+    //    Must also check per-edge delays: adding a new send with a non-zero edge delay
+    //    grows the edge list but may not change voiceDelay/outputDelay — without a
+    //    flush the new edge's ring buffer would never be allocated.
+    std::vector<int> edgeDelays(newState.edges.size());
+    for (size_t e = 0; e < newState.edges.size(); ++e)
+        edgeDelays[e] = newState.edges[e].delaySamples;
+
+    const bool delaysChanged = (voiceDelay  != m_pdcVoiceDelay)  ||
+                               (outputDelay != m_pdcOutputDelay) ||
+                               (edgeDelays  != m_pdcEdgeDelays);
+    if (delaysChanged) {
+        m_pdcVoiceDelay  = voiceDelay;
+        m_pdcOutputDelay = outputDelay;
+        m_pdcEdgeDelays  = edgeDelays;
+        engine.flushPDCRings(nCh, static_cast<int>(newState.edges.size()));
+    }
+    engine.setCompiledMixState(newState);
+}
+
+bool AppModel::sendWouldCreateCycle(int srcCh, int dstCh) const {
+    return sendRouter.wouldCreateCycle(srcCh, dstCh, sf.audioSetup);
+}
+
+void AppModel::buildChannelPluginChains() {
+    auto&     as  = sf.audioSetup;   // mutable: safe-load updates loadFailCount/disabled
+    const int nCh = static_cast<int>(as.channels.size());
+    const int sr  = engine.sampleRate() > 0 ? engine.sampleRate() : 48000;
+
+    m_channelPlugins.assign(static_cast<size_t>(nCh), {});
+
+    std::vector<std::shared_ptr<mcp::plugin::ChannelPluginChain>> chains(
+        static_cast<size_t>(nCh), nullptr);
+
+    for (int ch = 0; ch < nCh; ++ch) {
+        // Slave channels of stereo pairs share the master's chain.
+        if (ch > 0 && as.channels[static_cast<size_t>(ch - 1)].linkedStereo) continue;
+
+        const bool isStereo = as.channels[static_cast<size_t>(ch)].linkedStereo
+                              && (ch + 1 < nCh);
+        const int numCh = isStereo ? 2 : 1;
+
+        auto& pSlots = as.channels[static_cast<size_t>(ch)].plugins;
+        if (pSlots.empty()) continue;
+
+        auto chain = std::make_shared<mcp::plugin::ChannelPluginChain>(numCh);
+
+        m_channelPlugins[static_cast<size_t>(ch)].resize(
+            static_cast<size_t>(mcp::plugin::ChannelPluginChain::kMaxSlots));
+
+        for (int s = 0; s < static_cast<int>(pSlots.size())
+                        && s < mcp::plugin::ChannelPluginChain::kMaxSlots; ++s) {
+            auto& sl = pSlots[static_cast<size_t>(s)];
+
+            std::unique_ptr<mcp::plugin::AudioProcessor> proc;
+            if (sl.isExternal()) {
+                mcp::plugin::ExternalPluginReference ref;
+                ref.backend        = sl.extBackend;
+                ref.pluginId       = sl.pluginId;
+                ref.name           = sl.extName;
+                ref.vendor         = sl.extVendor;
+                ref.version        = sl.extVersion;
+                ref.numChannels    = sl.extNumChannels > 0 ? sl.extNumChannels : numCh;
+                ref.stateBlob      = sl.extStateBlob;
+                ref.paramSnapshot  = sl.extParamSnapshot;
+
+                if (sl.disabled) {
+                    // Safe-load: slot explicitly disabled; preserve state, skip instantiation.
+                    proc = std::make_unique<mcp::plugin::MissingPluginProcessor>(
+                        ref, mcp::plugin::PluginRuntimeStatus::Disabled,
+                        "Plugin slot disabled (safe-load)");
+                } else {
+                    proc = m_nativeBackend.load(ref);
+                    // Track consecutive failures; auto-disable to prevent crash loops.
+                    const auto* mp =
+                        dynamic_cast<const mcp::plugin::MissingPluginProcessor*>(proc.get());
+                    if (mp && (mp->runtimeStatus() == mcp::plugin::PluginRuntimeStatus::Failed ||
+                               mp->runtimeStatus() == mcp::plugin::PluginRuntimeStatus::Missing)) {
+                        sl.loadFailCount++;
+                        if (sl.loadFailCount >= 3)
+                            sl.disabled = true;
+                    } else {
+                        sl.loadFailCount = 0; // reset on successful load
+                    }
+                }
+            } else {
+                if (sl.pluginId.empty()) continue;
+                proc = pluginFactory.create(sl.pluginId);
+                if (!proc) continue;
+                mcp::plugin::PluginState state;
+                state.pluginId = sl.pluginId;
+                state.backend  = mcp::plugin::PluginBackend::Internal;
+                state.version  = 1;
+                for (const auto& [k, v] : sl.parameters)
+                    state.parameters[k] = v;
+                proc->setState(state);
+            }
+
+            auto wrapper = std::make_shared<mcp::plugin::PluginWrapper>(std::move(proc));
+            wrapper->setBypassed(sl.bypassed);  // restore persisted bypass state
+#ifdef __APPLE__
+            if (auto* au = dynamic_cast<mcp::plugin::AUPluginAdapter*>(wrapper->getProcessor())) {
+                au->setNativeBypass(sl.bypassed);
+                au->startWatchingLatency([this]() { rebuildPDC(); });
+            }
+#endif
+            m_channelPlugins[static_cast<size_t>(ch)][static_cast<size_t>(s)] = wrapper;
+            chain->setSlot(s, wrapper);
+        }
+
+        chain->prepare(static_cast<double>(sr), 8192);
+        chains[static_cast<size_t>(ch)] = std::move(chain);
+    }
+
+    engine.setChannelPluginChains(std::move(chains));
+
+    // Recompute PDC now that plugin latencies are known.
+    rebuildPDC();
+
+    // Inject plugin accessor into all engine CueLists.
+    mcp::CueList::PluginAccessor acc = [this](int ch, int slot)
+        -> std::shared_ptr<mcp::plugin::AudioProcessor>
+    {
+        if (ch < 0 || ch >= static_cast<int>(m_channelPlugins.size())) return nullptr;
+        const auto& sv = m_channelPlugins[static_cast<size_t>(ch)];
+        if (slot < 0 || slot >= static_cast<int>(sv.size())) return nullptr;
+        const auto& w = sv[static_cast<size_t>(slot)];
+        return w ? w->getProcessorShared() : nullptr;
+    };
+    for (int i = 0; i < static_cast<int>(m_cueLists.size()); ++i)
+        m_cueLists[static_cast<size_t>(i)]->setPluginAccessor(acc);
+}
+
+std::shared_ptr<mcp::plugin::PluginWrapper> AppModel::channelPlugin(int ch, int slot) const {
+    if (ch < 0 || ch >= static_cast<int>(m_channelPlugins.size())) return nullptr;
+    const auto& sv = m_channelPlugins[static_cast<size_t>(ch)];
+    if (slot < 0 || slot >= static_cast<int>(sv.size())) return nullptr;
+    return sv[static_cast<size_t>(slot)];
+}
+
+mcp::plugin::PluginRuntimeStatus AppModel::channelPluginStatus(int ch, int slot) const {
+    const auto& w = channelPlugin(ch, slot);
+    if (!w) return mcp::plugin::PluginRuntimeStatus::Ok;
+    return mcp::plugin::NativePluginBackend::statusOf(*w->getProcessor());
+}
+
+void AppModel::syncPluginStatesToShowFile() {
+    auto& as = sf.audioSetup;
+    for (int ch = 0; ch < static_cast<int>(as.channels.size()); ++ch) {
+        auto& pslots = as.channels[static_cast<size_t>(ch)].plugins;
+        for (int s = 0; s < static_cast<int>(pslots.size()); ++s) {
+            auto& sl = pslots[static_cast<size_t>(s)];
+            const auto& w = channelPlugin(ch, s);
+            if (!w || !w->getProcessor()) continue;
+            if (sl.isExternal()) {
+                const auto state = w->getProcessor()->getState();
+                sl.extStateBlob     = state.stateData;
+                sl.extParamSnapshot.clear();
+                for (const auto& [id, val] : state.parameters)
+                    sl.extParamSnapshot[id] = val;
+            } else {
+                // Sync live processor values → sl.parameters so snapshots capture
+                // the current state even if the editor was never opened.
+                for (const auto& p : w->getProcessor()->getParameters())
+                    sl.parameters[p.id] = w->getProcessor()->getParameterValue(p.id);
+            }
+        }
+    }
 }
 
 

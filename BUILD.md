@@ -8,55 +8,62 @@ Install via Homebrew:
 brew install cmake qt portaudio libsndfile libsamplerate ffmpeg
 ```
 
+## Build directories
+
+There are **two** CMake build directories. Never mix them up.
+
+| Directory      | Config   | App bundle output                              |
+|----------------|----------|------------------------------------------------|
+| `build/`       | Debug    | `build/bin/Music Cue Player.app`               |
+| `build/release/` | Release | `build/release/bin/Music Cue Player.app`     |
+
+The Debug directory is the one used for day-to-day development.
+
 ## First-time configure
 
 ```bash
+# Debug (default, used for development)
 cmake -S . -B build
+
+# Release (optional, separate directory)
+cmake -S . -B build/release -DCMAKE_BUILD_TYPE=Release
 ```
 
-To build a Release binary instead:
-
-```bash
-cmake -S . -B build -DCMAKE_BUILD_TYPE=Release
-```
-
-## Build
+## Build (Debug — use this one)
 
 ```bash
 cmake --build build
 ```
 
-The app bundle is output to `build/bin/mcp_qt_ui.app`.
+Output: `build/bin/Music Cue Player.app`
 
-## Incremental rebuild
-
-After editing source files, just re-run:
+## Build (Release)
 
 ```bash
-cmake --build build
+cmake --build build/release
 ```
 
-CMake detects which files changed and only recompiles those.
-If CMake misses a change (rare), touch the file first:
-
-```bash
-touch qt_ui/src/SomeFile.cpp && cmake --build build
-```
+Output: `build/release/bin/Music Cue Player.app`
 
 ## Run
 
 ```bash
-open build/bin/mcp_qt_ui.app
+open "build/bin/Music Cue Player.app"
 ```
 
-or directly:
+## Incremental rebuild
 
-```bash
-build/bin/mcp_qt_ui.app/Contents/MacOS/mcp_qt_ui
-```
+After editing source files, re-run the same build command. CMake detects changed files automatically.
 
 ## Clean rebuild
 
 ```bash
 rm -rf build && cmake -S . -B build && cmake --build build
 ```
+
+## For Claude
+
+- **Always build with:** `cmake --build /Users/kaibinwa/Desktop/click-in/music-cue-player/build`
+- **App is at:** `build/bin/Music Cue Player.app`
+- **Do not** use `build/release` unless the user explicitly asks for a Release build.
+- After building, verify the binary exists: `ls "build/bin/Music Cue Player.app/Contents/MacOS/"`

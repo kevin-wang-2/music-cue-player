@@ -1,5 +1,7 @@
 #include "engine/AudioEngine.h"
 #include "engine/IAudioSource.h"
+#include "engine/SendRouter.h"
+#include "engine/plugin/ChannelPluginChain.h"
 #include <portaudio.h>
 #include <algorithm>
 #include <array>
@@ -148,6 +150,30 @@ struct AudioEngineImpl {
     std::unique_ptr<std::atomic<float>[]> chanPeakLevels;
     std::atomic<int>                      chanPeakLevelCount{0};
 
+    // Plugin chains — double-buffered; one entry per logical channel.
+    // nullptr entry = no plugins on that channel.
+    struct PluginChainsSlot {
+        std::vector<std::shared_ptr<mcp::plugin::ChannelPluginChain>> chains;
+    };
+    PluginChainsSlot pluginChainsBuf[2];
+    std::atomic<int> pluginChainsBufIdx{0};
+
+    // Compiled send-router state — double-buffered.
+    // Carries: channel processing order, per-channel master gains, send edges.
+    CompiledMixState compiledMixBuf[2];
+    std::atomic<int> compiledMixBufIdx{0};
+
+    // PDC ring buffers — grown only, never shrunk (same thread-safety model as chanDelayRings).
+    // Main thread writes via flushPDCRings(); callback reads with bounds checks.
+    std::vector<std::vector<float>> pdcVoiceRings;   // [ch][kMaxDelaySamples]
+    std::vector<int>                pdcVoiceWrPos;   // [ch]
+    std::vector<std::vector<float>> pdcEdgeRings;    // [edgeIdx][kMaxDelaySamples]
+    std::vector<int>                pdcEdgeWrPos;    // [edgeIdx]
+    std::vector<std::vector<float>> pdcOutputRings;  // [ch][kMaxDelaySamples]
+    std::vector<int>                pdcOutputWrPos;  // [ch]
+    // When > 0, chanBuf is zeroed before the fold to mask PDC-plan-change glitch.
+    std::atomic<int>                pdcMuteFrames{0};
+
     // Old chanBuf allocations — kept alive until shutdown to avoid use-after-free.
     // Main thread appends; freed in closeAllStreams() after callbacks are stopped.
     std::vector<float*> oldChanBufs;
@@ -255,35 +281,159 @@ static int paDeviceCallback(const void* /*input*/, void* output,
         }
     }
 
-    // Per-logical-channel DSP: phase inversion and delay, applied to chanBuf pre-fold.
+    // Per-channel processing in topo order:
+    //   DSP (delay/polarity) → plugins → master gain → dispatch outgoing sends.
+    // When no sends are configured, compiledMix.channelOrder is [0..N-1] — same
+    // behaviour as the previous sequential loops.
     if (hasChanBus) {
         const auto& cdsp = impl->chanDspBuf[impl->chanDspBufIdx.load(std::memory_order_acquire)];
+        const auto& pc   = impl->pluginChainsBuf[
+            impl->pluginChainsBufIdx.load(std::memory_order_acquire)];
+        const auto& cm   = impl->compiledMixBuf[
+            impl->compiledMixBufIdx.load(std::memory_order_acquire)];
+
+        // ── PDC pre-topo: voice fold delay ─────────────────────────────────────
+        // chanBuf at this point holds only accumulated voice content (no send
+        // dispatches have fired yet).  Apply per-channel delay so that voice signals
+        // arrive at each channel's summing node aligned with send contributions.
         for (int ch = 0; ch < activeCh; ++ch) {
-            if (ch >= static_cast<int>(cdsp.size())) break;
-            const bool inv   = cdsp[static_cast<size_t>(ch)].phaseInvert;
-            const int  delay = cdsp[static_cast<size_t>(ch)].delaySamples;
-            if (!inv && delay <= 0) continue;
-
-            if (ch >= static_cast<int>(impl->chanDelayRings.size())) continue;
-            auto& ring = impl->chanDelayRings[static_cast<size_t>(ch)];
-            auto& wp   = impl->chanDelayWrPos[static_cast<size_t>(ch)];
+            const int delay = (ch < static_cast<int>(cm.pdcVoiceDelay.size()))
+                              ? cm.pdcVoiceDelay[static_cast<size_t>(ch)] : 0;
+            if (delay <= 0 || ch >= static_cast<int>(impl->pdcVoiceRings.size())) continue;
+            auto& ring = impl->pdcVoiceRings[static_cast<size_t>(ch)];
+            auto& wp   = impl->pdcVoiceWrPos[static_cast<size_t>(ch)];
             if (ring.empty()) continue;
-
             for (unsigned long f = 0; f < frameCount; ++f) {
-                float s = chanBuf[f * static_cast<unsigned long>(activeCh) + static_cast<unsigned long>(ch)];
+                float s = chanBuf[f * static_cast<unsigned long>(activeCh)
+                                  + static_cast<unsigned long>(ch)];
                 ring[static_cast<size_t>(wp)] = s;
-                if (delay > 0) {
-                    const int rp = (wp - delay + AudioEngine::kMaxDelaySamples) & AudioEngineImpl::kDelayMask;
-                    s = ring[static_cast<size_t>(rp)];
-                }
+                const int rp = (wp - delay + AudioEngine::kMaxDelaySamples)
+                               & AudioEngineImpl::kDelayMask;
+                chanBuf[f * static_cast<unsigned long>(activeCh)
+                        + static_cast<unsigned long>(ch)] = ring[static_cast<size_t>(rp)];
                 wp = (wp + 1) & AudioEngineImpl::kDelayMask;
-                if (inv) s = -s;
-                chanBuf[f * static_cast<unsigned long>(activeCh) + static_cast<unsigned long>(ch)] = s;
+            }
+        }
+
+        const int nOrder = static_cast<int>(cm.channelOrder.size());
+        for (int i = 0; i < nOrder; ++i) {
+            const int ch = cm.channelOrder[static_cast<size_t>(i)];
+            if (ch >= activeCh) continue;
+
+            // ── 1. DSP (phase invert + delay) ────────────────────────────────
+            if (ch < static_cast<int>(cdsp.size())) {
+                const bool inv   = cdsp[static_cast<size_t>(ch)].phaseInvert;
+                const int  delay = cdsp[static_cast<size_t>(ch)].delaySamples;
+                if (inv || delay > 0) {
+                    if (ch < static_cast<int>(impl->chanDelayRings.size())) {
+                        auto& ring = impl->chanDelayRings[static_cast<size_t>(ch)];
+                        auto& wp   = impl->chanDelayWrPos[static_cast<size_t>(ch)];
+                        if (!ring.empty()) {
+                            for (unsigned long f = 0; f < frameCount; ++f) {
+                                float s = chanBuf[f * static_cast<unsigned long>(activeCh)
+                                                  + static_cast<unsigned long>(ch)];
+                                ring[static_cast<size_t>(wp)] = s;
+                                if (delay > 0) {
+                                    const int rp = (wp - delay + AudioEngine::kMaxDelaySamples)
+                                                   & AudioEngineImpl::kDelayMask;
+                                    s = ring[static_cast<size_t>(rp)];
+                                }
+                                wp = (wp + 1) & AudioEngineImpl::kDelayMask;
+                                if (inv) s = -s;
+                                chanBuf[f * static_cast<unsigned long>(activeCh)
+                                        + static_cast<unsigned long>(ch)] = s;
+                            }
+                        }
+                    }
+                }
+            }
+
+            // ── 2. Plugin chain ───────────────────────────────────────────────
+            if (ch < static_cast<int>(pc.chains.size()) && pc.chains[static_cast<size_t>(ch)])
+                pc.chains[static_cast<size_t>(ch)]->process(
+                    chanBuf, activeCh, static_cast<int>(frameCount), ch);
+
+            // ── 3. Dispatch outgoing send edges (post-plugin, post-fader) ────
+            // edge.gain already includes sendLevel * pan; multiply by masterGain
+            // to achieve post-fader behavior without modifying chanBuf itself
+            // (fold matrix still carries masterGain for the output routing).
+            if (i + 1 < static_cast<int>(cm.sendStart.size())) {
+                const float mg = (i < static_cast<int>(cm.masterGains.size()))
+                                 ? cm.masterGains[static_cast<size_t>(i)] : 1.0f;
+                const int eStart = cm.sendStart[static_cast<size_t>(i)];
+                const int eEnd   = cm.sendStart[static_cast<size_t>(i + 1)];
+                for (int e = eStart; e < eEnd; ++e) {
+                    const auto& edge = cm.edges[static_cast<size_t>(e)];
+                    const int dst = edge.dstCh;
+                    if (dst < 0 || dst >= activeCh || edge.gain == 0.0f) continue;
+                    const float totalGain = edge.gain * mg;
+                    if (totalGain == 0.0f) continue;
+                    const int edgeDelay = edge.delaySamples;
+                    if (edgeDelay > 0 && e < static_cast<int>(impl->pdcEdgeRings.size())) {
+                        auto& ering = impl->pdcEdgeRings[static_cast<size_t>(e)];
+                        auto& ewp   = impl->pdcEdgeWrPos[static_cast<size_t>(e)];
+                        if (!ering.empty()) {
+                            for (unsigned long f = 0; f < frameCount; ++f) {
+                                const float src = chanBuf[f * static_cast<unsigned long>(activeCh)
+                                                          + static_cast<unsigned long>(ch)] * totalGain;
+                                ering[static_cast<size_t>(ewp)] = src;
+                                const int rp = (ewp - edgeDelay + AudioEngine::kMaxDelaySamples)
+                                               & AudioEngineImpl::kDelayMask;
+                                chanBuf[f * static_cast<unsigned long>(activeCh)
+                                        + static_cast<unsigned long>(dst)] += ering[static_cast<size_t>(rp)];
+                                ewp = (ewp + 1) & AudioEngineImpl::kDelayMask;
+                            }
+                            continue;
+                        }
+                    }
+                    for (unsigned long f = 0; f < frameCount; ++f) {
+                        chanBuf[f * static_cast<unsigned long>(activeCh)
+                                + static_cast<unsigned long>(dst)]
+                            += chanBuf[f * static_cast<unsigned long>(activeCh)
+                                       + static_cast<unsigned long>(ch)] * totalGain;
+                    }
+                }
+            }
+        }
+
+        // ── PDC post-topo: output alignment delay ─────────────────────────────
+        // Each channel's signal has now been processed and all sends dispatched.
+        // Apply per-channel output delay so all channels arrive at the fold matrix
+        // with the same total latency.
+        for (int ch = 0; ch < activeCh; ++ch) {
+            const int delay = (ch < static_cast<int>(cm.pdcOutputDelay.size()))
+                              ? cm.pdcOutputDelay[static_cast<size_t>(ch)] : 0;
+            if (delay <= 0 || ch >= static_cast<int>(impl->pdcOutputRings.size())) continue;
+            auto& ring = impl->pdcOutputRings[static_cast<size_t>(ch)];
+            auto& wp   = impl->pdcOutputWrPos[static_cast<size_t>(ch)];
+            if (ring.empty()) continue;
+            for (unsigned long f = 0; f < frameCount; ++f) {
+                float s = chanBuf[f * static_cast<unsigned long>(activeCh)
+                                  + static_cast<unsigned long>(ch)];
+                ring[static_cast<size_t>(wp)] = s;
+                const int rp = (wp - delay + AudioEngine::kMaxDelaySamples)
+                               & AudioEngineImpl::kDelayMask;
+                chanBuf[f * static_cast<unsigned long>(activeCh)
+                        + static_cast<unsigned long>(ch)] = ring[static_cast<size_t>(rp)];
+                wp = (wp + 1) & AudioEngineImpl::kDelayMask;
+            }
+        }
+
+        // ── PDC mute: blank chanBuf for the first N frames after a PDC plan change ─
+        // Prevents the ring-buffer flush discontinuity from reaching the output.
+        {
+            int muteLeft = impl->pdcMuteFrames.load(std::memory_order_relaxed);
+            if (muteLeft > 0) {
+                std::memset(chanBuf, 0,
+                    static_cast<size_t>(frameCount) * static_cast<size_t>(activeCh) * sizeof(float));
+                impl->pdcMuteFrames.fetch_sub(
+                    std::min(static_cast<int>(frameCount), muteLeft),
+                    std::memory_order_relaxed);
             }
         }
     }
 
-    // Measure chanBuf peaks (logical channels, pre-fold).
+    // Measure chanBuf peaks (logical channels, post-fader).
     if (hasChanBus && impl->chanPeakLevels) {
         const int measCh = std::min(activeCh,
             std::min(impl->chanPeakLevelCount.load(std::memory_order_relaxed),
@@ -524,6 +674,9 @@ bool AudioEngine::initialize(int sampleRate, int channels, const std::string& de
         m_impl->chanPeakLevels = std::make_unique<std::atomic<float>[]>(kMaxChannels);
         for (int i = 0; i < kMaxChannels; ++i)
             m_impl->chanPeakLevels[static_cast<size_t>(i)].store(0.0f, std::memory_order_relaxed);
+        // Reserve PDC edge ring capacity so runtime grow doesn't realloc under callback.
+        m_impl->pdcEdgeRings.reserve(512);
+        m_impl->pdcEdgeWrPos.reserve(512);
     }
 
     m_impl->initialized = true;
@@ -591,6 +744,9 @@ bool AudioEngine::initialize(int sampleRate, const std::vector<DeviceSpec>& devi
         m_impl->chanPeakLevels = std::make_unique<std::atomic<float>[]>(kMaxChannels);
         for (int i = 0; i < kMaxChannels; ++i)
             m_impl->chanPeakLevels[static_cast<size_t>(i)].store(0.0f, std::memory_order_relaxed);
+        // Reserve PDC edge ring capacity so runtime grow doesn't realloc under callback.
+        m_impl->pdcEdgeRings.reserve(512);
+        m_impl->pdcEdgeWrPos.reserve(512);
     }
 
     m_impl->initialized = true;
@@ -791,6 +947,16 @@ void AudioEngine::setDeviceChannelFold(int deviceIdx, const float* fold, int num
                                       std::vector<float>(kMaxDelaySamples, 0.0f));
         m_impl->chanDelayWrPos.resize(static_cast<size_t>(numCh), 0);
     }
+
+    // Grow PDC per-channel rings if numCh increased (main thread only).
+    if (numCh > static_cast<int>(m_impl->pdcVoiceRings.size())) {
+        m_impl->pdcVoiceRings.resize(static_cast<size_t>(numCh),
+                                     std::vector<float>(kMaxDelaySamples, 0.0f));
+        m_impl->pdcVoiceWrPos.resize(static_cast<size_t>(numCh), 0);
+        m_impl->pdcOutputRings.resize(static_cast<size_t>(numCh),
+                                      std::vector<float>(kMaxDelaySamples, 0.0f));
+        m_impl->pdcOutputWrPos.resize(static_cast<size_t>(numCh), 0);
+    }
 }
 
 std::vector<float> AudioEngine::takeChannelPeaks() {
@@ -802,6 +968,56 @@ std::vector<float> AudioEngine::takeChannelPeaks() {
         result[static_cast<size_t>(i)] =
             m_impl->chanPeakLevels[static_cast<size_t>(i)].exchange(0.0f, std::memory_order_relaxed);
     return result;
+}
+
+void AudioEngine::setChannelPluginChains(
+    std::vector<std::shared_ptr<mcp::plugin::ChannelPluginChain>> chains)
+{
+    const int inactive = 1 - m_impl->pluginChainsBufIdx.load(std::memory_order_relaxed);
+    m_impl->pluginChainsBuf[inactive].chains = std::move(chains);
+    m_impl->pluginChainsBufIdx.store(inactive, std::memory_order_release);
+}
+
+void AudioEngine::flushPDCRings(int numCh, int numEdges) {
+    // Grow voice/output rings if needed (callback safely bounds-checks before access).
+    if (numCh > static_cast<int>(m_impl->pdcVoiceRings.size())) {
+        m_impl->pdcVoiceRings.resize(static_cast<size_t>(numCh),
+                                     std::vector<float>(kMaxDelaySamples, 0.0f));
+        m_impl->pdcVoiceWrPos.resize(static_cast<size_t>(numCh), 0);
+        m_impl->pdcOutputRings.resize(static_cast<size_t>(numCh),
+                                      std::vector<float>(kMaxDelaySamples, 0.0f));
+        m_impl->pdcOutputWrPos.resize(static_cast<size_t>(numCh), 0);
+    }
+    for (int c = 0; c < numCh && c < static_cast<int>(m_impl->pdcVoiceRings.size()); ++c) {
+        std::fill(m_impl->pdcVoiceRings[static_cast<size_t>(c)].begin(),
+                  m_impl->pdcVoiceRings[static_cast<size_t>(c)].end(), 0.0f);
+        m_impl->pdcVoiceWrPos[static_cast<size_t>(c)] = 0;
+        std::fill(m_impl->pdcOutputRings[static_cast<size_t>(c)].begin(),
+                  m_impl->pdcOutputRings[static_cast<size_t>(c)].end(), 0.0f);
+        m_impl->pdcOutputWrPos[static_cast<size_t>(c)] = 0;
+    }
+
+    // Grow edge rings if needed (reserve(512) at init prevents realloc for typical shows).
+    if (numEdges > static_cast<int>(m_impl->pdcEdgeRings.size())) {
+        m_impl->pdcEdgeRings.resize(static_cast<size_t>(numEdges),
+                                    std::vector<float>(kMaxDelaySamples, 0.0f));
+        m_impl->pdcEdgeWrPos.resize(static_cast<size_t>(numEdges), 0);
+    }
+    for (int e = 0; e < numEdges && e < static_cast<int>(m_impl->pdcEdgeRings.size()); ++e) {
+        std::fill(m_impl->pdcEdgeRings[static_cast<size_t>(e)].begin(),
+                  m_impl->pdcEdgeRings[static_cast<size_t>(e)].end(), 0.0f);
+        m_impl->pdcEdgeWrPos[static_cast<size_t>(e)] = 0;
+    }
+
+    // Mute output for ~20 ms at 48 kHz to mask the transition discontinuity.
+    m_impl->pdcMuteFrames.store(960, std::memory_order_release);
+}
+
+void AudioEngine::setCompiledMixState(const CompiledMixState& state)
+{
+    const int inactive = 1 - m_impl->compiledMixBufIdx.load(std::memory_order_relaxed);
+    m_impl->compiledMixBuf[inactive] = state;
+    m_impl->compiledMixBufIdx.store(inactive, std::memory_order_release);
 }
 
 } // namespace mcp

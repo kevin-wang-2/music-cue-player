@@ -41,6 +41,26 @@ void AutomationView::setParamMode(mcp::Cue::AutomationParamMode mode) {
     update();
 }
 
+void AutomationView::setParamRange(double minVal, double maxVal, const QString& unit) {
+    m_useCustomRange = true;
+    m_customMin = minVal;
+    m_customMax = maxVal;
+    m_unit = unit;
+    update();
+}
+
+void AutomationView::setParamDomain(mcp::AutoParam::Domain domain) {
+    m_domain = domain;
+    update();
+}
+
+void AutomationView::resetParamRange() {
+    m_useCustomRange = false;
+    m_unit.clear();
+    m_domain = mcp::AutoParam::Domain::Linear;
+    update();
+}
+
 void AutomationView::setMusicContext(const mcp::MusicContext* mc) {
     m_mc = mc;
     update();
@@ -74,13 +94,27 @@ double AutomationView::snapToGrid(double t) const {
 // value range helpers
 
 double AutomationView::minValue() const {
-    return (m_mode == mcp::Cue::AutomationParamMode::Step) ? 0.0 : -100.0;
+    if (m_mode == mcp::Cue::AutomationParamMode::Step) return 0.0;
+    if (m_useCustomRange) return m_customMin;
+    return -100.0;
 }
 double AutomationView::maxValue() const {
-    return (m_mode == mcp::Cue::AutomationParamMode::Step) ? 1.0 : 12.0;
+    if (m_mode == mcp::Cue::AutomationParamMode::Step) return 1.0;
+    if (m_useCustomRange) return m_customMax;
+    return 12.0;
 }
 double AutomationView::valueGridStep() const {
-    return (m_mode == mcp::Cue::AutomationParamMode::Step) ? 1.0 : 12.0;
+    if (m_mode == mcp::Cue::AutomationParamMode::Step) return 1.0;
+    if (!m_useCustomRange) return 12.0;
+    // Auto-step: aim for ~5 grid lines
+    const double range = m_customMax - m_customMin;
+    if (range <= 0.0) return 1.0;
+    const double raw = range / 5.0;
+    const double mag = std::pow(10.0, std::floor(std::log10(raw)));
+    const double norm = raw / mag;
+    if (norm < 2.0) return mag;
+    if (norm < 5.0) return 2.0 * mag;
+    return 5.0 * mag;
 }
 
 // ---------------------------------------------------------------------------
@@ -321,19 +355,34 @@ void AutomationView::paintEvent(QPaintEvent*) {
 
     // Grid — horizontal (value) lines
     {
-        p.setPen(QColor(0x44, 0x44, 0x44));
         const double step = valueGridStep();
         const double mn   = minValue();
         const double mx   = maxValue();
+
+        // Reference line at 0 for DB/FaderTaper params (when 0 is in range)
+        const bool hasRefLine = (m_domain == mcp::AutoParam::Domain::DB ||
+                                 m_domain == mcp::AutoParam::Domain::FaderTaper);
+        if (hasRefLine && mn < 0.0 && mx > 0.0) {
+            const int y0 = yFromValue(0.0);
+            p.setPen(QPen(QColor(0x88, 0x88, 0x44), 1, Qt::DashLine));
+            p.drawLine(r.left(), y0, r.right(), y0);
+        }
+
+        p.setPen(QColor(0x44, 0x44, 0x44));
         for (double v = mn; v <= mx + 1e-6; v += step) {
             const int y = yFromValue(v);
             p.drawLine(r.left(), y, r.right(), y);
             p.setPen(QColor(0x77, 0x77, 0x77));
             QString label;
-            if (m_mode == mcp::Cue::AutomationParamMode::Step)
+            if (m_mode == mcp::Cue::AutomationParamMode::Step) {
                 label = (v >= 0.5) ? "ON" : "OFF";
-            else
+            } else if (!m_useCustomRange || m_unit == "dB") {
                 label = (v >= 0.0 ? "+" : "") + QString::number(static_cast<int>(v)) + " dB";
+            } else if (m_unit.isEmpty()) {
+                label = QString::number(v, 'g', 3);
+            } else {
+                label = QString::number(v, 'g', 3) + " " + m_unit;
+            }
             p.drawText(0, y - 7, kMarginL - 4, 14, Qt::AlignRight | Qt::AlignVCenter, label);
             p.setPen(QColor(0x44, 0x44, 0x44));
         }

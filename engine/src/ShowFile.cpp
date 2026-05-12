@@ -1,8 +1,71 @@
 #include "engine/ShowFile.h"
 #include <nlohmann/json.hpp>
+#include <cstdint>
 #include <fstream>
+#include <string>
+#include <vector>
 
 using json = nlohmann::json;
+
+// ── base64 helpers (for external plugin state blobs) ─────────────────────────
+namespace {
+
+static const char kB64[] =
+    "ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789+/";
+
+static std::string encodeBase64(const std::vector<uint8_t>& data) {
+    std::string out;
+    out.reserve((data.size() + 2) / 3 * 4);
+    for (size_t i = 0; i < data.size(); i += 3) {
+        const uint32_t b = (static_cast<uint32_t>(data[i]) << 16) |
+                           ((i + 1 < data.size()) ? static_cast<uint32_t>(data[i + 1]) << 8 : 0u) |
+                           ((i + 2 < data.size()) ? static_cast<uint32_t>(data[i + 2])      : 0u);
+        out += kB64[(b >> 18) & 63];
+        out += kB64[(b >> 12) & 63];
+        out += (i + 1 < data.size()) ? kB64[(b >> 6) & 63] : '=';
+        out += (i + 2 < data.size()) ? kB64[ b       & 63] : '=';
+    }
+    return out;
+}
+
+static std::vector<uint8_t> decodeBase64(const std::string& s) {
+    static const int8_t kTbl[256] = {
+        -1,-1,-1,-1,-1,-1,-1,-1,-1,-1,-1,-1,-1,-1,-1,-1,
+        -1,-1,-1,-1,-1,-1,-1,-1,-1,-1,-1,-1,-1,-1,-1,-1,
+        -1,-1,-1,-1,-1,-1,-1,-1,-1,-1,-1,62,-1,-1,-1,63,
+        52,53,54,55,56,57,58,59,60,61,-1,-1,-1, 0,-1,-1,
+        -1, 0, 1, 2, 3, 4, 5, 6, 7, 8, 9,10,11,12,13,14,
+        15,16,17,18,19,20,21,22,23,24,25,-1,-1,-1,-1,-1,
+        -1,26,27,28,29,30,31,32,33,34,35,36,37,38,39,40,
+        41,42,43,44,45,46,47,48,49,50,51,-1,-1,-1,-1,-1,
+        -1,-1,-1,-1,-1,-1,-1,-1,-1,-1,-1,-1,-1,-1,-1,-1,
+        -1,-1,-1,-1,-1,-1,-1,-1,-1,-1,-1,-1,-1,-1,-1,-1,
+        -1,-1,-1,-1,-1,-1,-1,-1,-1,-1,-1,-1,-1,-1,-1,-1,
+        -1,-1,-1,-1,-1,-1,-1,-1,-1,-1,-1,-1,-1,-1,-1,-1,
+        -1,-1,-1,-1,-1,-1,-1,-1,-1,-1,-1,-1,-1,-1,-1,-1,
+        -1,-1,-1,-1,-1,-1,-1,-1,-1,-1,-1,-1,-1,-1,-1,-1,
+        -1,-1,-1,-1,-1,-1,-1,-1,-1,-1,-1,-1,-1,-1,-1,-1,
+        -1,-1,-1,-1,-1,-1,-1,-1,-1,-1,-1,-1,-1,-1,-1,-1,
+    };
+    std::vector<uint8_t> out;
+    out.reserve(s.size() * 3 / 4 + 1);
+    uint32_t buf  = 0;
+    int      bits = 0;
+    for (unsigned char c : s) {
+        if (c == '=') break;
+        const int8_t v = kTbl[c];
+        if (v < 0) continue;
+        buf   = (buf << 6) | static_cast<uint32_t>(v);
+        bits += 6;
+        if (bits >= 8) {
+            bits -= 8;
+            out.push_back(static_cast<uint8_t>((buf >> bits) & 0xFF));
+        }
+    }
+    return out;
+}
+
+} // namespace
 
 namespace mcp {
 
@@ -495,6 +558,47 @@ bool ShowFile::load(const std::filesystem::path& path, std::string& error) {
                 c.delayInSamples= jget<bool>       (ch, "delayInSamples",false);
                 c.delayMs       = jget<double>     (ch, "delayMs",       0.0);
                 c.delaySamples  = jget<int>        (ch, "delaySamples",  0);
+                c.pdcIsolated   = jget<bool>       (ch, "pdcIsolated",   false);
+                if (ch.contains("sends") && ch["sends"].is_array()) {
+                    for (const auto& sj : ch["sends"]) {
+                        AudioSetup::Channel::SendSlot ss;
+                        ss.dstChannel = jget<int>  (sj, "dstChannel", -1);
+                        ss.levelDb    = jget<float>(sj, "levelDb",    0.0f);
+                        ss.panL       = jget<float>(sj, "panL",       0.0f);
+                        ss.panR       = jget<float>(sj, "panR",       0.0f);
+                        ss.muted      = jget<bool> (sj, "muted",      false);
+                        c.sends.push_back(ss);
+                    }
+                }
+                if (ch.contains("plugins") && ch["plugins"].is_array()) {
+                    for (const auto& pj : ch["plugins"]) {
+                        AudioSetup::Channel::PluginSlot slot;
+                        slot.pluginId = jget<std::string>(pj, "pluginId", "");
+                        if (pj.contains("parameters") && pj["parameters"].is_object()) {
+                            for (const auto& [k, v] : pj["parameters"].items()) {
+                                try { slot.parameters[k] = v.get<float>(); } catch (...) {}
+                            }
+                        }
+                        // External plugin fields
+                        slot.extBackend      = jget<std::string>(pj, "extBackend", "");
+                        slot.extName         = jget<std::string>(pj, "extName", "");
+                        slot.extVendor       = jget<std::string>(pj, "extVendor", "");
+                        slot.extVersion      = jget<std::string>(pj, "extVersion", "");
+                        slot.extNumChannels  = jget<int>        (pj, "extNumChannels", 2);
+                        if (pj.contains("extStateBlob") && pj["extStateBlob"].is_string())
+                            slot.extStateBlob = decodeBase64(pj["extStateBlob"].get<std::string>());
+                        if (pj.contains("extParamSnapshot") && pj["extParamSnapshot"].is_object()) {
+                            for (const auto& [k, v] : pj["extParamSnapshot"].items()) {
+                                try { slot.extParamSnapshot[k] = v.get<float>(); } catch (...) {}
+                            }
+                        }
+                        slot.bypassed      = jget<bool> (pj, "bypassed",      false);
+                        slot.disabled      = jget<bool> (pj, "disabled",      false);
+                        slot.loadFailCount = jget<int>  (pj, "loadFailCount", 0);
+                        slot.manualTailSec = jget<float>(pj, "manualTailSec", -1.0f);
+                        c.plugins.push_back(std::move(slot));
+                    }
+                }
                 audioSetup.channels.push_back(c);
             }
         }
@@ -674,6 +778,34 @@ bool ShowFile::load(const std::filesystem::path& path, std::string& error) {
                                 cs.xpSends.push_back(xs);
                             }
                         }
+                        if (cj.contains("pluginStates") && cj["pluginStates"].is_array()) {
+                            for (const auto& pj : cj["pluginStates"]) {
+                                SnapshotList::Snapshot::ChannelState::PluginParamState ps;
+                                ps.slot = jget<int>(pj, "slot", 0);
+                                if (pj.contains("bypassed"))
+                                    ps.bypassed = jget<bool>(pj, "bypassed", false);
+                                if (pj.contains("parameters") && pj["parameters"].is_object())
+                                    for (const auto& [k, v] : pj["parameters"].items())
+                                        try { ps.parameters[k] = v.get<float>(); } catch (...) {}
+                                if (pj.contains("extStateBlob") && pj["extStateBlob"].is_string())
+                                    ps.extStateBlob = decodeBase64(pj["extStateBlob"].get<std::string>());
+                                if (pj.contains("extParamSnapshot") && pj["extParamSnapshot"].is_object())
+                                    for (const auto& [k, v] : pj["extParamSnapshot"].items())
+                                        try { ps.extParamSnapshot[k] = v.get<float>(); } catch (...) {}
+                                cs.pluginStates.push_back(ps);
+                            }
+                        }
+                        if (cj.contains("sendStates") && cj["sendStates"].is_array()) {
+                            for (const auto& sj : cj["sendStates"]) {
+                                SnapshotList::Snapshot::ChannelState::SendState ss;
+                                ss.slot = jget<int>(sj, "slot", 0);
+                                if (sj.contains("muted"))   ss.muted   = jget<bool> (sj, "muted",   false);
+                                if (sj.contains("levelDb")) ss.levelDb = jget<float>(sj, "levelDb", 0.0f);
+                                if (sj.contains("panL"))    ss.panL    = jget<float>(sj, "panL",    0.0f);
+                                if (sj.contains("panR"))    ss.panR    = jget<float>(sj, "panR",    0.0f);
+                                cs.sendStates.push_back(ss);
+                            }
+                        }
                         snap.channels.push_back(cs);
                     }
                 }
@@ -726,6 +858,53 @@ bool ShowFile::save(const std::filesystem::path& path, std::string& error) const
             if (ch.delayInSamples)       cj["delayInSamples"]= true;
             if (ch.delayMs != 0.0)       cj["delayMs"]       = ch.delayMs;
             if (ch.delaySamples != 0)    cj["delaySamples"]  = ch.delaySamples;
+            if (ch.pdcIsolated)          cj["pdcIsolated"]   = true;
+            if (!ch.sends.empty()) {
+                json sArr = json::array();
+                for (const auto& ss : ch.sends) {
+                    json sj;
+                    sj["dstChannel"] = ss.dstChannel;
+                    if (ss.levelDb != 0.0f) sj["levelDb"] = ss.levelDb;
+                    if (ss.panL    != 0.0f) sj["panL"]    = ss.panL;
+                    if (ss.panR    != 0.0f) sj["panR"]    = ss.panR;
+                    if (ss.muted)           sj["muted"]   = true;
+                    sArr.push_back(sj);
+                }
+                cj["sends"] = sArr;
+            }
+            if (!ch.plugins.empty()) {
+                json pArr = json::array();
+                for (const auto& ps : ch.plugins) {
+                    json pj;
+                    pj["pluginId"] = ps.pluginId;
+                    if (!ps.parameters.empty()) {
+                        json params;
+                        for (const auto& [k, v] : ps.parameters)
+                            params[k] = v;
+                        pj["parameters"] = params;
+                    }
+                    if (ps.isExternal()) {
+                        pj["extBackend"]    = ps.extBackend;
+                        pj["extName"]       = ps.extName;
+                        if (!ps.extVendor.empty())  pj["extVendor"]  = ps.extVendor;
+                        if (!ps.extVersion.empty()) pj["extVersion"] = ps.extVersion;
+                        pj["extNumChannels"] = ps.extNumChannels;
+                        if (!ps.extStateBlob.empty())
+                            pj["extStateBlob"] = encodeBase64(ps.extStateBlob);
+                        if (!ps.extParamSnapshot.empty()) {
+                            json snap;
+                            for (const auto& [k, v] : ps.extParamSnapshot) snap[k] = v;
+                            pj["extParamSnapshot"] = snap;
+                        }
+                    }
+                    if (ps.bypassed)          pj["bypassed"]      = true;
+                    if (ps.disabled)          pj["disabled"]      = true;
+                    if (ps.loadFailCount > 0) pj["loadFailCount"] = ps.loadFailCount;
+                    if (ps.manualTailSec >= 0.0f) pj["manualTailSec"] = ps.manualTailSec;
+                    pArr.push_back(pj);
+                }
+                cj["plugins"] = pArr;
+            }
             chArr.push_back(cj);
         }
         as["channels"] = chArr;
@@ -895,6 +1074,41 @@ bool ShowFile::save(const std::filesystem::path& path, std::string& error) const
                         xpArr.push_back(xj);
                     }
                     cj["xpSends"] = xpArr;
+                }
+                if (!cs.pluginStates.empty()) {
+                    json psArr = json::array();
+                    for (const auto& ps : cs.pluginStates) {
+                        json pj;
+                        pj["slot"] = ps.slot;
+                        if (ps.bypassed) pj["bypassed"] = *ps.bypassed;
+                        if (!ps.parameters.empty()) {
+                            json pm = json::object();
+                            for (const auto& [k, v] : ps.parameters) pm[k] = v;
+                            pj["parameters"] = pm;
+                        }
+                        if (!ps.extStateBlob.empty())
+                            pj["extStateBlob"] = encodeBase64(ps.extStateBlob);
+                        if (!ps.extParamSnapshot.empty()) {
+                            json em = json::object();
+                            for (const auto& [k, v] : ps.extParamSnapshot) em[k] = v;
+                            pj["extParamSnapshot"] = em;
+                        }
+                        psArr.push_back(pj);
+                    }
+                    cj["pluginStates"] = psArr;
+                }
+                if (!cs.sendStates.empty()) {
+                    json ssArr = json::array();
+                    for (const auto& ss : cs.sendStates) {
+                        json sj;
+                        sj["slot"] = ss.slot;
+                        if (ss.muted)   sj["muted"]   = *ss.muted;
+                        if (ss.levelDb) sj["levelDb"] = *ss.levelDb;
+                        if (ss.panL)    sj["panL"]    = *ss.panL;
+                        if (ss.panR)    sj["panR"]    = *ss.panR;
+                        ssArr.push_back(sj);
+                    }
+                    cj["sendStates"] = ssArr;
                 }
                 chArr.push_back(cj);
             }

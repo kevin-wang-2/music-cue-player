@@ -14,6 +14,7 @@
 
 #include "engine/CueList.h"
 #include "engine/MusicContext.h"
+#include "engine/plugin/ParameterInfo.h"
 
 #include "engine/Cue.h"
 #include "engine/FadeData.h"
@@ -192,6 +193,13 @@ static QList<AutoPathItem> pathItemsAtLevel(AppModel* model, const QString& pref
             items.append({"Crosspoint", "crosspoint", false});
             bool ok;
             const int mCh = parts[1].toInt(&ok);
+            if (ok && mCh >= 0 && mCh < nCh) {
+                const auto& chSends = as.channels[static_cast<size_t>(mCh)].sends;
+                const bool hasActiveSend = std::any_of(chSends.begin(), chSends.end(),
+                    [](const auto& s){ return s.isActive(); });
+                if (hasActiveSend)
+                    items.append({"Send", "send", false});
+            }
             if (ok && mCh >= 0 && mCh < nCh - 1
                 && as.channels[static_cast<size_t>(mCh)].linkedStereo) {
                 const int sl = mCh + 1;
@@ -200,19 +208,86 @@ static QList<AutoPathItem> pathItemsAtLevel(AppModel* model, const QString& pref
                 items.append({chLabel(sl) + " Crosspoint",
                                QStringLiteral("/mixer/%1/crosspoint").arg(sl), false});
             }
+        } else if (parts.size() == 3 && parts[2] == QLatin1String("send")) {
+            bool ok; const int mCh = parts[1].toInt(&ok);
+            if (ok && mCh >= 0 && mCh < nCh) {
+                const auto& chSends = as.channels[static_cast<size_t>(mCh)].sends;
+                for (int s = 0; s < static_cast<int>(chSends.size()); ++s) {
+                    if (!chSends[static_cast<size_t>(s)].isActive()) continue;
+                    const int dstCh = chSends[static_cast<size_t>(s)].dstChannel;
+                    const QString dstLabel = (dstCh >= 0 && dstCh < nCh)
+                        ? QStringLiteral("→ %1").arg(chLabel(dstCh))
+                        : QStringLiteral("Send %1").arg(s + 1);
+                    items.append({dstLabel, QString::number(s), false});
+                }
+            }
+        } else if (parts.size() == 4 && parts[2] == QLatin1String("send")) {
+            items.append({"Level", "level", true});
+            items.append({"Mute",  "mute",  true});
+            bool ok; bool ok2;
+            const int mCh   = parts[1].toInt(&ok);
+            const int mSlot = parts[3].toInt(&ok2);
+            if (ok && ok2 && mCh >= 0 && mCh < nCh
+                && mSlot >= 0 && mSlot < static_cast<int>(as.channels[static_cast<size_t>(mCh)].sends.size())) {
+                const auto& ss = as.channels[static_cast<size_t>(mCh)].sends[static_cast<size_t>(mSlot)];
+                const bool srcStereo = as.channels[static_cast<size_t>(mCh)].linkedStereo && (mCh + 1 < nCh);
+                const int dst = ss.dstChannel;
+                const bool dstStereo = (dst >= 0 && dst < nCh)
+                    && as.channels[static_cast<size_t>(dst)].linkedStereo && (dst + 1 < nCh);
+                if (!srcStereo && dstStereo)
+                    items.append({"Pan", "panL", true});
+                else if (srcStereo && dstStereo) {
+                    items.append({"Pan L", "panL", true});
+                    items.append({"Pan R", "panR", true});
+                }
+            }
         } else if (parts.size() == 3 && parts[2] == QLatin1String("crosspoint")) {
             for (int out = 0; out < nCh; ++out) {
                 if (out > 0 && as.channels[static_cast<size_t>(out - 1)].linkedStereo) continue;
                 items.append({QStringLiteral("→ %1").arg(chLabel(out)), QString::number(out), true});
+            }
+        } else if (parts.size() == 3 && parts[2] == QLatin1String("plugin")) {
+            bool ok;
+            const int mCh = parts[1].toInt(&ok);
+            if (ok && mCh >= 0 && mCh < nCh) {
+                const auto& pSlots = as.channels[static_cast<size_t>(mCh)].plugins;
+                for (int s = 0; s < static_cast<int>(pSlots.size()); ++s) {
+                    if (pSlots[static_cast<size_t>(s)].pluginId.empty()) continue;
+                    items.append({QStringLiteral("Slot %1").arg(s + 1), QString::number(s), false});
+                }
+            }
+        } else if (parts.size() == 4 && parts[2] == QLatin1String("plugin")) {
+            bool ok; bool ok2;
+            const int mCh   = parts[1].toInt(&ok);
+            const int mSlot = parts[3].toInt(&ok2);
+            if (ok && ok2 && mCh >= 0 && mCh < nCh) {
+                const auto& pSlots = as.channels[static_cast<size_t>(mCh)].plugins;
+                if (mSlot >= 0 && mSlot < static_cast<int>(pSlots.size())) {
+                    auto proc = model->channelPlugin(mCh, mSlot);
+                    if (proc && proc->getProcessor()) {
+                        for (const auto& info : proc->getProcessor()->getParameters())
+                            items.append({QString::fromStdString(info.name),
+                                          QString::fromStdString(info.id), true});
+                    }
+                }
+            }
+        }
+        if (parts.size() == 2) {
+            // At channel level — also offer Plugin branch if any plugins loaded.
+            bool ok; const int mCh = parts[1].toInt(&ok);
+            if (ok && mCh >= 0 && mCh < nCh
+                && !as.channels[static_cast<size_t>(mCh)].plugins.empty()) {
+                items.append({"Plugin", "plugin", false});
             }
         }
     }
     return items;
 }
 
-// Human-readable label for one path segment given its data and level index.
+// Human-readable label for one path segment given its data, level index, and parent segment.
 static QString pathSegLabel(const mcp::ShowFile::AudioSetup& as,
-                            const QString& data, int level)
+                            const QString& data, int level,
+                            const QString& parent = QString())
 {
     const int nCh = static_cast<int>(as.channels.size());
     auto chLabel = [&](int idx) -> QString {
@@ -239,9 +314,24 @@ static QString pathSegLabel(const mcp::ShowFile::AudioSetup& as,
         if (data == QLatin1String("mute"))       return "Mute";
         if (data == QLatin1String("polarity"))   return "Polarity";
         if (data == QLatin1String("crosspoint")) return "Crosspoint";
+        if (data == QLatin1String("plugin"))     return "Plugin";
+        if (data == QLatin1String("send"))       return "Send";
         return data;
-    case 3: { bool ok; int ch = data.toInt(&ok);
-              return ok ? QStringLiteral("→ %1").arg(chLabel(ch)) : data; }
+    case 3: {
+        bool ok; int idx = data.toInt(&ok);
+        if (!ok) return data;
+        if (parent == QLatin1String("plugin"))
+            return QStringLiteral("Slot %1").arg(idx + 1);
+        if (parent == QLatin1String("send"))
+            return QStringLiteral("Send %1").arg(idx + 1);
+        return QStringLiteral("→ %1").arg(chLabel(idx));
+    }
+    case 4:
+        if (data == QLatin1String("level")) return "Level";
+        if (data == QLatin1String("mute"))  return "Mute";
+        if (data == QLatin1String("panL"))  return "Pan L";
+        if (data == QLatin1String("panR"))  return "Pan R";
+        return data;
     default: return data;
     }
 }
@@ -2174,6 +2264,28 @@ double InspectorWidget::currentAutomationParamValue(const std::string& path) con
     }
     if (ch < 0 || ch >= (int)as.channels.size()) return 0.0;
     const auto& chan = as.channels[static_cast<size_t>(ch)];
+    // Send params must be checked first — their paths also contain /mute etc.
+    if (path.find("/send/") != std::string::npos) {
+        const std::string sendMid = "/send/";
+        const auto it = path.find(sendMid);
+        if (it != std::string::npos) {
+            const std::string rest = path.substr(it + sendMid.size());
+            const auto sl = rest.find('/');
+            if (sl != std::string::npos) {
+                int slot = -1;
+                try { slot = std::stoi(rest.substr(0, sl)); } catch (...) {}
+                const std::string param = rest.substr(sl + 1);
+                if (slot >= 0 && slot < (int)chan.sends.size()) {
+                    const auto& s = chan.sends[static_cast<size_t>(slot)];
+                    if (param == "level") return s.levelDb;
+                    if (param == "mute")  return s.muted ? 1.0 : 0.0;
+                    if (param == "panL")  return s.panL;
+                    if (param == "panR")  return s.panR;
+                }
+            }
+        }
+        return 0.0;
+    }
     if (path.find("/fader")    != std::string::npos) return chan.masterGainDb;
     if (path.find("/mute")     != std::string::npos) return chan.mute     ? 1.0 : 0.0;
     if (path.find("/polarity") != std::string::npos) return chan.phaseInvert ? 1.0 : 0.0;
@@ -2239,7 +2351,8 @@ void InspectorWidget::rebuildAutoPathBar(const QString& path) {
             sep->setStyleSheet("color: #888; margin: 0 1px;");
             barLayout->addWidget(sep);
         }
-        const QString label = pathSegLabel(as, segments[i], i);
+        const QString label = pathSegLabel(as, segments[i], i,
+                                           i > 0 ? segments[i - 1] : QString());
         auto* btn = new QPushButton(label, m_autoPathBar);
         btn->setFlat(true);
         btn->setCursor(Qt::PointingHandCursor);
@@ -2302,13 +2415,61 @@ void InspectorWidget::rebuildAutoPathBar(const QString& path) {
     barLayout->addStretch();
 }
 
+// Apply per-parameter range/domain to the automation view for the given path.
+static void applyAutoParamMeta(AutomationView* view, AppModel* model, const std::string& path) {
+    const auto mode = mcp::Cue::automationParamMode(path);
+    view->setParamMode(mode);
+
+    if (path.find("/plugin/") == std::string::npos) {
+        view->resetParamRange();
+        // Non-plugin paths
+        if (path.find("/fader") != std::string::npos
+            || (path.find("/send/") != std::string::npos && path.find("/level") != std::string::npos))
+            view->setParamDomain(mcp::AutoParam::Domain::FaderTaper);
+        else if (path.find("/crosspoint") != std::string::npos)
+            view->setParamDomain(mcp::AutoParam::Domain::DB);
+        else
+            view->setParamDomain(mcp::AutoParam::Domain::Linear);
+        return;
+    }
+
+    // Parse /mixer/{ch}/plugin/{slot}/{paramId}
+    const size_t mixerOff = path.find("/mixer/");
+    if (mixerOff == std::string::npos) { view->resetParamRange(); return; }
+    const size_t sl1 = path.find('/', mixerOff + 7);
+    if (sl1 == std::string::npos) { view->resetParamRange(); return; }
+    int ch = -1;
+    try { ch = std::stoi(path.substr(mixerOff + 7, sl1 - (mixerOff + 7))); } catch (...) {}
+    const size_t plugOff = path.find("/plugin/", sl1);
+    if (plugOff == std::string::npos || ch < 0) { view->resetParamRange(); return; }
+    const std::string rest = path.substr(plugOff + 8);
+    const size_t sl2 = rest.find('/');
+    if (sl2 == std::string::npos) { view->resetParamRange(); return; }
+    int slot = -1;
+    try { slot = std::stoi(rest.substr(0, sl2)); } catch (...) {}
+    const std::string paramId = rest.substr(sl2 + 1);
+    if (slot < 0 || paramId.empty()) { view->resetParamRange(); return; }
+
+    auto wrapper = model->channelPlugin(ch, slot);
+    if (!wrapper || !wrapper->getProcessor()) { view->resetParamRange(); return; }
+
+    for (const auto& info : wrapper->getProcessor()->getParameters()) {
+        if (info.id != paramId) continue;
+        view->setParamRange(static_cast<double>(info.minValue),
+                            static_cast<double>(info.maxValue),
+                            QString::fromStdString(info.unit));
+        view->setParamDomain(info.domain);
+        return;
+    }
+    view->resetParamRange();
+}
+
 void InspectorWidget::commitAutoPath(const QString& path) {
     if (m_cueIdx < 0) return;
     const std::string pathStr = path.toStdString();
     m_model->cues().setCueAutomationPath(m_cueIdx, pathStr);
     rebuildAutoPathBar(path);
-    const auto mode = mcp::Cue::automationParamMode(pathStr);
-    m_automationView->setParamMode(mode);
+    applyAutoParamMeta(m_automationView, m_model, pathStr);
     const double curVal = currentAutomationParamValue(pathStr);
     const double dur    = m_spinAutoDuration->value();
     const std::vector<mcp::Cue::AutomationPoint> flat{{0.0, curVal}, {dur, curVal}};
@@ -2431,8 +2592,7 @@ void InspectorWidget::loadAutomationTab() {
 
     m_spinAutoDuration->setValue(c->automationDuration);
 
-    const auto mode = mcp::Cue::automationParamMode(c->automationPath);
-    m_automationView->setParamMode(mode);
+    applyAutoParamMeta(m_automationView, m_model, c->automationPath);
     m_automationView->setDuration(c->automationDuration);
 
     // Wire up MC for bar/beat grid

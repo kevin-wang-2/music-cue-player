@@ -49,6 +49,16 @@ static int parseMixerCh(const std::string& path)
     } catch (...) { return -1; }
 }
 
+// Parse "/mixer/{ch}/plugin/{slot}" → slot, or -1 on failure.
+static int parseMixerPluginSlot(const std::string& path)
+{
+    const std::string mid = "/plugin/";
+    auto it = path.find(mid);
+    if (it == std::string::npos) return -1;
+    try { return std::stoi(path.substr(it + mid.size())); }
+    catch (...) { return -1; }
+}
+
 // Parse "/mixer/{ch}/crosspoint/{out}" → out, or -1 on failure.
 static int parseCrosspointOut(const std::string& path)
 {
@@ -56,6 +66,21 @@ static int parseCrosspointOut(const std::string& path)
     auto it = path.find(mid);
     if (it == std::string::npos) return -1;
     try { return std::stoi(path.substr(it + mid.size())); }
+    catch (...) { return -1; }
+}
+
+// Parse "/mixer/{ch}/send/{slot}/..." → slot, or -1 on failure.
+static int parseSendSlot(const std::string& path)
+{
+    const std::string mid = "/send/";
+    auto it = path.find(mid);
+    if (it == std::string::npos) return -1;
+    try {
+        const size_t start = it + mid.size();
+        const size_t slash = path.find('/', start);
+        return std::stoi(path.substr(start,
+            slash == std::string::npos ? std::string::npos : slash - start));
+    }
     catch (...) { return -1; }
 }
 
@@ -136,6 +161,49 @@ void SnapshotManager::store()
             cs.xpSends.push_back({out, getXpDb(as, ch, out)});
         }
 
+        // Collect dirty plugin slot states for this channel.
+        // Use a set to deduplicate: multiple per-param paths for the same slot
+        // (e.g. "/mixer/0/plugin/0/gain" + "/mixer/0/plugin/0/reverb") must
+        // produce only one PluginParamState entry, not one per dirty path.
+        std::set<int> dirtySlots;
+        for (const auto& p : sl.pendingDirtyPaths) {
+            if (parseMixerCh(p) != ch) continue;
+            int slotIdx = parseMixerPluginSlot(p);
+            if (slotIdx >= 0) dirtySlots.insert(slotIdx);
+        }
+        for (int slotIdx : dirtySlots) {
+            if (slotIdx >= static_cast<int>(c.plugins.size())) continue;
+            const auto& psl = c.plugins[static_cast<size_t>(slotIdx)];
+            SnapshotList::Snapshot::ChannelState::PluginParamState ps;
+            ps.slot             = slotIdx;
+            ps.bypassed         = psl.bypassed;
+            ps.parameters       = psl.parameters;
+            ps.extStateBlob     = psl.extStateBlob;
+            ps.extParamSnapshot = psl.extParamSnapshot;
+            cs.pluginStates.push_back(ps);
+        }
+
+        // Collect dirty send slot states for this channel.
+        std::set<int> dirtySendSlots;
+        for (const auto& p : sl.pendingDirtyPaths) {
+            if (parseMixerCh(p) != ch) continue;
+            int slotIdx = parseSendSlot(p);
+            if (slotIdx >= 0) dirtySendSlots.insert(slotIdx);
+        }
+        for (int slotIdx : dirtySendSlots) {
+            if (slotIdx >= static_cast<int>(c.sends.size())) continue;
+            const auto& ss = c.sends[static_cast<size_t>(slotIdx)];
+            if (!ss.isActive()) continue;
+            const std::string sp = base + "/send/" + std::to_string(slotIdx);
+            SnapshotList::Snapshot::ChannelState::SendState sendSt;
+            sendSt.slot = slotIdx;
+            if (inScope(sp + "/mute",  sl.pendingDirtyPaths)) sendSt.muted   = ss.muted;
+            if (inScope(sp + "/level", sl.pendingDirtyPaths)) sendSt.levelDb = ss.levelDb;
+            if (inScope(sp + "/panL",  sl.pendingDirtyPaths)) sendSt.panL    = ss.panL;
+            if (inScope(sp + "/panR",  sl.pendingDirtyPaths)) sendSt.panR    = ss.panR;
+            cs.sendStates.push_back(sendSt);
+        }
+
         snap.channels.push_back(cs);
     }
 
@@ -165,6 +233,22 @@ void SnapshotManager::storeAll()
         outs.insert(ch);  // diagonal
         for (int out : outs)
             snap.scope.push_back(base + "/crosspoint/" + std::to_string(out));
+
+        // Plugin slot paths
+        for (int s = 0; s < static_cast<int>(as.channels[static_cast<size_t>(ch)].plugins.size()); ++s)
+            if (!as.channels[static_cast<size_t>(ch)].plugins[static_cast<size_t>(s)].pluginId.empty())
+                snap.scope.push_back(base + "/plugin/" + std::to_string(s));
+
+        // Send slot paths
+        for (int s = 0; s < static_cast<int>(as.channels[static_cast<size_t>(ch)].sends.size()); ++s) {
+            if (as.channels[static_cast<size_t>(ch)].sends[static_cast<size_t>(s)].isActive()) {
+                const std::string sp = base + "/send/" + std::to_string(s);
+                snap.scope.push_back(sp + "/mute");
+                snap.scope.push_back(sp + "/level");
+                snap.scope.push_back(sp + "/panL");
+                snap.scope.push_back(sp + "/panR");
+            }
+        }
     }
 
     for (int ch = 0; ch < static_cast<int>(as.channels.size()); ++ch) {
@@ -184,6 +268,32 @@ void SnapshotManager::storeAll()
         outs.insert(ch);
         for (int out : outs)
             cs.xpSends.push_back({out, getXpDb(as, ch, out)});
+
+        // Capture all plugin slot states
+        for (int s = 0; s < static_cast<int>(c.plugins.size()); ++s) {
+            const auto& psl = c.plugins[static_cast<size_t>(s)];
+            if (psl.pluginId.empty()) continue;
+            SnapshotList::Snapshot::ChannelState::PluginParamState ps;
+            ps.slot             = s;
+            ps.bypassed         = psl.bypassed;
+            ps.parameters       = psl.parameters;
+            ps.extStateBlob     = psl.extStateBlob;
+            ps.extParamSnapshot = psl.extParamSnapshot;
+            cs.pluginStates.push_back(ps);
+        }
+
+        // Capture all active send slot states
+        for (int s = 0; s < static_cast<int>(c.sends.size()); ++s) {
+            const auto& ss = c.sends[static_cast<size_t>(s)];
+            if (!ss.isActive()) continue;
+            SnapshotList::Snapshot::ChannelState::SendState sendSt;
+            sendSt.slot   = s;
+            sendSt.muted  = ss.muted;
+            sendSt.levelDb = ss.levelDb;
+            sendSt.panL   = ss.panL;
+            sendSt.panR   = ss.panR;
+            cs.sendStates.push_back(sendSt);
+        }
 
         snap.channels.push_back(cs);
     }
@@ -233,6 +343,46 @@ bool SnapshotManager::recallById(int id)
                 [&cs, &xs](const ShowFile::AudioSetup::XpEntry& xe){
                     return xe.ch == cs.ch && xe.out == xs.out; }), xp.end());
             xp.push_back({cs.ch, xs.out, xs.db});
+        }
+
+        // Restore plugin slot states that are in scope (per-param or per-slot).
+        for (const auto& ps : cs.pluginStates) {
+            if (ps.slot >= static_cast<int>(c.plugins.size())) continue;
+            const std::string slotPath   = base + "/plugin/" + std::to_string(ps.slot);
+            const std::string bypassPath = slotPath + "/bypass";
+            const bool fullSlot = inScope(slotPath, snap->scope);
+
+            auto& psl = c.plugins[static_cast<size_t>(ps.slot)];
+
+            // Bypass: slot-level scope or explicit /bypass path
+            if (ps.bypassed && (fullSlot || inScope(bypassPath, snap->scope)))
+                psl.bypassed = *ps.bypassed;
+
+            // Blob: full-slot only — partial restore from binary blob is not possible
+            if (!ps.extStateBlob.empty() && fullSlot)
+                psl.extStateBlob = ps.extStateBlob;
+
+            // Internal parameters: slot-level or per-param path
+            for (const auto& [paramId, val] : ps.parameters) {
+                if (fullSlot || inScope(slotPath + "/" + paramId, snap->scope))
+                    psl.parameters[paramId] = val;
+            }
+            // External (AU) parameter snapshot: same granularity
+            for (const auto& [paramId, val] : ps.extParamSnapshot) {
+                if (fullSlot || inScope(slotPath + "/" + paramId, snap->scope))
+                    psl.extParamSnapshot[paramId] = val;
+            }
+        }
+
+        // Restore send slot states that are in scope.
+        for (const auto& ss : cs.sendStates) {
+            if (ss.slot >= static_cast<int>(c.sends.size())) continue;
+            auto& s = c.sends[static_cast<size_t>(ss.slot)];
+            const std::string sp = base + "/send/" + std::to_string(ss.slot);
+            if (ss.muted   && inScope(sp + "/mute",  snap->scope)) s.muted   = *ss.muted;
+            if (ss.levelDb && inScope(sp + "/level", snap->scope)) s.levelDb = *ss.levelDb;
+            if (ss.panL    && inScope(sp + "/panL",  snap->scope)) s.panL    = *ss.panL;
+            if (ss.panR    && inScope(sp + "/panR",  snap->scope)) s.panR    = *ss.panR;
         }
     }
     return true;

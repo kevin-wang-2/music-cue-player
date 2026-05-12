@@ -3,8 +3,15 @@
 #include "engine/AudioEngine.h"
 #include "engine/CueList.h"
 #include "engine/Scheduler.h"
+#include "engine/SendRouter.h"
 #include "engine/ShowFile.h"
 #include "engine/SnapshotManager.h"
+#include "engine/plugin/ChannelPluginChain.h"
+#include "engine/plugin/NativePluginBackend.h"
+#include "engine/plugin/PluginFactory.h"
+#include "engine/plugin/PluginRuntimeStatus.h"
+#include "engine/plugin/PluginWrapper.h"
+#include "DangerousPluginList.h"
 #include "MidiInputManager.h"
 #include "OscServer.h"
 #include "ScriptletEngine.h"
@@ -30,6 +37,7 @@ public:
     mcp::AudioEngine     engine;
     mcp::Scheduler       scheduler;
     mcp::SnapshotManager snapshots;
+    mcp::SendRouter      sendRouter;
     // NOTE: CueList instances live in m_cueLists. Use cues() for the active list.
 
     // External trigger infrastructure
@@ -122,7 +130,7 @@ public:
     // Use this instead of cues.go() for operator-initiated go actions.
     void go();
 
-    // Snapshot helpers — delegate to snapshots.*. recall* also call applyMixing().
+    // Snapshot helpers — delegate to snapshots.*.
     void storeSnapshot();
     void storeSnapshotAll();
     void recallSnapshot();
@@ -132,9 +140,23 @@ public:
     void applyOscSettings();
     // Push channel + physout DSP settings from sf to the engine.
     void applyOutputDsp();
-    // Update channel map + output DSP without rebuilding or stopping cues.
-    // Use this for all mixing-only parameter changes in MixConsole.
+    // Update channel map + output DSP + send gains without rebuilding plugin chains.
+    // Use this for all parameter changes (fader, mute, xp, phase, delay).
     void applyMixing();
+    // Instantiate / replace plugin chains and push to engine.
+    // Call only when plugin structure changes: add/remove/replace slot, drag-drop,
+    // enable/disable, show load, add/remove channel.
+    void buildChannelPluginChains();
+
+    // Rebuild send routing topology (call after adding/removing a send slot).
+    void rebuildSendTopology();
+    // Rebuild send gains only (call after changing level/pan/mute on a send slot).
+    void rebuildSendGains();
+    // Recompute Plugin Delay Compensation plan and push to engine.
+    // Call after buildChannelPluginChains(), rebuildSendTopology(), or show load.
+    void rebuildPDC();
+    // True if adding a send from srcCh→dstCh would form a cycle in the current graph.
+    bool sendWouldCreateCycle(int srcCh, int dstCh) const;
     // Apply MIDI input: open all ports.
     void applyMidiInput();
     // Sync scriptlet library from sf into the ScriptletEngine.
@@ -186,9 +208,44 @@ signals:
     // Emitted when lists are added, removed, or renamed (sidebar refresh).
     void cueListsChanged();
 
+public:
+    // Access the plugin wrapper at (channel, slot) — used for UI and AutoParam.
+    // Returns nullptr if no plugin is loaded at that slot.
+    std::shared_ptr<mcp::plugin::PluginWrapper> channelPlugin(int ch, int slot) const;
+
+    // Shared plugin factory — used by MixConsoleDialog and AppModel.
+    mcp::plugin::InternalPluginFactory pluginFactory;
+
+    // App-level list of AU vendors known to crash on parameter watching.
+    // Not part of the show file.  Seeded with "Waves Audio" / "Waves".
+    DangerousPluginList dangerousList;
+
+    // Returns the runtime status of the processor at (ch, slot).
+    // Ok for internal plugins; Missing/Failed etc. for external plugins.
+    mcp::plugin::PluginRuntimeStatus channelPluginStatus(int ch, int slot) const;
+
+    // Sync live external plugin state back into sf.audioSetup.
+    // Call before saving to ensure stateBlob + paramSnapshot are up-to-date.
+    void syncPluginStatesToShowFile();
+
+    // Apply bypass + parameters from sf to existing plugin instances WITHOUT
+    // rebuilding chains. Used by snapshot recall to avoid reloading plugins.
+    void applyPluginParamStates();
+
 private:
     std::vector<std::unique_ptr<mcp::CueList>> m_cueLists;
     int  m_activeListIdx{0};
     std::set<int> m_scriptletRunningCues;   // cue indices currently executing (reentrance guard)
     std::vector<mcp::ShowFile::ScriptletLibrary::Entry> m_builtinScriptlets;
+
+    // Per-channel plugin wrappers: m_channelPlugins[ch][slot].
+    // Rebuilt in buildChannelPluginChains(); shared with ChannelPluginChain (pushed to engine).
+    std::vector<std::vector<std::shared_ptr<mcp::plugin::PluginWrapper>>> m_channelPlugins;
+
+    // Cached PDC delay vectors — compared in rebuildPDC() to suppress spurious flushPDCRings calls.
+    std::vector<int> m_pdcVoiceDelay;
+    std::vector<int> m_pdcOutputDelay;
+    std::vector<int> m_pdcEdgeDelays;  // per-edge delaySamples, same order as CompiledMixState::edges
+
+    mcp::plugin::NativePluginBackend m_nativeBackend;
 };

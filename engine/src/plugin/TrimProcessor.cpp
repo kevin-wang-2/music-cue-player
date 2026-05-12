@@ -6,7 +6,9 @@
 namespace mcp::plugin {
 
 static std::vector<ParameterInfo> makeTrimParams() {
-    return { makeLinearParam("gain_db", "Gain", "dB", -96.0f, 12.0f, 0.0f) };
+    auto p = makeLinearParam("gain_db", "Gain", "dB", -96.0f, 12.0f, 0.0f);
+    p.domain = mcp::AutoParam::Domain::DB;
+    return {p};
 }
 
 TrimProcessor::TrimProcessor(int numChannels)

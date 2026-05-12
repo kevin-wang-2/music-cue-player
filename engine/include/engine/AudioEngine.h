@@ -1,5 +1,6 @@
 #pragma once
 
+#include "engine/SendRouter.h"
 #include <atomic>
 #include <cstdint>
 #include <memory>
@@ -7,6 +8,7 @@
 #include <vector>
 
 namespace mcp { class IAudioSource; }  // forward-declare to avoid circular includes
+namespace mcp::plugin { class ChannelPluginChain; }  // forward-declare for plugin API
 
 namespace mcp {
 
@@ -161,6 +163,24 @@ public:
     // (same count as numCh passed to setDeviceChannelFold).
     // Returns empty vector if the channel bus is not set up.
     std::vector<float> takeChannelPeaks();
+
+    // Push a plugin chain per logical channel.  chains[ch] may be nullptr (no
+    // plugins on that channel).  Stereo pairs use one chain with numChannels==2
+    // at the master index; the slave index should be nullptr.
+    // Applied in the audio callback after channel DSP, before fold.
+    // Safe to call from the main thread while audio is running (double-buffered).
+    void setChannelPluginChains(
+        std::vector<std::shared_ptr<mcp::plugin::ChannelPluginChain>> chains);
+
+    // Push compiled send-router state to the audio callback (double-buffered).
+    // Also carries per-channel master gains (replaces fold-baked gains).
+    // Safe to call from the main thread while audio is running.
+    void setCompiledMixState(const CompiledMixState& state);
+
+    // Zero all PDC ring buffers and set a brief mute to mask the discontinuity.
+    // Call BEFORE setCompiledMixState() whenever the PDC plan or topology changes.
+    // numEdges must match the edge count of the state about to be pushed.
+    void flushPDCRings(int numCh, int numEdges);
 
     // Maximum number of logical channels supported for peak metering.
     static constexpr int kMaxChannels = 256;

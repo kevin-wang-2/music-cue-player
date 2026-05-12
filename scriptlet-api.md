@@ -37,6 +37,17 @@
     - [function]get_current_cue()
     - [function]get_selected_cue()
 
+- [module] mix_console
+    - [function] get_param(path)
+    - [function] set_param(path)
+    - [function] list_snapshot()
+    - [function] load_snapshot(idx)
+    - [function] save_snapshot(idx)
+    - [function] delete_snapshot(idx)
+    - [function] set_snapshot_scope(idx, path)
+    - [function] unset_snapshot_scope(idx, path)
+    - [function] check_snapshot_scope(idx, path="")
+
 - [module]event
     - [function] on_cue_fired(callback): 当有一个cue被go或者start的时候（不管prewait），给callback注入cue信息，以下类似
     - [function] on_cue_selected(callback): 当有一个cue被选择的时候

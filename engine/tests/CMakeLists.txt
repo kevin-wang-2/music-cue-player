@@ -43,3 +43,33 @@ target_include_directories(test_plugin PRIVATE ${CMAKE_CURRENT_SOURCE_DIR})
 target_link_libraries(test_plugin PRIVATE mcp_plugin Catch2::Catch2WithMain)
 target_compile_options(test_plugin PRIVATE -Wall -Wextra)
 catch_discover_tests(test_plugin)
+
+# External plugin backend tests (MissingPluginProcessor, NativePluginBackend).
+add_executable(test_external_plugin_backend test_external_plugin_backend.cpp)
+target_include_directories(test_external_plugin_backend PRIVATE ${CMAKE_CURRENT_SOURCE_DIR})
+target_link_libraries(test_external_plugin_backend PRIVATE mcp_plugin Catch2::Catch2WithMain)
+target_compile_options(test_external_plugin_backend PRIVATE -Wall -Wextra)
+if(APPLE)
+    target_link_libraries(test_external_plugin_backend PRIVATE
+        "-framework AudioToolbox"
+        "-framework AudioUnit"
+        "-framework CoreFoundation"
+        "-framework Foundation"
+    )
+endif()
+catch_discover_tests(test_external_plugin_backend)
+
+# AU adapter offline spike test (macOS only; non-Apple builds compile but skip).
+add_executable(test_au_offline test_au_offline.cpp)
+target_include_directories(test_au_offline PRIVATE ${CMAKE_CURRENT_SOURCE_DIR})
+target_link_libraries(test_au_offline PRIVATE mcp_plugin Catch2::Catch2WithMain)
+target_compile_options(test_au_offline PRIVATE -Wall -Wextra)
+if(APPLE)
+    target_link_libraries(test_au_offline PRIVATE
+        "-framework AudioToolbox"
+        "-framework AudioUnit"
+        "-framework CoreFoundation"
+        "-framework Foundation"
+    )
+endif()
+catch_discover_tests(test_au_offline)

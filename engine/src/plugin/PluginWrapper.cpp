@@ -6,7 +6,7 @@
 namespace mcp::plugin {
 
 PluginWrapper::PluginWrapper(std::unique_ptr<AudioProcessor> processor)
-    : m_processor(std::move(processor))
+    : m_processor(std::move(processor))  // unique_ptr moves into shared_ptr
 {}
 
 void PluginWrapper::prepare(const ProcessContext& context) {

@@ -45,6 +45,7 @@ protected:
     void mousePressEvent(QMouseEvent* ev) override;
     void mouseMoveEvent(QMouseEvent* ev) override;
     void mouseReleaseEvent(QMouseEvent* ev) override;
+    bool eventFilter(QObject* obj, QEvent* ev) override;
 
 private slots:
     void onSliderMoved(int pos);

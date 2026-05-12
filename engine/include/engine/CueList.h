@@ -10,6 +10,7 @@
 #include "StreamReader.h"
 #include <array>
 #include <atomic>
+#include <functional>
 #include <memory>
 #include <mutex>
 #include <optional>
@@ -23,7 +24,14 @@ namespace mcp_detail {
     class ChannelFaderParam;
     class ChannelMuteParam;
     class CrosspointParam;
+    class PluginParamAutoParam;
+    class SendParamBase;
+    class SendLevelParam;
+    class SendMuteParam;
+    class SendPanParam;
 }
+
+namespace mcp::plugin { class AudioProcessor; }
 
 namespace mcp {
 
@@ -455,6 +463,11 @@ public:
     // isLooping is set to true if the current slice has a loop count != 1.
     double cueSliceProgress(int index, bool& isLooping) const;
 
+    // Accessor for plugin processors keyed by (channel, slot).
+    // Set by AppModel after building plugin chains.
+    using PluginAccessor = std::function<std::shared_ptr<mcp::plugin::AudioProcessor>(int ch, int slot)>;
+    void setPluginAccessor(PluginAccessor acc) { m_pluginAccessor = std::move(acc); }
+
 private:
     bool fire(int cueIndex);
     int64_t scheduleVoice(int cueIndex);
@@ -512,6 +525,11 @@ private:
     friend class ::mcp_detail::ChannelFaderParam;
     friend class ::mcp_detail::ChannelMuteParam;
     friend class ::mcp_detail::CrosspointParam;
+    friend class ::mcp_detail::PluginParamAutoParam;
+    friend class ::mcp_detail::SendParamBase;
+    friend class ::mcp_detail::SendLevelParam;
+    friend class ::mcp_detail::SendMuteParam;
+    friend class ::mcp_detail::SendPanParam;
 
     // Update a live voice's per-output-channel gain (called from fade callbacks).
     // Does NOT modify cue.routing — fade is a live-voice-only multiplier.
@@ -547,7 +565,8 @@ private:
     int m_nextStableId{0};  // monotonically increasing; never reset (even after clear())
     std::vector<Cue> m_cues;
     int m_selectedIndex{0};
-    ChannelMap   m_channelMap;
+    ChannelMap    m_channelMap;
+    PluginAccessor m_pluginAccessor;  // set by AppModel; null = no plugin automation
     std::vector<ShowFile::NetworkSetup::Patch> m_networkPatches;
     std::vector<ShowFile::MidiSetup::Patch>    m_midiPatches;
 

@@ -3,6 +3,9 @@
 #include "CollectDialog.h"
 #include "MissingMediaDialog.h"
 #include "MixConsoleDialog.h"
+#ifdef __APPLE__
+#  include "AUScanDialog.h"
+#endif
 #include "CueListPanel.h"
 #include "ProjectStatusDialog.h"
 #include "ScriptletLibraryDialog.h"
@@ -34,6 +37,7 @@
 #include <QFrame>
 #include <QHBoxLayout>
 #include <QKeySequence>
+#include <QShortcut>
 #include <QMenuBar>
 #include <QMessageBox>
 #include <QMimeData>
@@ -230,8 +234,16 @@ void MainWindow::buildGoBar() {
     m_goBtn = new QPushButton("GO", bar);
     m_goBtn->setStyleSheet(kGoBtnStyle);
     m_goBtn->setFixedSize(110, 72);
-    m_goBtn->setShortcut(Qt::Key_Space);
+    m_goBtn->setFocusPolicy(Qt::NoFocus);
     connect(m_goBtn, &QPushButton::clicked, this, [this]() {
+        m_model->go();
+        m_inspector->clearTimelineArm();
+    });
+    // Use a window-level shortcut so space fires exactly once (on key press),
+    // not twice (shortcut on press + button activation on release).
+    auto* goShortcut = new QShortcut(Qt::Key_Space, this);
+    goShortcut->setContext(Qt::WindowShortcut);
+    connect(goShortcut, &QShortcut::activated, this, [this]() {
         m_model->go();
         m_inspector->clearTimelineArm();
     });
@@ -544,6 +556,15 @@ void MainWindow::buildMenuBar() {
         m_libraryDialog->activateWindow();
     });
     showMenu->addAction("&Missing Media…", this, &MainWindow::onMissingMedia);
+#ifdef __APPLE__
+    showMenu->addAction("&AU Plugin Browser…", this, [this]() {
+        // Standalone mode — no slot context; used for testing and enumeration only
+        auto* dlg = new AUScanDialog(this);
+        dlg->show();
+        dlg->raise();
+        dlg->activateWindow();
+    });
+#endif
     showMenu->addSeparator();
 
     auto* actPanic = showMenu->addAction("Panic", this, [this]() {
@@ -645,11 +666,14 @@ void MainWindow::onNewShow() {
     m_model->showPath.clear();
     m_model->baseDir.clear();
     m_model->dirty = false;
+    m_model->buildChannelPluginChains();
+    m_model->applyMixing();
+    m_model->rebuildSendTopology();
     m_model->applyScriptletLibrary();
     ShowHelpers::normalizeListRefs(m_model->sf);
     std::string err;
     ShowHelpers::rebuildAllCueLists(*m_model, err);
-    if (m_mixConsole) m_mixConsole->refresh();
+    if (m_mixConsole) m_mixConsole->resetForNewShow();
     m_cueTable->refresh();
     m_inspector->setCueIndex(-1);
     updateCueInfo();
@@ -668,6 +692,7 @@ void MainWindow::onOpenShow() {
 void MainWindow::onSaveShow() {
     if (m_model->showPath.empty()) { onSaveShowAs(); return; }
     saveUiState();
+    m_model->syncPluginStatesToShowFile();
     ShowHelpers::syncSfFromCues(*m_model);
     ShowHelpers::saveShow(*m_model);
     updateTitle();
@@ -1041,12 +1066,15 @@ void MainWindow::loadShowFile(const QString& path) {
     m_model->baseDir  = std::filesystem::path(m_model->showPath).parent_path().string();
     m_model->dirty    = false;
     m_model->applyOscSettings();
-    m_model->applyOutputDsp();
+    m_model->buildChannelPluginChains();
+    m_model->applyMixing();
+    m_model->rebuildSendTopology();
     m_model->applyScriptletLibrary();
     ShowHelpers::normalizeListRefs(m_model->sf);  // resolve any -1 list refs from older files
     ShowHelpers::rebuildAllCueLists(*m_model, err);
     m_cueTable->refresh();
     m_inspector->setCueIndex(-1);
+    if (m_mixConsole) m_mixConsole->resetForNewShow();
     loadUiState();
     updateCueInfo();
     updateTitle();

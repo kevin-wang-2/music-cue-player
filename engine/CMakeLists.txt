@@ -51,6 +51,7 @@ add_library(mcp_engine STATIC
     src/LtcStreamReader.cpp
     src/MtcGenerator.cpp
     src/SnapshotManager.cpp
+    src/SendRouter.cpp
 )
 
 # ── Plugin abstraction layer ──────────────────────────────────────────────────
@@ -62,6 +63,12 @@ add_library(mcp_plugin STATIC
     src/plugin/InternalPluginFactory.cpp
     src/plugin/TrimProcessor.cpp
     src/plugin/DelayProcessor.cpp
+    src/plugin/ChannelPluginChain.cpp
+    src/plugin/MissingPluginProcessor.cpp
+    src/plugin/NativePluginBackend.cpp
+    $<$<BOOL:${APPLE}>:src/plugin/AUPluginAdapter.mm>
+    $<$<BOOL:${APPLE}>:src/plugin/AUComponentEnumerator.mm>
+    $<$<BOOL:${APPLE}>:src/plugin/AUCompatibilityTester.mm>
 )
 
 target_include_directories(mcp_plugin
@@ -70,6 +77,13 @@ target_include_directories(mcp_plugin
 )
 
 target_link_libraries(mcp_plugin PUBLIC nlohmann_json::nlohmann_json)
+if(APPLE)
+    target_link_libraries(mcp_plugin PUBLIC
+        "-framework AudioToolbox"
+        "-framework AudioUnit"
+        "-framework CoreFoundation"
+    )
+endif()
 target_compile_options(mcp_plugin PRIVATE -Wall -Wextra -Wpedantic)
 
 target_include_directories(mcp_engine
@@ -97,6 +111,7 @@ target_link_directories(mcp_engine
 # LIBRARIES preserves "-framework Foo" as single tokens; LDFLAGS splits them.
 target_link_libraries(mcp_engine
     PUBLIC
+        mcp_plugin
         ${PORTAUDIO_LIBRARIES}
         ${SNDFILE_LIBRARIES}
         ${SAMPLERATE_LIBRARIES}

@@ -43,6 +43,8 @@ set(QT_UI_SOURCES
     src/MixConsoleDialog.cpp
     src/AppModel.h
     src/AppModel.cpp
+    src/DangerousPluginList.h
+    src/DangerousPluginList.cpp
     src/SettingsDialog.h
     src/SettingsDialog.cpp
     src/FaderWidget.h
@@ -91,6 +93,9 @@ set(QT_UI_SOURCES
 
 if(APPLE)
     list(APPEND QT_UI_SOURCES src/platform_mac.mm)
+    list(APPEND QT_UI_SOURCES src/AUEditorBridge.mm)
+    list(APPEND QT_UI_SOURCES src/AUScanDialog.h)
+    list(APPEND QT_UI_SOURCES src/AUScanDialog.cpp)
 endif()
 
 add_executable(mcp_qt_ui ${QT_UI_SOURCES})

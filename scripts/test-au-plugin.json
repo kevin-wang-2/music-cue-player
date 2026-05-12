@@ -1,0 +1,54 @@
+{
+  "mcp_version": "1.0",
+  "show": {
+    "title": "AU Plugin Test"
+  },
+  "engine": {
+    "sampleRate": 48000,
+    "channels": 2
+  },
+  "audioSetup": {
+    "sampleRate": 48000,
+    "channels": [
+      {
+        "name": "L",
+        "linkedStereo": true,
+        "plugins": [
+          {
+            "pluginId": "au:aufx/lmtr/appl",
+            "extBackend": "au",
+            "extName": "AUPeakLimiter",
+            "extVendor": "Apple",
+            "extNumChannels": 2
+          }
+        ]
+      },
+      {
+        "name": "R"
+      }
+    ]
+  },
+  "cueLists": [
+    {
+      "id": "main",
+      "name": "Main",
+      "numericId": 1,
+      "cues": [
+        {
+          "cueNumber": "1",
+          "type": "audio",
+          "name": "A (through Peak Limiter)",
+          "path": "/Users/kaibinwa/Desktop/click-in/music-cue-player/scripts/A.wav",
+          "preWait": 0.0
+        },
+        {
+          "cueNumber": "2",
+          "type": "audio",
+          "name": "B (through Peak Limiter)",
+          "path": "/Users/kaibinwa/Desktop/click-in/music-cue-player/scripts/B.wav",
+          "preWait": 0.0
+        }
+      ]
+    }
+  ]
+}

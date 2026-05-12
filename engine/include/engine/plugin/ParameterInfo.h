@@ -1,4 +1,5 @@
 #pragma once
+#include "engine/AutoParam.h"
 #include <algorithm>
 #include <functional>
 #include <string>
@@ -21,6 +22,7 @@ struct ParameterInfo {
     bool   automatable {true};
     bool   discrete    {false};
     int    steps       {0};     // meaningful when discrete == true
+    mcp::AutoParam::Domain domain{mcp::AutoParam::Domain::Linear};
 
     std::function<float(float value)>       toNormalized;   // value  → [0,1]
     std::function<float(float normalized)>  fromNormalized; // [0,1]  → value
