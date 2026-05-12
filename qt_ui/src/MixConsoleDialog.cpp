@@ -590,6 +590,8 @@ void MixConsoleDialog::buildConsole()
     }
     m_strips.clear();
 
+    setUpdatesEnabled(false);
+
     auto& as = m_model->sf.audioSetup;
 
     const int nCh = static_cast<int>(as.channels.size());
@@ -1140,6 +1142,8 @@ void MixConsoleDialog::buildConsole()
     m_content->adjustSize();
     m_content->installEventFilter(this);
     m_scroll->setWidget(m_content);
+
+    setUpdatesEnabled(true);
 
     // Reapply selection highlight after rebuild
     for (const int selCh : m_selectedChs)

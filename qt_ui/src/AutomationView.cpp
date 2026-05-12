@@ -1,5 +1,7 @@
 #include "AutomationView.h"
 
+#include <QInputDialog>
+#include <QMenu>
 #include <QMouseEvent>
 #include <QPainter>
 #include <QPainterPath>
@@ -359,17 +361,29 @@ void AutomationView::paintEvent(QPaintEvent*) {
         const double mn   = minValue();
         const double mx   = maxValue();
 
-        // Reference line at 0 for DB/FaderTaper params (when 0 is in range)
-        const bool hasRefLine = (m_domain == mcp::AutoParam::Domain::DB ||
-                                 m_domain == mcp::AutoParam::Domain::FaderTaper);
-        if (hasRefLine && mn < 0.0 && mx > 0.0) {
+        // Reference line at 0 for any numeric param when 0 is in range (not step mode)
+        const bool has0Ref = (m_mode != mcp::Cue::AutomationParamMode::Step)
+                             && mn < 0.0 && mx > 0.0;
+        if (has0Ref) {
             const int y0 = yFromValue(0.0);
             p.setPen(QPen(QColor(0x88, 0x88, 0x44), 1, Qt::DashLine));
             p.drawLine(r.left(), y0, r.right(), y0);
+            // Label
+            p.setPen(QColor(0xaa, 0xaa, 0x66));
+            QString zeroLabel;
+            if (!m_useCustomRange || m_unit == "dB")
+                zeroLabel = "+0 dB";
+            else if (m_unit.isEmpty())
+                zeroLabel = "0";
+            else
+                zeroLabel = "0 " + m_unit;
+            p.drawText(0, y0 - 7, kMarginL - 4, 14, Qt::AlignRight | Qt::AlignVCenter, zeroLabel);
         }
 
         p.setPen(QColor(0x44, 0x44, 0x44));
         for (double v = mn; v <= mx + 1e-6; v += step) {
+            // Skip when the regular grid would coincide with the 0 reference line
+            if (has0Ref && std::abs(v) < step * 0.01) continue;
             const int y = yFromValue(v);
             p.drawLine(r.left(), y, r.right(), y);
             p.setPen(QColor(0x77, 0x77, 0x77));
@@ -517,26 +531,113 @@ void AutomationView::mousePressEvent(QMouseEvent* ev) {
         if (idx >= 0) {
             const bool isHandle = m_pts[static_cast<size_t>(idx)].isHandle;
             if (isHandle) {
-                // Reset handle to segment midpoint
-                auto& h = m_pts[static_cast<size_t>(idx)];
-                if (idx > 0 && idx < (int)m_pts.size() - 1) {
-                    const auto& bp0 = m_pts[static_cast<size_t>(idx - 1)];
-                    const auto& bp1 = m_pts[static_cast<size_t>(idx + 1)];
-                    h.time  = (bp0.time + bp1.time) / 2.0;
-                    h.value = (bp0.value + bp1.value) / 2.0;
+                QMenu menu(this);
+                auto* resetAct = menu.addAction(tr("Reset to midpoint"));
+                if (menu.exec(mapToGlobal(ev->pos())) == resetAct) {
+                    auto& h = m_pts[static_cast<size_t>(idx)];
+                    if (idx > 0 && idx < (int)m_pts.size() - 1) {
+                        const auto& bp0 = m_pts[static_cast<size_t>(idx - 1)];
+                        const auto& bp1 = m_pts[static_cast<size_t>(idx + 1)];
+                        h.time  = (bp0.time + bp1.time) / 2.0;
+                        h.value = (bp0.value + bp1.value) / 2.0;
+                    }
+                    emit curveChanged(m_pts);
+                    update();
                 }
             } else {
-                // Delete the breakpoint and its adjacent handle
-                // In the BP,H,BP,H,...,BP pattern, each BP at position i has:
-                // - a handle before it at i-1 (if i > 0 and prev is handle)
-                // - a handle after it at i+1 (if i < size-1 and next is handle)
-                // After deleting the BP, ensureHandles will rebuild correctly.
-                m_pts.erase(m_pts.begin() + idx);
-                sortPoints();
-                ensureHandles();
+                QMenu menu(this);
+                auto* deleteAct   = menu.addAction(tr("Delete"));
+                menu.addSeparator();
+                auto* setValueAct = menu.addAction(tr("Set value..."));
+                const QString timeLabel = m_mc ? tr("Set position (bar.beat)...")
+                                               : tr("Set time (s)...");
+                auto* setTimeAct  = menu.addAction(timeLabel);
+                auto* resetAct    = m_getCurrentValue
+                                    ? menu.addAction(tr("Reset to current value"))
+                                    : nullptr;
+
+                auto* chosen = menu.exec(mapToGlobal(ev->pos()));
+                if (!chosen) return;
+
+                if (chosen == deleteAct) {
+                    m_pts.erase(m_pts.begin() + idx);
+                    sortPoints();
+                    ensureHandles();
+                    emit curveChanged(m_pts);
+                    update();
+
+                } else if (chosen == setValueAct) {
+                    bool ok;
+                    const double cur = m_pts[static_cast<size_t>(idx)].value;
+                    const QString vLabel = m_unit.isEmpty() ? tr("Value:")
+                                                            : tr("Value (%1):").arg(m_unit);
+                    const double v = QInputDialog::getDouble(
+                        this, tr("Set value"), vLabel,
+                        cur, minValue(), maxValue(), 4, &ok);
+                    if (ok) {
+                        auto& pt = m_pts[static_cast<size_t>(idx)];
+                        pt.value = std::clamp(v, minValue(), maxValue());
+                        if (m_mode == mcp::Cue::AutomationParamMode::Step)
+                            pt.value = (pt.value >= 0.5) ? 1.0 : 0.0;
+                        ensureHandles();
+                        emit curveChanged(m_pts);
+                        update();
+                    }
+
+                } else if (chosen == setTimeAct) {
+                    const double curTime = m_pts[static_cast<size_t>(idx)].time;
+                    if (m_mc) {
+                        const auto pos = m_mc->secondsToMusical(curTime);
+                        const QString initial = QString("%1.%2").arg(pos.bar).arg(pos.beat);
+                        bool ok;
+                        const QString text = QInputDialog::getText(
+                            this, tr("Set position"), tr("Position (bar.beat):"),
+                            QLineEdit::Normal, initial, &ok);
+                        if (ok && !text.isEmpty()) {
+                            const int dotIdx = text.indexOf('.');
+                            double newTime = curTime;
+                            if (dotIdx > 0) {
+                                bool ok1, ok2;
+                                const int bar  = text.left(dotIdx).toInt(&ok1);
+                                const int beat = text.mid(dotIdx + 1).toInt(&ok2);
+                                if (ok1 && ok2)
+                                    newTime = m_mc->musicalToSeconds(bar, beat);
+                            } else {
+                                bool ok1;
+                                const double t = text.toDouble(&ok1);
+                                if (ok1) newTime = t;
+                            }
+                            m_pts[static_cast<size_t>(idx)].time =
+                                std::clamp(newTime, 0.0, m_duration);
+                            sortPoints();
+                            ensureHandles();
+                            emit curveChanged(m_pts);
+                            update();
+                        }
+                    } else {
+                        bool ok;
+                        const double t = QInputDialog::getDouble(
+                            this, tr("Set time"), tr("Time (s):"),
+                            curTime, 0.0, m_duration, 4, &ok);
+                        if (ok) {
+                            m_pts[static_cast<size_t>(idx)].time =
+                                std::clamp(t, 0.0, m_duration);
+                            sortPoints();
+                            ensureHandles();
+                            emit curveChanged(m_pts);
+                            update();
+                        }
+                    }
+                } else if (resetAct && chosen == resetAct) {
+                    const double live = std::clamp(m_getCurrentValue(), minValue(), maxValue());
+                    auto& pt = m_pts[static_cast<size_t>(idx)];
+                    pt.value = (m_mode == mcp::Cue::AutomationParamMode::Step)
+                               ? (live >= 0.5 ? 1.0 : 0.0) : live;
+                    ensureHandles();
+                    emit curveChanged(m_pts);
+                    update();
+                }
             }
-            emit curveChanged(m_pts);
-            update();
         }
         return;
     }

@@ -79,6 +79,7 @@ private:
     void loadSnapshotTab();
     void buildPluginTargetTab();
     void loadPluginTargetTab();
+    void repopulatePluginCombo(int ch);
     void buildAutomationTab();
     void loadAutomationTab();
     // Read the current value of a parameter path from sf.audioSetup (for default curve seeding).
@@ -86,7 +87,8 @@ private:
     // Rebuild the breadcrumb bar from the given path.
     void rebuildAutoPathBar(const QString& path);
     // Commit a new path: saves to cue, rebuilds bar, seeds curve.
-    void commitAutoPath(const QString& path);
+    // keepCurve=true preserves existing breakpoints (only path/meta updated).
+    void commitAutoPath(const QString& path, bool keepCurve = false);
     // Open the full parameter picker dialog.
     void openAutoParamPicker();
     void loadScript();
@@ -209,7 +211,7 @@ private:
     // Deactivate / Reactivate tab
     QWidget*    m_pluginTargetPage{nullptr};
     QComboBox*  m_comboPluginTargetCh{nullptr};
-    QSpinBox*   m_spinPluginTargetSlot{nullptr};
+    QComboBox*  m_comboPluginTargetPlugin{nullptr};
 
     // Automation tab
     QWidget*        m_automationPage{nullptr};

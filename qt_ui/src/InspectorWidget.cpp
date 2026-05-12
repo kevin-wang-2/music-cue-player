@@ -2266,30 +2266,69 @@ void InspectorWidget::buildPluginTargetTab() {
     m_comboPluginTargetCh->setToolTip("Which mixer channel the target plugin sits on");
     form->addRow(tr("Channel:"), m_comboPluginTargetCh);
 
-    m_spinPluginTargetSlot = new QSpinBox;
-    m_spinPluginTargetSlot->setRange(0, 15);
-    m_spinPluginTargetSlot->setToolTip("Plugin slot index (0-based)");
-    form->addRow(tr("Slot:"), m_spinPluginTargetSlot);
+    m_comboPluginTargetPlugin = new QComboBox;
+    m_comboPluginTargetPlugin->setToolTip("Plugin to target (only slots with a plugin are listed)");
+    form->addRow(tr("Plugin:"), m_comboPluginTargetPlugin);
 
     m_tabs->addTab(m_pluginTargetPage, tr("Plugin"));
 
     connect(m_comboPluginTargetCh, QOverload<int>::of(&QComboBox::currentIndexChanged),
             this, [this](int) {
         if (m_loading || m_cueIdx < 0) return;
-        const int ch   = m_comboPluginTargetCh->currentData().toInt();
-        const int slot = m_spinPluginTargetSlot->value();
-        m_model->cues().setCuePluginSlot(m_cueIdx, ch, slot);
-        ShowHelpers::syncSfFromCues(*m_model);
-        emit cueEdited();
-    });
-    connect(m_spinPluginTargetSlot, QOverload<int>::of(&QSpinBox::valueChanged),
-            this, [this](int slot) {
-        if (m_loading || m_cueIdx < 0) return;
         const int ch = m_comboPluginTargetCh->currentData().toInt();
+        // Rebuild plugin list for the new channel; preserve nothing (new selection is none).
+        m_loading = true;
+        repopulatePluginCombo(ch);
+        m_comboPluginTargetPlugin->setCurrentIndex(0);  // "— none —"
+        m_loading = false;
+        m_model->cues().setCuePluginSlot(m_cueIdx, ch, -1);
+        ShowHelpers::syncSfFromCues(*m_model);
+        emit cueEdited();
+    });
+
+    connect(m_comboPluginTargetPlugin, QOverload<int>::of(&QComboBox::currentIndexChanged),
+            this, [this](int) {
+        if (m_loading || m_cueIdx < 0) return;
+        const int ch   = m_comboPluginTargetCh->currentData().toInt();
+        const int slot = m_comboPluginTargetPlugin->currentData().toInt();
         m_model->cues().setCuePluginSlot(m_cueIdx, ch, slot);
         ShowHelpers::syncSfFromCues(*m_model);
         emit cueEdited();
     });
+}
+
+void InspectorWidget::repopulatePluginCombo(int ch) {
+    m_comboPluginTargetPlugin->clear();
+    m_comboPluginTargetPlugin->addItem(tr("— none —"), -1);
+
+    if (ch < 0) {
+        m_comboPluginTargetPlugin->setEnabled(false);
+        return;
+    }
+
+    const auto& channels = m_model->sf.audioSetup.channels;
+    if (ch >= (int)channels.size()) {
+        m_comboPluginTargetPlugin->setEnabled(false);
+        return;
+    }
+
+    const auto& pSlots = channels[static_cast<size_t>(ch)].plugins;
+    for (int slot = 0; slot < (int)pSlots.size(); ++slot) {
+        const auto& ps = pSlots[static_cast<size_t>(slot)];
+        if (ps.pluginId.empty()) continue;
+        // Prefer extName for AU/VST3; fall back to stripping the "au:"/"vst3:" prefix.
+        QString name;
+        if (!ps.extName.empty()) {
+            name = QString::fromStdString(ps.extName);
+        } else {
+            const auto& id = ps.pluginId;
+            const auto colon = id.find(':');
+            name = QString::fromStdString(
+                colon != std::string::npos ? id.substr(colon + 1) : id);
+        }
+        m_comboPluginTargetPlugin->addItem(name, slot);
+    }
+    m_comboPluginTargetPlugin->setEnabled(true);
 }
 
 void InspectorWidget::loadPluginTargetTab() {
@@ -2298,21 +2337,42 @@ void InspectorWidget::loadPluginTargetTab() {
     if (!c) return;
 
     m_loading = true;
+
+    // --- Channel combo ---
     m_comboPluginTargetCh->clear();
+    m_comboPluginTargetCh->addItem(tr("— none —"), -1);
     const auto& channels = m_model->sf.audioSetup.channels;
     for (int i = 0; i < (int)channels.size(); ++i) {
-        const QString label = QString("%1: %2").arg(i)
-                              .arg(QString::fromStdString(channels[static_cast<size_t>(i)].name));
+        // Skip slave channel of a stereo pair — plugins target the master index.
+        if (i > 0 && channels[static_cast<size_t>(i - 1)].linkedStereo) continue;
+        const auto& n = channels[static_cast<size_t>(i)].name;
+        const bool isStereo = channels[static_cast<size_t>(i)].linkedStereo
+                              && (i + 1 < (int)channels.size());
+        QString label = n.empty() ? tr("Ch %1").arg(i + 1)
+                                  : QString::fromStdString(n);
+        if (isStereo) label += tr(" (stereo)");
         m_comboPluginTargetCh->addItem(label, i);
     }
-    // Select current channel
     const int ch = c->pluginChannel;
-    int selIdx = 0;
-    for (int i = 0; i < m_comboPluginTargetCh->count(); ++i) {
-        if (m_comboPluginTargetCh->itemData(i).toInt() == ch) { selIdx = i; break; }
+    {
+        int selIdx = 0;  // default to "— none —"
+        for (int i = 0; i < m_comboPluginTargetCh->count(); ++i) {
+            if (m_comboPluginTargetCh->itemData(i).toInt() == ch) { selIdx = i; break; }
+        }
+        m_comboPluginTargetCh->setCurrentIndex(selIdx);
     }
-    m_comboPluginTargetCh->setCurrentIndex(selIdx);
-    m_spinPluginTargetSlot->setValue(c->pluginSlot >= 0 ? c->pluginSlot : 0);
+
+    // --- Plugin combo ---
+    repopulatePluginCombo(ch);
+    const int slot = c->pluginSlot;
+    {
+        int selIdx = 0;  // default to "— none —"
+        for (int i = 0; i < m_comboPluginTargetPlugin->count(); ++i) {
+            if (m_comboPluginTargetPlugin->itemData(i).toInt() == slot) { selIdx = i; break; }
+        }
+        m_comboPluginTargetPlugin->setCurrentIndex(selIdx);
+    }
+
     m_loading = false;
 }
 
@@ -2469,7 +2529,30 @@ void InspectorWidget::rebuildAutoPathBar(const QString& path) {
                     for (const auto& d : newSegs)
                         newPath = d.startsWith('/') ? d
                                 : (newPath.isEmpty() ? "/" + d : newPath + "/" + d);
-                    commitAutoPath(newPath);
+                    if (newPath == QString::fromStdString(
+                            m_model->cues().cueAt(m_cueIdx)
+                                ? m_model->cues().cueAt(m_cueIdx)->automationPath : "")) {
+                        return;
+                    }
+                    bool keepCurve = false;
+                    {
+                        const auto* cur = m_model->cues().cueAt(m_cueIdx);
+                        const QString curPath = cur ? QString::fromStdString(cur->automationPath) : QString();
+                        if (!curPath.isEmpty() && !newPath.isEmpty()) {
+                            auto leafOf = [](const QString& p) {
+                                const int sl = p.lastIndexOf('/');
+                                return sl >= 0 ? p.mid(sl + 1) : p;
+                            };
+                            if (leafOf(newPath) == leafOf(curPath)) {
+                                const int ret = QMessageBox::question(
+                                    this, tr("Keep curve?"),
+                                    tr("The parameter type matches (%1). Keep the existing curve?").arg(leafOf(newPath)),
+                                    QMessageBox::Yes | QMessageBox::No, QMessageBox::Yes);
+                                keepCurve = (ret == QMessageBox::Yes);
+                            }
+                        }
+                    }
+                    commitAutoPath(newPath, keepCurve);
                 });
             }
             if (auto* src = qobject_cast<QPushButton*>(sender()))
@@ -2529,17 +2612,19 @@ static void applyAutoParamMeta(AutomationView* view, AppModel* model, const std:
     view->resetParamRange();
 }
 
-void InspectorWidget::commitAutoPath(const QString& path) {
+void InspectorWidget::commitAutoPath(const QString& path, bool keepCurve) {
     if (m_cueIdx < 0) return;
     const std::string pathStr = path.toStdString();
     m_model->cues().setCueAutomationPath(m_cueIdx, pathStr);
     rebuildAutoPathBar(path);
     applyAutoParamMeta(m_automationView, m_model, pathStr);
-    const double curVal = currentAutomationParamValue(pathStr);
-    const double dur    = m_spinAutoDuration->value();
-    const std::vector<mcp::Cue::AutomationPoint> flat{{0.0, curVal}, {dur, curVal}};
-    m_model->cues().setCueAutomationCurve(m_cueIdx, flat);
-    m_automationView->setPoints(flat);
+    if (!keepCurve) {
+        const double curVal = currentAutomationParamValue(pathStr);
+        const double dur    = m_spinAutoDuration->value();
+        const std::vector<mcp::Cue::AutomationPoint> flat{{0.0, curVal}, {dur, curVal}};
+        m_model->cues().setCueAutomationCurve(m_cueIdx, flat);
+        m_automationView->setPoints(flat);
+    }
     ShowHelpers::syncSfFromCues(*m_model);
     emit cueEdited();
 }
@@ -2549,11 +2634,25 @@ void InspectorWidget::openAutoParamPicker() {
     const auto* c = m_model->cues().cueAt(m_cueIdx);
     const QString curPath = c ? QString::fromStdString(c->automationPath) : QString();
     AutoParamPickerDialog dlg(m_model, curPath, this);
-    if (dlg.exec() == QDialog::Accepted) {
-        const QString newPath = dlg.selectedPath();
-        if (!newPath.isEmpty() && newPath != curPath)
-            commitAutoPath(newPath);
+    if (dlg.exec() != QDialog::Accepted) return;
+    const QString newPath = dlg.selectedPath();
+    if (newPath.isEmpty() || newPath == curPath) return;
+
+    // If the leaf segment matches (same param type, different channel/slot), offer to keep curve.
+    bool keepCurve = false;
+    if (!curPath.isEmpty()) {
+        auto leafOf = [](const QString& p) {
+            const int sl = p.lastIndexOf('/');
+            return sl >= 0 ? p.mid(sl + 1) : p;
+        };
+        if (leafOf(newPath) == leafOf(curPath)) {
+            const int ret = QMessageBox::question(this, tr("Keep curve?"),
+                tr("The parameter type matches (%1). Keep the existing curve?").arg(leafOf(newPath)),
+                QMessageBox::Yes | QMessageBox::No, QMessageBox::Yes);
+            keepCurve = (ret == QMessageBox::Yes);
+        }
     }
+    commitAutoPath(newPath, keepCurve);
 }
 
 void InspectorWidget::buildAutomationTab() {
@@ -2641,6 +2740,12 @@ void InspectorWidget::buildAutomationTab() {
             this, [this](int mode) {
         if (m_loading) return;
         m_automationView->setQuantize(mode);
+    });
+
+    m_automationView->setCurrentValueGetter([this]() -> double {
+        if (m_cueIdx < 0) return 0.0;
+        const auto* c = m_model->cues().cueAt(m_cueIdx);
+        return c ? currentAutomationParamValue(c->automationPath) : 0.0;
     });
 }
 

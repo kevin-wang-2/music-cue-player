@@ -338,6 +338,13 @@ void MainWindow::buildIconBar() {
         cd.type      = typeStr;
         cd.cueNumber = ShowHelpers::nextCueNumber(m_model->sf);
 
+        // Auto-fill automation duration from the selected cue's duration.
+        if (typeStr == "automation" && selRow >= 0) {
+            const auto* sc = m_model->cues().cueAt(selRow);
+            if (sc && sc->duration > 0.0)
+                cd.automationDuration = sc->duration;
+        }
+
         // Auto-assign target for cue types that reference another cue.
         if (selRow >= 0) {
             if (typeStr == "fade" || typeStr == "start" || typeStr == "stop"
@@ -395,9 +402,8 @@ void MainWindow::buildIconBar() {
         { nullptr, nullptr, nullptr },
         { "📷", "Add Snapshot cue",       "snapshot"    },
         { "∿",  "Add Automation cue",     "automation"  },
-        { nullptr, nullptr, nullptr },
         { "⏸",  "Add Deactivate cue",    "deactivate"  },
-        { "▶",  "Add Reactivate cue",    "reactivate"  },
+        { "↺",  "Add Reactivate cue",    "reactivate"  },
     };
     for (const auto& b : cueBtns) {
         if (!b.type) {

@@ -82,7 +82,7 @@ static TypeInfo typeInfoFor(mcp::CueType t) {
         case mcp::CueType::Snapshot:     return {"📷", {0x44, 0xbb, 0xee}};
         case mcp::CueType::Automation:   return {"∿",  {0xff, 0x77, 0xbb}};
         case mcp::CueType::Deactivate:   return {"⏸",  {0xcc, 0x66, 0x44}};
-        case mcp::CueType::Reactivate:   return {"▶",  {0x44, 0xcc, 0x88}};
+        case mcp::CueType::Reactivate:   return {"↺",  {0x44, 0xcc, 0x88}};
     }
     return {"?", {0x88, 0x88, 0x88}};
 }

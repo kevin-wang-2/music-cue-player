@@ -144,7 +144,7 @@ private:
     QScrollArea* m_scroll{nullptr};
     QWidget*     m_content{nullptr};
     QTimer*      m_meterTimer{nullptr};
-    bool         m_routingVisible{true};
+    bool         m_routingVisible{false};
     std::vector<Strip> m_strips;
 
     std::set<int> m_selectedChs;

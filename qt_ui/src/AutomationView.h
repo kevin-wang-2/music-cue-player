@@ -5,6 +5,7 @@
 #include "engine/MusicContext.h"
 #include <QWidget>
 #include <QString>
+#include <functional>
 #include <vector>
 
 // Curve editor for Automation cues.
@@ -19,8 +20,8 @@
 //   Left-click empty space  → add a breakpoint (+ auto-insert handle for new segment)
 //   Left-drag breakpoint    → move (time + value)
 //   Left-drag handle        → move within segment bounding box
-//   Right-click breakpoint  → delete (removes adjacent handle too)
-//   Right-click handle      → reset to segment midpoint
+//   Right-click breakpoint  → context menu: delete / set value / set time (bar.beat if MC)
+//   Right-click handle      → context menu: reset to midpoint
 class AutomationView : public QWidget {
     Q_OBJECT
 public:
@@ -37,6 +38,10 @@ public:
     void setParamRange  (double minVal, double maxVal, const QString& unit = "");
     void setParamDomain (mcp::AutoParam::Domain domain);  // controls reference lines
     void resetParamRange();                               // back to fader defaults
+
+    // Callback used by "Reset to current value" in the right-click menu.
+    // Should return the live value of the currently assigned parameter.
+    void setCurrentValueGetter(std::function<double()> fn) { m_getCurrentValue = std::move(fn); }
 
     const std::vector<mcp::Cue::AutomationPoint>& points() const { return m_pts; }
 
@@ -98,4 +103,6 @@ private:
 
     int  m_dragIdx{-1};     // index in m_pts being dragged, or -1
     bool m_dragging{false};
+
+    std::function<double()> m_getCurrentValue;
 };
