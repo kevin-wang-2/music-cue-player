@@ -91,6 +91,7 @@ private:
     void vst3PopulateTable();
     void vst3ApplyFilter();
     void vst3SavePaths();
+    void vst3LoadCache();   // populate table from QSettings on open
 #ifdef MCP_HAVE_VST3
     std::vector<mcp::plugin::VST3Entry> m_vst3Entries;
 #endif

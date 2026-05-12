@@ -656,6 +656,8 @@ void PluginManagerDialog::buildVST3Tab() {
     m_vst3ScanBtn->setEnabled(false);
     m_vst3AddPathBtn->setEnabled(false);
 #endif
+
+    vst3LoadCache();
 }
 
 void PluginManagerDialog::onVST3AddPath() {
@@ -681,6 +683,33 @@ void PluginManagerDialog::vst3SavePaths() {
         paths << m_vst3PathList->item(i)->text();
     QSettings s("click-in", "MusicCuePlayer");
     s.setValue("vst3/searchPaths", paths);
+}
+
+void PluginManagerDialog::vst3LoadCache() {
+#ifdef MCP_HAVE_VST3
+    QSettings s("click-in", "MusicCuePlayer");
+    const QVariantList list = s.value("vst3/cachedPlugins").toList();
+    if (list.isEmpty()) return;
+
+    m_vst3Entries.clear();
+    for (const QVariant& v : list) {
+        const QVariantMap m = v.toMap();
+        mcp::plugin::VST3Entry e;
+        e.name       = m.value("name").toString().toStdString();
+        e.vendor     = m.value("vendor").toString().toStdString();
+        e.version    = m.value("version").toString().toStdString();
+        e.path       = m.value("path").toString().toStdString();
+        e.pluginId   = m.value("pluginId").toString().toStdString();
+        e.classIndex = m.value("classIndex").toInt();
+        m_vst3Entries.push_back(std::move(e));
+    }
+
+    vst3PopulateTable();
+    vst3ApplyFilter();
+    m_vst3Status->setText(
+        QString("%1 VST3 plugin(s) from last scan. Click \"Scan Paths\" to refresh.")
+            .arg(static_cast<int>(m_vst3Entries.size())));
+#endif
 }
 
 void PluginManagerDialog::onVST3Scan() {
