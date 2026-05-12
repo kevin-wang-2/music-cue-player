@@ -3,6 +3,7 @@
 #include "CollectDialog.h"
 #include "MissingMediaDialog.h"
 #include "MixConsoleDialog.h"
+#include "PluginManagerDialog.h"
 #ifdef __APPLE__
 #  include "AUScanDialog.h"
 #endif
@@ -556,15 +557,12 @@ void MainWindow::buildMenuBar() {
         m_libraryDialog->activateWindow();
     });
     showMenu->addAction("&Missing Media…", this, &MainWindow::onMissingMedia);
-#ifdef __APPLE__
-    showMenu->addAction("&AU Plugin Browser…", this, [this]() {
-        // Standalone mode — no slot context; used for testing and enumeration only
-        auto* dlg = new AUScanDialog(this);
+    showMenu->addAction("&Plugin Manager…", this, [this]() {
+        auto* dlg = new PluginManagerDialog(this);
         dlg->show();
         dlg->raise();
         dlg->activateWindow();
     });
-#endif
     showMenu->addSeparator();
 
     auto* actPanic = showMenu->addAction("Panic", this, [this]() {

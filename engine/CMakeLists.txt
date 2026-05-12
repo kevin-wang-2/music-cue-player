@@ -35,6 +35,24 @@ FetchContent_Declare(
 )
 FetchContent_MakeAvailable(rtmidi)
 
+# VST3 SDK — host-side only.  We use FetchContent_Populate (not MakeAvailable)
+# so the SDK's own CMakeLists.txt is never executed; we compile only what we need.
+# Only the pluginterfaces submodule is required (pure interface headers).
+set(VST3_SDK_ROOT "" CACHE PATH "Pre-downloaded vst3sdk root (leave empty to auto-fetch)")
+if(VST3_SDK_ROOT STREQUAL "")
+    FetchContent_Declare(
+        vst3sdk
+        GIT_REPOSITORY    https://github.com/steinbergmedia/vst3sdk.git
+        GIT_TAG           v3.8.0_build_66
+        GIT_SUBMODULES    "pluginterfaces"
+        GIT_SHALLOW       FALSE   # shallow + submodule init is unreliable
+    )
+    FetchContent_Populate(vst3sdk)
+    set(VST3_SDK_ROOT ${vst3sdk_SOURCE_DIR})
+endif()
+message(STATUS "VST3 SDK root: ${VST3_SDK_ROOT}")
+set(MCP_HAVE_VST3 TRUE)
+
 add_library(mcp_engine STATIC
     src/AudioDecoder.cpp
     src/AudioFile.cpp
@@ -69,11 +87,19 @@ add_library(mcp_plugin STATIC
     $<$<BOOL:${APPLE}>:src/plugin/AUPluginAdapter.mm>
     $<$<BOOL:${APPLE}>:src/plugin/AUComponentEnumerator.mm>
     $<$<BOOL:${APPLE}>:src/plugin/AUCompatibilityTester.mm>
+    $<$<BOOL:${MCP_HAVE_VST3}>:src/plugin/VST3Scanner.cpp>
+    $<$<BOOL:${MCP_HAVE_VST3}>:src/plugin/VST3PluginAdapter.cpp>
+    $<$<BOOL:${MCP_HAVE_VST3}>:src/plugin/VST3IIDs.cpp>
 )
 
 target_include_directories(mcp_plugin
     PUBLIC  include
     PRIVATE src/plugin       # private processor headers
+            $<$<BOOL:${MCP_HAVE_VST3}>:${VST3_SDK_ROOT}>
+)
+
+target_compile_definitions(mcp_plugin PUBLIC
+    $<$<BOOL:${MCP_HAVE_VST3}>:MCP_HAVE_VST3>
 )
 
 target_link_libraries(mcp_plugin PUBLIC nlohmann_json::nlohmann_json)

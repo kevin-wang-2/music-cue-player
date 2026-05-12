@@ -249,6 +249,7 @@ struct ShowFile {
                 // External plugin fields — populated when pluginId starts with "au:" / "vst3:"
                 // (Kept flat to avoid a dependency on ExternalPluginReference in ShowFile.h)
                 std::string extBackend;            // "au", "vst3"
+                std::string extPath;               // VST3: absolute path to .vst3 bundle; AU: empty
                 std::string extName;               // display name
                 std::string extVendor;
                 std::string extVersion;

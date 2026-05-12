@@ -91,9 +91,13 @@ set(QT_UI_SOURCES
     src/ShowInfoDialog.cpp
 )
 
+list(APPEND QT_UI_SOURCES src/PluginManagerDialog.h)
+list(APPEND QT_UI_SOURCES src/PluginManagerDialog.cpp)
+
 if(APPLE)
     list(APPEND QT_UI_SOURCES src/platform_mac.mm)
     list(APPEND QT_UI_SOURCES src/AUEditorBridge.mm)
+    list(APPEND QT_UI_SOURCES src/VST3EditorBridge.mm)
     list(APPEND QT_UI_SOURCES src/AUScanDialog.h)
     list(APPEND QT_UI_SOURCES src/AUScanDialog.cpp)
 endif()
@@ -116,6 +120,7 @@ target_link_libraries(mcp_qt_ui PRIVATE
 )
 if(APPLE)
     target_link_libraries(mcp_qt_ui PRIVATE "-framework Cocoa"
+                                            "-framework Carbon"
                                             "-framework SystemConfiguration")
 endif()
 if(WIN32)

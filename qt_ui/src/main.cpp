@@ -8,6 +8,7 @@
 #include <QPalette>
 #include <QStyleFactory>
 #include <cstdio>
+#include <cstdlib>
 #include <cstring>
 #include <filesystem>
 #include <string>
@@ -15,6 +16,9 @@
 #ifdef Q_OS_MAC
 #  include "engine/plugin/AUCompatibilityTester.h"
 #  include "engine/plugin/AUComponentEnumerator.h"
+#endif
+#ifdef MCP_HAVE_VST3
+#  include "engine/plugin/VST3Scanner.h"
 #endif
 
 #ifdef Q_OS_MAC
@@ -85,6 +89,29 @@ int main(int argc, char* argv[]) {
             }
             fprintf(stderr, "usage: --au-test-plugin TTTTTTTT,SSSSSSSS,MMMMMMMM\n");
             return 2;
+        }
+    }
+#endif
+
+#ifdef MCP_HAVE_VST3
+    // ── Subprocess mode: isolated VST3 bundle scanner ────────────────────────
+    // Invoked as:  binary --scan-vst3 /path/to/Plugin.vst3
+    // Prints one tab-separated line per audio-effect class found, then exits.
+    // Running in a child process isolates the main app from plugin crashes.
+    for (int i = 1; i + 1 < argc; ++i) {
+        if (strcmp(argv[i], "--scan-vst3") == 0) {
+#  ifdef Q_OS_MAC
+            mcpSetSubprocessMode();
+#  endif
+            const auto entries = mcp::plugin::VST3Scanner::scanBundle(argv[i + 1]);
+            for (const auto& e : entries) {
+                // Fields: name, vendor, version, pluginId, classIndex
+                fprintf(stdout, "%s\t%s\t%s\t%s\t%d\n",
+                        e.name.c_str(), e.vendor.c_str(), e.version.c_str(),
+                        e.pluginId.c_str(), e.classIndex);
+            }
+            fflush(stdout);
+            std::quick_exit(0);
         }
     }
 #endif

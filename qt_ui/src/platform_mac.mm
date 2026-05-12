@@ -1,4 +1,5 @@
 #import <AppKit/AppKit.h>
+#import <Carbon/Carbon.h>
 
 // Force the application (and all its windows) to use the dark Aqua appearance,
 // regardless of the system-level light/dark mode setting.
@@ -9,11 +10,13 @@ void applyMacOSDarkAppearance() {
     }
 }
 
-// Call this at the very start of subprocess (--au-test-plugin) mode.
-// NSApplicationActivationPolicyProhibited prevents any window the AU plugin
-// tries to open (auth dialogs, splash screens) from being brought to the
-// foreground or appearing in the Dock.
+// Call this at the very start of any subprocess mode (--au-test-plugin,
+// --scan-vst3, …).  Uses TransformProcessType instead of creating NSApp,
+// so the Dock never sees a new-app-launched notification — no bounce.
 void mcpSetSubprocessMode() {
-    [[NSApplication sharedApplication]
-        setActivationPolicy:NSApplicationActivationPolicyProhibited];
+#pragma clang diagnostic push
+#pragma clang diagnostic ignored "-Wdeprecated-declarations"
+    ProcessSerialNumber psn = { 0, kCurrentProcess };
+    TransformProcessType(&psn, kProcessTransformToBackgroundApplication);
+#pragma clang diagnostic pop
 }

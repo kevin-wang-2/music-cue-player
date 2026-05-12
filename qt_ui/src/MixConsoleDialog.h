@@ -10,6 +10,9 @@
 #ifdef __APPLE__
 #  include "engine/plugin/AUComponentEnumerator.h"
 #endif
+#ifdef MCP_HAVE_VST3
+#  include "engine/plugin/VST3Scanner.h"
+#endif
 
 class AppModel;
 class QEvent;
@@ -176,6 +179,12 @@ private:
     std::vector<mcp::plugin::AUComponentEntry> m_auEntries;
     bool m_auCacheValid{false};
     void ensureAUCache();
+#endif
+#ifdef MCP_HAVE_VST3
+    // Lazily populated VST3 plugin list (populated on first openPluginPicker call).
+    std::vector<mcp::plugin::VST3Entry> m_vst3Entries;
+    bool m_vst3CacheValid{false};
+    void ensureVST3Cache();
 #endif
 
     // Snapshot toolbar controls (created once in constructor)

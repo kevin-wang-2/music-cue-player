@@ -5,10 +5,18 @@
 #include "engine/AudioEngine.h"
 #include "engine/ShowFile.h"
 #include "engine/plugin/MissingPluginProcessor.h"
+#include "PluginManagerDialog.h"
 #ifdef __APPLE__
 #  include "engine/plugin/AUPluginAdapter.h"
 #  include "AUEditorBridge.h"
-#  include "AUScanDialog.h"
+#endif
+#ifdef MCP_HAVE_VST3
+#  include "engine/plugin/VST3Scanner.h"
+#  include "engine/plugin/VST3PluginAdapter.h"
+#  include <QSettings>
+#  ifdef __APPLE__
+#    include "VST3EditorBridge.h"
+#  endif
 #endif
 
 using ShowFile = mcp::ShowFile;
@@ -2586,34 +2594,89 @@ void MixConsoleDialog::openPluginPicker(int ch, int slot) {
         auMenu->addAction("Refresh Plugin List", this, [this]() {
             m_auCacheValid = false;
         });
-
-        menu.addSeparator();
-        menu.addAction("AU Plugin Browser…", this, [this, ch, slot]() {
-            auto* dlg = new AUScanDialog(m_model, ch, slot, this);
-            const bool editorWasOpen = closePluginEditor(ch, slot);
-            if (dlg->exec() == QDialog::Accepted) {
-                rebuildPluginSection(ch);
-                if (editorWasOpen) openPluginEditor(ch, slot);
-            }
-            raise();
-            activateWindow();
-        });
-    } else {
-        // No AU plugins found; fall back to the scan dialog.
-        if (!descs.empty())
-            menu.addSeparator();
-        menu.addAction("Browse AU Plugins…", this, [this, ch, slot]() {
-            auto* dlg = new AUScanDialog(m_model, ch, slot, this);
-            const bool editorWasOpen = closePluginEditor(ch, slot);
-            if (dlg->exec() == QDialog::Accepted) {
-                rebuildPluginSection(ch);
-                if (editorWasOpen) openPluginEditor(ch, slot);
-            }
-            raise();
-            activateWindow();
-        });
     }
 #endif
+
+#ifdef MCP_HAVE_VST3
+    ensureVST3Cache();
+    if (!m_vst3Entries.empty()) {
+        menu.addSeparator();
+
+        // Build vendor → [entry indices] map
+        std::vector<std::string> vst3VendorOrder;
+        std::map<std::string, std::vector<int>> vst3VendorMap;
+        for (int i = 0; i < static_cast<int>(m_vst3Entries.size()); ++i) {
+            const auto& e = m_vst3Entries[static_cast<size_t>(i)];
+            if (vst3VendorMap.find(e.vendor) == vst3VendorMap.end())
+                vst3VendorOrder.push_back(e.vendor);
+            vst3VendorMap[e.vendor].push_back(i);
+        }
+
+        auto* vst3Menu = menu.addMenu("VST3 Plugins");
+        enableMenuScroll(vst3Menu);
+        for (const auto& vendor : vst3VendorOrder) {
+            auto* vMenu = vst3Menu->addMenu(
+                vendor.empty() ? "(Unknown)" : QString::fromStdString(vendor));
+            enableMenuScroll(vMenu);
+            for (int idx : vst3VendorMap[vendor]) {
+                const auto& e = m_vst3Entries[static_cast<size_t>(idx)];
+                const int reqCh = numCh;
+                vMenu->addAction(QString::fromStdString(e.name), this,
+                    [this, ch, slot, reqCh,
+                     pluginId = e.pluginId, name = e.name, vendor2 = e.vendor,
+                     version = e.version, path = e.path]()
+                {
+                    const bool editorWasOpen = closePluginEditor(ch, slot);
+
+                    auto& pSlots2 = m_model->sf.audioSetup.channels[static_cast<size_t>(ch)].plugins;
+                    while (static_cast<int>(pSlots2.size()) <= slot)
+                        pSlots2.emplace_back();
+                    auto& sl2 = pSlots2[static_cast<size_t>(slot)];
+                    sl2.pluginId        = pluginId;
+                    sl2.extBackend      = "vst3";
+                    sl2.extPath         = path;
+                    sl2.extName         = name;
+                    sl2.extVendor       = vendor2;
+                    sl2.extVersion      = version;
+                    sl2.extNumChannels  = reqCh;
+                    sl2.extStateBlob.clear();
+                    sl2.extParamSnapshot.clear();
+                    sl2.parameters.clear();
+                    m_model->dirty = true;
+                    m_model->buildChannelPluginChains();
+                    m_model->applyMixing();
+                    rebuildPluginSection(ch);
+                    if (editorWasOpen) openPluginEditor(ch, slot);
+                });
+            }
+        }
+
+        vst3Menu->addSeparator();
+        vst3Menu->addAction("Reload Cached List", this, [this]() {
+            m_vst3CacheValid = false;
+        });
+    }
+
+#endif
+
+    menu.addSeparator();
+    menu.addAction("Plugin Manager…", this, [this, ch, slot]() {
+        const bool editorWasOpen = closePluginEditor(ch, slot);
+        auto* dlg = new PluginManagerDialog(m_model, ch, slot, this);
+        const bool accepted = dlg->exec() == QDialog::Accepted;
+#ifdef __APPLE__
+        m_auCacheValid   = false;
+#endif
+#ifdef MCP_HAVE_VST3
+        m_vst3CacheValid = false;  // always reload in case user ran a scan
+#endif
+        if (accepted) {
+            rebuildPluginSection(ch);
+            if (editorWasOpen) openPluginEditor(ch, slot);
+        }
+        raise();
+        activateWindow();
+    });
 
     // Find the button to anchor the menu.
     Strip* sp = nullptr;
@@ -2629,6 +2692,29 @@ void MixConsoleDialog::ensureAUCache() {
     if (m_auCacheValid) return;
     m_auEntries = mcp::plugin::AUComponentEnumerator::enumerate();
     m_auCacheValid = true;
+}
+#endif
+
+#ifdef MCP_HAVE_VST3
+void MixConsoleDialog::ensureVST3Cache() {
+    if (m_vst3CacheValid) return;
+    // Load results persisted by PluginManagerDialog after a manual scan.
+    // Never trigger a scan here — scanning is always an explicit user action.
+    QSettings s("click-in", "MusicCuePlayer");
+    const QVariantList list = s.value("vst3/cachedPlugins").toList();
+    m_vst3Entries.clear();
+    for (const auto& v : list) {
+        const QVariantMap m = v.toMap();
+        mcp::plugin::VST3Entry e;
+        e.name        = m.value("name").toString().toStdString();
+        e.vendor      = m.value("vendor").toString().toStdString();
+        e.version     = m.value("version").toString().toStdString();
+        e.path        = m.value("path").toString().toStdString();
+        e.pluginId    = m.value("pluginId").toString().toStdString();
+        e.classIndex  = m.value("classIndex").toInt();
+        m_vst3Entries.push_back(std::move(e));
+    }
+    m_vst3CacheValid = true;
 }
 #endif
 
@@ -2916,7 +3002,50 @@ void MixConsoleDialog::openPluginEditor(int ch, int slot, bool pinToTop) {
     }
 #endif
 
-    // Generic parameter editor — internal plugins and AUs without custom UI.
+#if defined(MCP_HAVE_VST3) && defined(__APPLE__)
+    // Try VST3 native editor view (two-phase: create → show/settle → attach).
+    if (auto* vst3Proc = dynamic_cast<mcp::plugin::VST3PluginAdapter*>(proc)) {
+        auto* container = vst3CreateContainer(vst3Proc, dlg);
+        if (container) {
+            // Add to layout and show the dialog BEFORE calling attached() so the
+            // container's NSView is inside a live NSWindow — strict plugins
+            // (e.g. FabFilter) throw or fail if they can't reach [nsview window].
+            vl->addWidget(container);
+            dlg->show();
+            QApplication::processEvents(QEventLoop::ExcludeUserInputEvents);
+
+            int outW = 0, outH = 0;
+            if (vst3AttachEditor(container, vst3Proc, outW, outH)) {
+                container->setFixedSize(outW, outH);
+                dlg->adjustSize();
+                resetPluginCache(ch, slot);
+
+                QPointer<QDialog> dlgGuard(dlg);
+                vst3Proc->startWatchingParameters([this, ch, slot, dlgGuard]() {
+                    if (!dlgGuard) return;
+                    diffAndMarkPluginDirty(ch, slot);
+                });
+                connect(dlg, &QDialog::finished, this, [this, ch, slot]() {
+                    auto w2 = m_model->channelPlugin(ch, slot);
+                    if (w2) {
+                        if (auto* vp = dynamic_cast<mcp::plugin::VST3PluginAdapter*>(
+                                          w2->getProcessor()))
+                            vp->stopWatchingParameters();
+                    }
+                    diffAndMarkPluginDirty(ch, slot);
+                    m_pluginParamCaches.erase({ch, slot});
+                });
+                return;
+            }
+
+            // Attach failed — remove container and fall through to generic editor.
+            vl->removeWidget(container);
+            delete container;
+        }
+    }
+#endif
+
+    // Generic parameter editor — internal plugins and AUs/VST3 without custom UI.
     const auto& params = proc->getParameters();
 
     if (params.empty()) {
@@ -2934,6 +3063,21 @@ void MixConsoleDialog::openPluginEditor(int ch, int slot, bool pinToTop) {
             msg = QString("Plugin loaded\n(no editable parameters)");
         }
         auto* lbl = new QLabel(msg, dlg);
+        lbl->setWordWrap(true);
+        lbl->setAlignment(Qt::AlignCenter);
+        vl->addWidget(lbl);
+        dlg->setMinimumWidth(300);
+        dlg->show();
+        return;
+    }
+
+    // Cap the generic editor to prevent building hundreds of spinboxes for
+    // large plugins (e.g. FabFilter Pro-Q 3 exposes 500+ parameters).
+    static constexpr int kMaxGenericParams = 64;
+    if (static_cast<int>(params.size()) > kMaxGenericParams) {
+        auto* lbl = new QLabel(
+            QString("Plugin has %1 parameters.\nOpen the plugin window to edit them.")
+                .arg(static_cast<int>(params.size())), dlg);
         lbl->setWordWrap(true);
         lbl->setAlignment(Qt::AlignCenter);
         vl->addWidget(lbl);

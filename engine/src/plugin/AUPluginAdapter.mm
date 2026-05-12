@@ -577,12 +577,15 @@ void AUPluginAdapter::setState(const PluginState& state) {
                                      kAudioUnitScope_Global, 0,
                                      &classInfo, sizeof(classInfo));
                 CFRelease(classInfo);
-                return;
+                // No early return: fall through to apply any individual param overrides.
+                // This allows partial-scope snapshot recall to override specific params
+                // on top of the blob-restored baseline.
             }
         }
     }
 
-    // Fallback: restore via flat parameters map
+    // Apply individual parameters — either as a standalone fallback (no blob),
+    // or as per-param overrides on top of a just-restored blob state.
     for (const auto& [id, val] : state.parameters)
         setParameterValue(id, val);
 }

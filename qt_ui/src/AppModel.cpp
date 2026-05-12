@@ -708,7 +708,9 @@ void AppModel::applyPluginParamStates()
             mcp::plugin::PluginState state;
             state.pluginId = sl.pluginId;
             if (sl.isExternal()) {
-                state.backend  = mcp::plugin::PluginBackend::AU;
+                state.backend  = sl.extBackend == "vst3"
+                                     ? mcp::plugin::PluginBackend::VST3
+                                     : mcp::plugin::PluginBackend::AU;
                 state.stateData = sl.extStateBlob;
                 for (const auto& [k, v] : sl.extParamSnapshot)
                     state.parameters[k] = v;
@@ -910,6 +912,7 @@ void AppModel::buildChannelPluginChains() {
                 mcp::plugin::ExternalPluginReference ref;
                 ref.backend        = sl.extBackend;
                 ref.pluginId       = sl.pluginId;
+                ref.path           = sl.extPath;
                 ref.name           = sl.extName;
                 ref.vendor         = sl.extVendor;
                 ref.version        = sl.extVersion;

@@ -581,8 +581,9 @@ bool ShowFile::load(const std::filesystem::path& path, std::string& error) {
                         }
                         // External plugin fields
                         slot.extBackend      = jget<std::string>(pj, "extBackend", "");
-                        slot.extName         = jget<std::string>(pj, "extName", "");
-                        slot.extVendor       = jget<std::string>(pj, "extVendor", "");
+                        slot.extPath         = jget<std::string>(pj, "extPath",    "");
+                        slot.extName         = jget<std::string>(pj, "extName",    "");
+                        slot.extVendor       = jget<std::string>(pj, "extVendor",  "");
                         slot.extVersion      = jget<std::string>(pj, "extVersion", "");
                         slot.extNumChannels  = jget<int>        (pj, "extNumChannels", 2);
                         if (pj.contains("extStateBlob") && pj["extStateBlob"].is_string())
@@ -885,6 +886,7 @@ bool ShowFile::save(const std::filesystem::path& path, std::string& error) const
                     }
                     if (ps.isExternal()) {
                         pj["extBackend"]    = ps.extBackend;
+                        if (!ps.extPath.empty())    pj["extPath"]    = ps.extPath;
                         pj["extName"]       = ps.extName;
                         if (!ps.extVendor.empty())  pj["extVendor"]  = ps.extVendor;
                         if (!ps.extVersion.empty()) pj["extVersion"] = ps.extVersion;
