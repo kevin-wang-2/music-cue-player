@@ -158,7 +158,6 @@ void WaveformView::paintEvent(QPaintEvent*) {
     // Waveform
     if (haveMeta && fileDur > 0.0) {
         const int nFull  = m_peakData->nFilled.load(std::memory_order_acquire);
-        const int nLOD   = m_peakData->nFilledLOD.load(std::memory_order_acquire);
         const int dispCh = std::min(m_peakData->fileCh, 2);
 
         // Sample-level zoom: when fewer than one peak bucket maps to one pixel.
@@ -168,6 +167,13 @@ void WaveformView::paintEvent(QPaintEvent*) {
             m_sampler.request(m_peakPath, m_viewStart, m_viewStart + m_viewDur,
                               this, [this]{ update(); });
         auto sf = useSamples ? m_sampler.current() : nullptr;
+        // Discard frames that don't cover the full visible window: sampleFrame()
+        // clamps out-of-range queries to the frame edge, so a stale frame from a
+        // previous viewport would silently produce wrong data for one paint cycle.
+        if (sf && (sf->path != m_peakPath
+                || sf->tL > m_viewStart + 0.005
+                || sf->tR < (m_viewStart + m_viewDur) - 0.005))
+            sf = nullptr;
 
         for (int ch = 0; ch < dispCh; ++ch) {
             const float chTop = waveTop + ch * (waveH / dispCh);
@@ -180,8 +186,8 @@ void WaveformView::paintEvent(QPaintEvent*) {
                 const double tL = m_viewStart + px * m_viewDur / W;
                 const double tR = m_viewStart + (px + 1) * m_viewDur / W;
                 float mn, mx;
-                bool ok = sf && sf->path == m_peakPath && sampleFrame(*sf, ch, tL, tR, mn, mx);
-                if (!ok && !samplePeaks(*m_peakData, ch, tL, tR, nFull, nLOD, mn, mx)) break;
+                bool ok = sf && sampleFrame(*sf, ch, tL, tR, mn, mx);
+                if (!ok && !samplePeaks(*m_peakData, ch, tL, tR, nFull, mn, mx)) break;
                 const double tMid = (tL + tR) * 0.5;
                 const bool active = (tMid >= startSec && tMid <= endSec);
                 const QColor wfCol = active

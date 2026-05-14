@@ -10,6 +10,7 @@
 #include <QMetaObject>
 #include <QMouseEvent>
 #include <QPainter>
+#include <QVarLengthArray>
 #include <QWheelEvent>
 
 #include <algorithm>
@@ -261,11 +262,14 @@ void SyncGroupView::paintEvent(QPaintEvent*) {
     }
 
     // ── Child-cue lanes ────────────────────────────────────────────────────
+    const double visibleEnd = m_pixPerSec > 0.0
+        ? m_viewStart + (double)W / m_pixPerSec : m_viewStart + 1.0;
     p.setClipRect(0, kRulerH, W, loopStripY - kRulerH);
     for (int i = 0; i < (int)m_blocks.size(); ++i) {
         const auto& b = m_blocks[i];
         const int ly  = laneY(i);
-        if (ly + kBlockH > loopStripY) break;
+        if (ly + kBlockH <= kRulerH) continue;  // entirely above visible area
+        if (ly >= loopStripY) break;             // entirely below visible area
 
         const int x1 = secToPix(b.offset);
         const int x2 = secToPix(b.offset + b.duration);
@@ -282,14 +286,13 @@ void SyncGroupView::paintEvent(QPaintEvent*) {
         p.fillRect(x1, ly, bw, kBlockH, fill);
 
         // Mini waveform thumbnail (below label area)
-        if (!b.audioPath.empty()) {
+        if (!b.audioPath.empty() && x2 > 0 && x1 < W) {
             auto it = m_peakData.find(b.audioPath);
             if (it != m_peakData.end() && it->second &&
                 it->second->metadataReady.load(std::memory_order_acquire) &&
                 it->second->fileDur > 0.0) {
                 const PeakData& pd   = *it->second;
                 const int nFull = pd.nFilled.load(std::memory_order_acquire);
-                const int nLOD  = pd.nFilledLOD.load(std::memory_order_acquire);
                 const int wTop  = ly + 14, wBot = ly + kBlockH - 3;
                 const int mid   = (wTop + wBot) / 2;
                 const int half  = (wBot - wTop) / 2;
@@ -298,28 +301,37 @@ void SyncGroupView::paintEvent(QPaintEvent*) {
                 const int rawBw = x2 - x1;
                 const bool useSamples = rawBw > 0 && ViewportSampler::needsSampleZoom(
                     b.duration, rawBw, pd.totalBuckets, pd.fileDur);
-                if (useSamples) {
+                const double aTL = b.startTime + std::max(0.0, m_viewStart - b.offset);
+                const double aTR = b.startTime + std::min(b.duration, visibleEnd - b.offset);
+                if (useSamples && aTL < aTR) {
                     auto& smp = m_samplers[b.audioPath];
                     if (!smp) smp = std::make_unique<ViewportSampler>();
-                    const double visibleEnd = m_viewStart + (m_pixPerSec > 0.0 ? (double)width() / m_pixPerSec : 1.0);
-                    const double aTL = b.startTime + std::max(0.0, m_viewStart - b.offset);
-                    const double aTR = b.startTime + std::min(b.duration, visibleEnd - b.offset);
-                    if (aTL < aTR)
-                        smp->request(b.audioPath, aTL, aTR, this, [this]{ update(); });
+                    smp->request(b.audioPath, aTL, aTR, this, [this]{ update(); });
                 }
                 auto sf = (useSamples && m_samplers.count(b.audioPath))
                           ? m_samplers.at(b.audioPath)->current() : nullptr;
+                if (sf && (sf->tL > aTL + 0.005 || sf->tR < aTR - 0.005))
+                    sf = nullptr;
 
-                p.setPen(QPen(QColor(0xaa, 0xdd, 0xff, 0xb0), 1));
-                for (int px2 = std::max(0, x1); px2 < std::min(W, x1 + bw); ++px2) {
+                const int pxStart = std::max(0, x1);
+                const int pxEnd   = std::min(W, x1 + bw);
+                QVarLengthArray<QLine, 2048> waveLines;
+                waveLines.reserve(pxEnd - pxStart);
+                for (int px2 = pxStart; px2 < pxEnd; ++px2) {
                     const double tL = b.startTime + (double)(px2 - x1) / bw * b.duration;
                     const double tR = b.startTime + (double)(px2 - x1 + 1) / bw * b.duration;
                     float mn, mx;
                     bool ok = sf && sampleFrame(*sf, 0, tL, tR, mn, mx);
-                    if (!ok && !samplePeaks(pd, 0, tL, tR, nFull, nLOD, mn, mx)) break;
-                    p.drawLine(px2, std::max(wTop, mid - (int)(mx * half)),
-                               px2, std::min(wBot, mid - (int)(mn * half)));
+                    if (!ok) {
+                        if (!samplePeaks(pd, 0, tL, tR, nFull, mn, mx)) break;
+                    }
+                    waveLines.append(QLine(px2, std::max(wTop, mid - (int)(mx * half)),
+                                          px2, std::min(wBot, mid - (int)(mn * half))));
                 }
+                p.setRenderHint(QPainter::Antialiasing, false);
+                p.setPen(QPen(QColor(0xaa, 0xdd, 0xff, 0xb0), 1));
+                p.drawLines(waveLines.constData(), waveLines.size());
+                p.setRenderHint(QPainter::Antialiasing, true);
             }
         }
 
@@ -647,7 +659,8 @@ void SyncGroupView::wheelEvent(QWheelEvent* ev) {
         // Cmd/Ctrl+scroll → zoom around mouse pivot
         const double steps = ev->angleDelta().y() / 120.0;
         const double pivotSec = pixToSec(ev->position().x());
-        m_pixPerSec = std::clamp(m_pixPerSec * std::pow(1.25, steps), 4.0, 8000.0);
+        const double minPps = width() > 0 ? (double)width() / viewDuration() : 4.0;
+        m_pixPerSec = std::clamp(m_pixPerSec * std::pow(1.25, steps), minPps, 8000.0);
         m_viewStart = std::max(0.0, pivotSec - ev->position().x() / m_pixPerSec);
     } else if ((ev->modifiers() & Qt::ShiftModifier) || ev->angleDelta().x() != 0) {
         // Shift+scroll → horizontal pan (macOS converts Shift+vertical to angleDelta.x)
@@ -753,10 +766,12 @@ void SyncGroupView::contextMenuEvent(QContextMenuEvent* ev) {
     ev->accept();
 }
 
-void SyncGroupView::resizeEvent(QResizeEvent*) {
-    const double dur = viewDuration();
-    if (dur > 0.0 && width() > 0)
-        m_pixPerSec = width() / dur;
+void SyncGroupView::resizeEvent(QResizeEvent* ev) {
+    if (ev->oldSize().width() <= 0) {
+        const double dur = viewDuration();
+        if (dur > 0.0 && width() > 0)
+            m_pixPerSec = width() / dur;
+    }
 }
 
 double SyncGroupView::snapToGrid(double sec) const {

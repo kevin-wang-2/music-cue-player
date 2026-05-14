@@ -154,6 +154,13 @@ void PeakRegistry::shutdown() {
     for (auto& t : m_workers)
         if (t.joinable()) t.join();
     m_workers.clear();
+
+    // Workers are stopped; release peak data now rather than at static destruction.
+    // Clears up to 1 GB of float vectors before any other statics are torn down.
+    m_data.clear();
+    m_lruList.clear();
+    m_lruIter.clear();
+    m_memUsed = 0;
 }
 
 // ─── LRU helpers (all called under m_mutex) ───────────────────────────────────
@@ -161,10 +168,12 @@ void PeakRegistry::shutdown() {
 size_t PeakRegistry::peakDataMemBytes(const PeakData& pd) {
     size_t n = 0;
     for (int c = 0; c < 2; ++c) {
-        n += pd.minPk[c].capacity()  * sizeof(float);
-        n += pd.maxPk[c].capacity()  * sizeof(float);
-        n += pd.lodMin[c].capacity() * sizeof(float);
-        n += pd.lodMax[c].capacity() * sizeof(float);
+        n += pd.minPk[c].capacity() * sizeof(float);
+        n += pd.maxPk[c].capacity() * sizeof(float);
+        for (int k = 0; k < kPeakNumLOD; ++k) {
+            n += pd.lodMin[c][k].capacity() * sizeof(float);
+            n += pd.lodMax[c][k].capacity() * sizeof(float);
+        }
     }
     return n;
 }
@@ -287,7 +296,8 @@ void PeakRegistry::scanFile(const std::string& path, const std::shared_ptr<PeakD
     constexpr float kMax    = std::numeric_limits<float>::max();
     const bool      resuming = pd->metadataReady.load(std::memory_order_acquire);
 
-    int totalBuckets, lodFactor, fileCh;
+    int totalBuckets, fileCh;
+    int lodFactor[kPeakNumLOD];
 
     if (!resuming) {
         const int     fc     = dec->nativeChannels();
@@ -296,27 +306,34 @@ void PeakRegistry::scanFile(const std::string& path, const std::shared_ptr<PeakD
         if (fc <= 0 || sr <= 0 || frames <= 0) return;
 
         totalBuckets = std::max(1, static_cast<int>(frames / kPeakSamplesPerBucket));
-        lodFactor    = std::max(1, totalBuckets / kPeakLODSize);
         fileCh       = fc;
+
+        // Ceiling division so every bucket maps to a valid LOD entry
+        for (int k = 0; k < kPeakNumLOD; ++k)
+            lodFactor[k] = std::max(1, (totalBuckets + kPeakLODSizes[k] - 1) / kPeakLODSizes[k]);
 
         pd->fileDur      = static_cast<double>(frames) / sr;
         pd->fileCh       = fc;
         pd->totalBuckets = totalBuckets;
-        pd->lodFactor    = lodFactor;
+        for (int k = 0; k < kPeakNumLOD; ++k)
+            pd->lodFactor[k] = lodFactor[k];
 
         for (int c = 0; c < 2; ++c) {
             pd->minPk[c].assign(static_cast<size_t>(totalBuckets),  kMax);
             pd->maxPk[c].assign(static_cast<size_t>(totalBuckets), -kMax);
-            pd->lodMin[c].assign(kPeakLODSize,  kMax);
-            pd->lodMax[c].assign(kPeakLODSize, -kMax);
+            for (int k = 0; k < kPeakNumLOD; ++k) {
+                pd->lodMin[c][k].assign(kPeakLODSizes[k],  kMax);
+                pd->lodMax[c][k].assign(kPeakLODSizes[k], -kMax);
+            }
         }
 
         pd->metadataReady.store(true, std::memory_order_release);
         notifySubscribers(path);
     } else {
         totalBuckets = pd->totalBuckets;
-        lodFactor    = pd->lodFactor;
         fileCh       = pd->fileCh;
+        for (int k = 0; k < kPeakNumLOD; ++k)
+            lodFactor[k] = pd->lodFactor[k];
     }
 
     const int dispCh = std::min(fileCh, 2);
@@ -327,12 +344,15 @@ void PeakRegistry::scanFile(const std::string& path, const std::shared_ptr<PeakD
         if (!dec->seekToFrame(static_cast<int64_t>(bi) * kPeakSamplesPerBucket)) {
             bi = 0;
             pd->nFilled.store(0, std::memory_order_release);
-            pd->nFilledLOD.store(0, std::memory_order_release);
+            for (int k = 0; k < kPeakNumLOD; ++k)
+                pd->nFilledLOD[k].store(0, std::memory_order_release);
             for (int c = 0; c < 2; ++c) {
                 pd->minPk[c].assign(static_cast<size_t>(totalBuckets),  kMax);
                 pd->maxPk[c].assign(static_cast<size_t>(totalBuckets), -kMax);
-                pd->lodMin[c].assign(kPeakLODSize,  kMax);
-                pd->lodMax[c].assign(kPeakLODSize, -kMax);
+                for (int k = 0; k < kPeakNumLOD; ++k) {
+                    pd->lodMin[c][k].assign(kPeakLODSizes[k],  kMax);
+                    pd->lodMax[c][k].assign(kPeakLODSizes[k], -kMax);
+                }
             }
         }
     }
@@ -364,21 +384,23 @@ void PeakRegistry::scanFile(const std::string& path, const std::shared_ptr<PeakD
             if (++samples == kPeakSamplesPerBucket) {
                 samples = 0;
 
-                const int li = bi / lodFactor;
-                if (li < kPeakLODSize) {
+                // Update all LOD levels for the just-completed bucket
+                for (int k = 0; k < kPeakNumLOD; ++k) {
+                    const int li = bi / lodFactor[k];
                     for (int c = 0; c < dispCh; ++c) {
-                        if (pd->minPk[c][bi] < pd->lodMin[c][li])
-                            pd->lodMin[c][li] = pd->minPk[c][bi];
-                        if (pd->maxPk[c][bi] > pd->lodMax[c][li])
-                            pd->lodMax[c][li] = pd->maxPk[c][bi];
+                        if (pd->minPk[c][bi] < pd->lodMin[c][k][li])
+                            pd->lodMin[c][k][li] = pd->minPk[c][bi];
+                        if (pd->maxPk[c][bi] > pd->lodMax[c][k][li])
+                            pd->lodMax[c][k][li] = pd->maxPk[c][bi];
                     }
                 }
 
                 ++bi;
                 pd->nFilled.store(bi, std::memory_order_release);
 
-                if (bi % lodFactor == 0)
-                    pd->nFilledLOD.store(bi / lodFactor, std::memory_order_release);
+                for (int k = 0; k < kPeakNumLOD; ++k)
+                    if (bi % lodFactor[k] == 0)
+                        pd->nFilledLOD[k].store(bi / lodFactor[k], std::memory_order_release);
 
                 if (m_suspended.load(std::memory_order_acquire)
                         || m_stopping.load(std::memory_order_acquire))
@@ -416,12 +438,14 @@ void PeakRegistry::scanFile(const std::string& path, const std::shared_ptr<PeakD
         for (int i = 0; i < totalBuckets; ++i)
             if (pd->minPk[c][i] > pd->maxPk[c][i])
                 pd->minPk[c][i] = pd->maxPk[c][i] = 0.0f;
-        for (int i = 0; i < kPeakLODSize; ++i)
-            if (pd->lodMin[c][i] > pd->lodMax[c][i])
-                pd->lodMin[c][i] = pd->lodMax[c][i] = 0.0f;
+        for (int k = 0; k < kPeakNumLOD; ++k)
+            for (int i = 0; i < kPeakLODSizes[k]; ++i)
+                if (pd->lodMin[c][k][i] > pd->lodMax[c][k][i])
+                    pd->lodMin[c][k][i] = pd->lodMax[c][k][i] = 0.0f;
     }
 
-    pd->nFilledLOD.store(kPeakLODSize, std::memory_order_release);
+    for (int k = 0; k < kPeakNumLOD; ++k)
+        pd->nFilledLOD[k].store(kPeakLODSizes[k], std::memory_order_release);
     pd->status.store(ScanStatus::Complete, std::memory_order_release);
     notifySubscribers(path);
 }

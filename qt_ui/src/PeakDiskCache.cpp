@@ -47,7 +47,6 @@ static bool writeImpl(FILE* f, int64_t mtime,
                       const std::string& name, const PeakData& pd) {
     const int dispCh  = std::min(pd.fileCh, 2);
     const int nFull   = pd.totalBuckets;
-    const int nLod    = kPeakLODSize;
     const uint32_t nl = static_cast<uint32_t>(name.size());
 
     auto wb = [f](const void* p, size_t n) { return fwrite(p, 1, n, f) == n; };
@@ -57,29 +56,30 @@ static bool writeImpl(FILE* f, int64_t mtime,
     auto wi64 = [&](int64_t  v) { return wb(&v, 8); };
     auto wd64 = [&](double   v) { return wb(&v, 8); };
 
-    return wb("MPKC", 4)
-        && wu16(1)          // version
-        && wu16(0)          // flags
-        && wi64(mtime)
-        && wu32(nl)
-        && wb(name.data(), nl)
-        && wd64(pd.fileDur)
-        && wi32(pd.fileCh)
-        && wi32(nFull)
-        && wi32(nLod)
-        && wi32(dispCh)     // nChStored
-        && [&]() {
-               for (int c = 0; c < dispCh; ++c) {
-                   if (!wi32(c)    || !wi32(nFull)
-                   || !wb(pd.minPk[c].data(),  nFull * sizeof(float))
-                   || !wb(pd.maxPk[c].data(),  nFull * sizeof(float))
-                   || !wi32(nLod)
-                   || !wb(pd.lodMin[c].data(), nLod  * sizeof(float))
-                   || !wb(pd.lodMax[c].data(), nLod  * sizeof(float)))
-                       return false;
-               }
-               return true;
-           }();
+    if (!wb("MPKC", 4)) return false;
+    if (!wu16(2)) return false;          // version 2
+    if (!wu16(0)) return false;          // flags
+    if (!wi64(mtime)) return false;
+    if (!wu32(nl)) return false;
+    if (!wb(name.data(), nl)) return false;
+    if (!wd64(pd.fileDur)) return false;
+    if (!wi32(pd.fileCh)) return false;
+    if (!wi32(nFull)) return false;
+    if (!wi32(kPeakNumLOD)) return false;               // nLODLevels
+    for (int k = 0; k < kPeakNumLOD; ++k)
+        if (!wi32(kPeakLODSizes[k])) return false;      // lodSizes[]
+    if (!wi32(dispCh)) return false;                     // nChStored
+    for (int c = 0; c < dispCh; ++c) {
+        if (!wi32(c) || !wi32(nFull)) return false;
+        if (!wb(pd.minPk[c].data(), nFull * sizeof(float))) return false;
+        if (!wb(pd.maxPk[c].data(), nFull * sizeof(float))) return false;
+        for (int k = 0; k < kPeakNumLOD; ++k) {
+            if (!wi32(kPeakLODSizes[k])) return false;
+            if (!wb(pd.lodMin[c][k].data(), kPeakLODSizes[k] * sizeof(float))) return false;
+            if (!wb(pd.lodMax[c][k].data(), kPeakLODSizes[k] * sizeof(float))) return false;
+        }
+    }
+    return true;
 }
 
 } // namespace
@@ -134,7 +134,7 @@ bool read(const std::string& audioPath, int64_t mtime, PeakData& pd) {
     char magic[4];
     uint16_t version, flags;
     if (!rb(magic, 4) || memcmp(magic, "MPKC", 4) != 0) return fail();
-    if (!ru16(version) || version != 1) return fail();
+    if (!ru16(version) || version != 2) return fail();
     if (!ru16(flags)) return fail();
 
     // mtime check
@@ -150,44 +150,55 @@ bool read(const std::string& audioPath, int64_t mtime, PeakData& pd) {
 
     // Metadata
     double  fileDur;
-    int32_t fileCh, totalBuckets, lodSize, nChStored;
-    if (!rd64(fileDur))                              return fail();
-    if (!ri32(fileCh))                               return fail();
-    if (!ri32(totalBuckets) || totalBuckets <= 0)    return fail();
-    if (!ri32(lodSize) || lodSize != kPeakLODSize)   return fail();
+    int32_t fileCh, totalBuckets, nLODLevels, nChStored;
+    if (!rd64(fileDur))                                  return fail();
+    if (!ri32(fileCh))                                   return fail();
+    if (!ri32(totalBuckets) || totalBuckets <= 0)        return fail();
+    if (!ri32(nLODLevels) || nLODLevels != kPeakNumLOD) return fail();
+    int32_t storedLodSizes[kPeakNumLOD];
+    for (int k = 0; k < kPeakNumLOD; ++k) {
+        if (!ri32(storedLodSizes[k]) || storedLodSizes[k] != kPeakLODSizes[k]) return fail();
+    }
     if (!ri32(nChStored) || nChStored < 1 || nChStored > 2) return fail();
 
     pd.fileDur      = fileDur;
     pd.fileCh       = fileCh;
     pd.totalBuckets = totalBuckets;
-    pd.lodFactor    = std::max(1, totalBuckets / kPeakLODSize);
+    for (int k = 0; k < kPeakNumLOD; ++k)
+        pd.lodFactor[k] = std::max(1, (totalBuckets + kPeakLODSizes[k] - 1) / kPeakLODSizes[k]);
 
     // Allocate all channels zeroed; channel blocks below fill in stored ones.
     for (int c = 0; c < 2; ++c) {
         pd.minPk[c].assign(totalBuckets, 0.0f);
         pd.maxPk[c].assign(totalBuckets, 0.0f);
-        pd.lodMin[c].assign(kPeakLODSize, 0.0f);
-        pd.lodMax[c].assign(kPeakLODSize, 0.0f);
+        for (int k = 0; k < kPeakNumLOD; ++k) {
+            pd.lodMin[c][k].assign(kPeakLODSizes[k], 0.0f);
+            pd.lodMax[c][k].assign(kPeakLODSizes[k], 0.0f);
+        }
     }
 
     // Per-channel blocks
     for (int i = 0; i < nChStored; ++i) {
-        int32_t chIdx, nFull, nLod;
+        int32_t chIdx, nFull;
         if (!ri32(chIdx) || chIdx < 0 || chIdx > 1) return fail();
         if (!ri32(nFull) || nFull != totalBuckets)   return fail();
         if (!rb(pd.minPk[chIdx].data(), nFull * sizeof(float))) return fail();
         if (!rb(pd.maxPk[chIdx].data(), nFull * sizeof(float))) return fail();
-        if (!ri32(nLod) || nLod != kPeakLODSize)     return fail();
-        if (!rb(pd.lodMin[chIdx].data(), nLod * sizeof(float))) return fail();
-        if (!rb(pd.lodMax[chIdx].data(), nLod * sizeof(float))) return fail();
+        for (int k = 0; k < kPeakNumLOD; ++k) {
+            int32_t nLod;
+            if (!ri32(nLod) || nLod != kPeakLODSizes[k]) return fail();
+            if (!rb(pd.lodMin[chIdx][k].data(), nLod * sizeof(float))) return fail();
+            if (!rb(pd.lodMax[chIdx][k].data(), nLod * sizeof(float))) return fail();
+        }
     }
 
     fclose(f);
 
     // Publish atomics in acquire/release order expected by renderers.
-    pd.metadataReady.store(true,         std::memory_order_release);
-    pd.nFilledLOD.store(kPeakLODSize,    std::memory_order_release);
-    pd.nFilled.store(totalBuckets,       std::memory_order_release);
+    pd.metadataReady.store(true, std::memory_order_release);
+    for (int k = 0; k < kPeakNumLOD; ++k)
+        pd.nFilledLOD[k].store(kPeakLODSizes[k], std::memory_order_release);
+    pd.nFilled.store(totalBuckets, std::memory_order_release);
     return true;
 }
 

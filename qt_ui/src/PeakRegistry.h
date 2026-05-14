@@ -18,8 +18,9 @@
 
 // ─── constants ────────────────────────────────────────────────────────────────
 
-static constexpr int kPeakSamplesPerBucket = 256;   // full-res: 256 audio samples → 1 bucket
-static constexpr int kPeakLODSize          = 1024;  // coarse LOD: fixed 1024 entries per file
+static constexpr int kPeakSamplesPerBucket           = 256;  // full-res: 256 audio samples → 1 bucket
+static constexpr int kPeakNumLOD                     = 3;    // number of LOD levels
+static constexpr int kPeakLODSizes[kPeakNumLOD]      = {16384, 4096, 1024};  // fine → coarse
 
 // ─── ScanStatus ───────────────────────────────────────────────────────────────
 
@@ -35,18 +36,27 @@ enum class ScanStatus : uint8_t {
 // Worker writes sequentially; renderer reads using release/acquire on nFilled/nFilledLOD.
 //
 // Memory ordering contract:
-//   Worker: write fileDur/fileCh/totalBuckets/lodFactor + allocate vectors,
+//   Worker: write fileDur/fileCh/totalBuckets/lodFactor[] + allocate vectors,
 //           then metadataReady.store(true, release).
 //   Worker: write minPk/maxPk[0..bi), then nFilled.store(bi, release).
-//   Worker: write lodMin/lodMax[0..li), then nFilledLOD.store(li, release).
+//   Worker: write lodMin/lodMax[][k][0..li), then nFilledLOD[k].store(li, release).
 //   Renderer: load metadataReady(acquire) before reading metadata fields.
 //             load nFilled(acquire) before reading minPk/maxPk[0..nFilled).
-//             load nFilledLOD(acquire) before reading lodMin/lodMax[0..nFilledLOD).
+//             load nFilledLOD[k](acquire) before reading lodMin/lodMax[][k][0..nFilledLOD[k]).
 
 struct PeakData {
+    PeakData() noexcept {
+        for (int k = 0; k < kPeakNumLOD; ++k) {
+            lodFactor[k] = 1;
+            nFilledLOD[k].store(0, std::memory_order_relaxed);
+        }
+    }
+    PeakData(const PeakData&) = delete;
+    PeakData& operator=(const PeakData&) = delete;
+
     // Immutable once metadataReady is set (safe to read after acquire-load on metadataReady)
     int    totalBuckets{0};
-    int    lodFactor{1};    // totalBuckets / kPeakLODSize
+    int    lodFactor[kPeakNumLOD];  // totalBuckets / kPeakLODSizes[k] (ceiling div), init in ctor
     double fileDur{0.0};
     int    fileCh{0};
 
@@ -54,55 +64,117 @@ struct PeakData {
     std::vector<float> minPk[2];
     std::vector<float> maxPk[2];
 
-    // Coarse LOD arrays [kPeakLODSize] — written by worker, published via nFilledLOD
-    std::vector<float> lodMin[2];
-    std::vector<float> lodMax[2];
+    // Multi-level LOD arrays [channel][lod_level][entries] — fine→coarse
+    // Level sizes: kPeakLODSizes[0]=16384, [1]=4096, [2]=1024
+    std::vector<float> lodMin[2][kPeakNumLOD];
+    std::vector<float> lodMax[2][kPeakNumLOD];
 
-    std::atomic<int>        nFilled{0};           // full-res buckets ready (release/acquire)
-    std::atomic<int>        nFilledLOD{0};        // LOD entries ready (release/acquire)
-    std::atomic<bool>       metadataReady{false}; // set after alloc + metadata written
+    std::atomic<int>        nFilled{0};              // full-res buckets ready (release/acquire)
+    std::atomic<int>        nFilledLOD[kPeakNumLOD]; // LOD entries ready per level (init in ctor)
+    std::atomic<bool>       metadataReady{false};     // set after alloc + metadata written
     std::atomic<ScanStatus> status{ScanStatus::Pending};
 };
 
 // ─── samplePeaks ──────────────────────────────────────────────────────────────
 // Shared rendering helper used by all waveform views.
-// nFull / nLOD must be acquired once per paint (acquire-load), then passed here.
+// nFull must be acquired once per paint (acquire-load on nFilled) and passed here.
+// LOD level nFilledLOD[k] is acquired internally for each qualifying level.
 // Returns false if tL is beyond loaded data (stop drawing).
 inline bool samplePeaks(const PeakData& pd, int ch,
                          double tL, double tR,
-                         int nFull, int nLOD,
+                         int nFull,
                          float& outMin, float& outMax)
 {
     if (pd.fileDur <= 0.0 || pd.totalBuckets <= 0 || nFull <= 0) return false;
 
     const double invDur = 1.0 / pd.fileDur;
     const int bL = static_cast<int>(tL * invDur * pd.totalBuckets);
-    if (bL >= nFull) return false;                              // not loaded yet → stop
+    if (bL >= nFull) return false;  // not loaded yet → stop
     const int bR = static_cast<int>(tR * invDur * pd.totalBuckets);
-
     const int range = bR - bL;
 
-    if (range >= pd.lodFactor && nLOD > 0) {
-        // Use coarse LOD
-        const int lL = std::clamp(static_cast<int>(tL * invDur * kPeakLODSize), 0, nLOD - 1);
-        const int lR = std::clamp(static_cast<int>(tR * invDur * kPeakLODSize), 0, nLOD - 1);
-        outMin = pd.lodMin[ch][lL];
-        outMax = pd.lodMax[ch][lL];
+    // Try LOD levels fine → coarse; use finest qualifying level.
+    // A level qualifies when range * 4 >= lodFactor (1 LOD entry spans ≤ 4 screen pixels).
+    for (int k = 0; k < kPeakNumLOD; ++k) {
+        if (range < pd.lodFactor[k]) continue;
+        const int nLODk = pd.nFilledLOD[k].load(std::memory_order_acquire);
+        if (nLODk <= 0) continue;
+        // Map time → LOD entry using the same formula as the scanner:
+        //   li = bi / lodFactor[k],  bi = t/fileDur * totalBuckets
+        // so  li = t/fileDur * totalBuckets / lodFactor[k]
+        const double lodScale = static_cast<double>(pd.totalBuckets) / pd.lodFactor[k];
+        const int lL = std::clamp(static_cast<int>(tL * invDur * lodScale), 0, nLODk - 1);
+        const int lR = std::clamp(static_cast<int>(tR * invDur * lodScale), 0, nLODk - 1);
+        outMin = pd.lodMin[ch][k][lL];
+        outMax = pd.lodMax[ch][k][lL];
         for (int l = lL + 1; l <= lR; ++l) {
-            outMin = std::min(outMin, pd.lodMin[ch][l]);
-            outMax = std::max(outMax, pd.lodMax[ch][l]);
+            outMin = std::min(outMin, pd.lodMin[ch][k][l]);
+            outMax = std::max(outMax, pd.lodMax[ch][k][l]);
         }
-    } else {
-        // Use full-res
-        const int bLc = std::clamp(bL, 0, nFull - 1);
-        const int bRc = std::clamp(bR, 0, nFull - 1);
-        outMin = pd.minPk[ch][bLc];
-        outMax = pd.maxPk[ch][bLc];
-        for (int b = bLc + 1; b <= bRc; ++b) {
-            outMin = std::min(outMin, pd.minPk[ch][b]);
-            outMax = std::max(outMax, pd.maxPk[ch][b]);
-        }
+        return true;
     }
+
+    // Full-res fallback
+    const int bLc = std::clamp(bL, 0, nFull - 1);
+    const int bRc = std::clamp(bR, 0, nFull - 1);
+    outMin = pd.minPk[ch][bLc];
+    outMax = pd.maxPk[ch][bLc];
+    for (int b = bLc + 1; b <= bRc; ++b) {
+        outMin = std::min(outMin, pd.minPk[ch][b]);
+        outMax = std::max(outMax, pd.maxPk[ch][b]);
+    }
+    return true;
+}
+
+// ─── samplePeaksDbg ───────────────────────────────────────────────────────────
+// Debug variant: same as samplePeaks but also increments per-call counters and
+// records which LOD level was used (-1 = full-res, 0..kPeakNumLOD-1 = LOD level).
+inline bool samplePeaksDbg(const PeakData& pd, int ch,
+                             double tL, double tR,
+                             int nFull,
+                             float& outMin, float& outMax,
+                             int& lastLODLevel,
+                             int& lodCalls, int& lodBuckets,
+                             int& fullCalls, int& fullBuckets)
+{
+    if (pd.fileDur <= 0.0 || pd.totalBuckets <= 0 || nFull <= 0) return false;
+
+    const double invDur = 1.0 / pd.fileDur;
+    const int bL = static_cast<int>(tL * invDur * pd.totalBuckets);
+    if (bL >= nFull) return false;
+    const int bR = static_cast<int>(tR * invDur * pd.totalBuckets);
+    const int range = bR - bL;
+
+    for (int k = 0; k < kPeakNumLOD; ++k) {
+        if (range < pd.lodFactor[k]) continue;
+        const int nLODk = pd.nFilledLOD[k].load(std::memory_order_acquire);
+        if (nLODk <= 0) continue;
+        const double lodScale = static_cast<double>(pd.totalBuckets) / pd.lodFactor[k];
+        const int lL = std::clamp(static_cast<int>(tL * invDur * lodScale), 0, nLODk - 1);
+        const int lR = std::clamp(static_cast<int>(tR * invDur * lodScale), 0, nLODk - 1);
+        outMin = pd.lodMin[ch][k][lL];
+        outMax = pd.lodMax[ch][k][lL];
+        for (int l = lL + 1; l <= lR; ++l) {
+            outMin = std::min(outMin, pd.lodMin[ch][k][l]);
+            outMax = std::max(outMax, pd.lodMax[ch][k][l]);
+        }
+        lastLODLevel = k;
+        ++lodCalls;
+        lodBuckets += lR - lL + 1;
+        return true;
+    }
+
+    const int bLc = std::clamp(bL, 0, nFull - 1);
+    const int bRc = std::clamp(bR, 0, nFull - 1);
+    outMin = pd.minPk[ch][bLc];
+    outMax = pd.maxPk[ch][bLc];
+    for (int b = bLc + 1; b <= bRc; ++b) {
+        outMin = std::min(outMin, pd.minPk[ch][b]);
+        outMax = std::max(outMax, pd.maxPk[ch][b]);
+    }
+    lastLODLevel = -1;
+    ++fullCalls;
+    fullBuckets += bRc - bLc + 1;
     return true;
 }
 

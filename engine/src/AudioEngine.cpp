@@ -601,9 +601,12 @@ static int openOneStream(AudioEngineImpl* impl,
 // ---------------------------------------------------------------------------
 static void closeAllStreams(AudioEngineImpl* impl) {
     // Stop and close all PA streams first so callbacks are no longer running.
+    // Pa_StopStream waits for the current callback invocation to complete before
+    // stopping, which avoids the ABBA deadlock between the PortAudio stream mutex
+    // and the CoreAudio HAL mutex (HALB_Mutex) on macOS.
     for (auto& ds : impl->streams) {
         if (ds->stream) {
-            Pa_AbortStream(ds->stream);  // immediate stop; no drain wait
+            Pa_StopStream(ds->stream);
             Pa_CloseStream(ds->stream);
             ds->stream = nullptr;
         }
