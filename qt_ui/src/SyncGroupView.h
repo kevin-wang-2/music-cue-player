@@ -1,7 +1,10 @@
 #pragma once
 
 #include "engine/MusicContext.h"
+#include "PeakRegistry.h"
+#include "ViewportSampler.h"
 #include <QWidget>
+#include <memory>
 #include <string>
 #include <unordered_map>
 #include <vector>
@@ -18,6 +21,7 @@ class SyncGroupView : public QWidget {
     Q_OBJECT
 public:
     explicit SyncGroupView(AppModel* model, QWidget* parent = nullptr);
+    ~SyncGroupView() override;
 
     void setGroupCueIndex(int groupFlatIdx);
     void clearSelMarker();
@@ -52,16 +56,8 @@ private:
         std::string audioPath;
     };
 
-    struct PeakCache {
-        std::vector<float> minPk[2];
-        std::vector<float> maxPk[2];
-        double fileDur{0.0};
-        int    fileCh{0};
-        bool   valid{false};
-    };
-
     void   rebuildBlocks();
-    void   buildPeaksAsync(const std::string& path);
+    void   requestPeaks(const std::string& path);
     double viewDuration() const;
     double pixToSec(double px) const;
     int    secToPix(double sec) const;
@@ -82,7 +78,9 @@ private:
     int       m_groupIdx{-1};
 
     std::vector<ChildBlock> m_blocks;
-    std::unordered_map<std::string, PeakCache> m_peakCache;
+    std::unordered_map<std::string, std::shared_ptr<PeakData>>      m_peakData;
+    std::unordered_map<std::string, int>                             m_subTokens;
+    std::unordered_map<std::string, std::unique_ptr<ViewportSampler>> m_samplers;
 
     double m_viewStart{0.0};
     double m_pixPerSec{80.0};

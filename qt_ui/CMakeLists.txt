@@ -49,6 +49,12 @@ set(QT_UI_SOURCES
     src/SettingsDialog.cpp
     src/FaderWidget.h
     src/FaderWidget.cpp
+    src/PeakRegistry.h
+    src/PeakRegistry.cpp
+    src/PeakDiskCache.h
+    src/PeakDiskCache.cpp
+    src/ViewportSampler.h
+    src/ViewportSampler.cpp
     src/WaveformView.h
     src/WaveformView.cpp
     src/CueTableView.h

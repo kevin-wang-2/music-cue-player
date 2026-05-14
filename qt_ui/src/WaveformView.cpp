@@ -13,7 +13,6 @@
 #include <algorithm>
 #include <cmath>
 #include <cstdio>
-#include <thread>
 
 WaveformView::WaveformView(AppModel* model, QWidget* parent)
     : QWidget(parent), m_model(model)
@@ -22,6 +21,10 @@ WaveformView::WaveformView(AppModel* model, QWidget* parent)
     setSizePolicy(QSizePolicy::Expanding, QSizePolicy::Expanding);
     setMinimumHeight(120);
     setFocusPolicy(Qt::ClickFocus);
+}
+
+WaveformView::~WaveformView() {
+    PeakRegistry::instance().unsubscribe(m_subToken);
 }
 
 void WaveformView::setMusicContext(const mcp::MusicContext* mc, double cueStartTimeSec) {
@@ -45,7 +48,10 @@ void WaveformView::setCueIndex(int idx) {
     m_cueIdx        = idx;
     m_armSec        = -1.0;
     m_editLoopSlice = -1;
-    m_peaks.valid   = false;
+    PeakRegistry::instance().unsubscribe(m_subToken);
+    m_subToken = 0;
+    m_peakData.reset();
+    m_peakPath.clear();
 
     // Restore saved zoom for the new cue, or mark for fit-to-file on load.
     auto it = m_zoomState.find(idx);
@@ -114,9 +120,9 @@ void WaveformView::paintEvent(QPaintEvent*) {
     const int waveBot = waveTop + waveH;
 
     // Ensure view bounds are sensible.
-    // fileDur=0 while peaks are still loading — don't commit m_viewDur to a
-    // placeholder value; the async callback will set it once data arrives.
-    const double fileDur = m_peaks.valid ? m_peaks.fileDur : 0.0;
+    const bool   haveMeta = m_peakData &&
+        m_peakData->metadataReady.load(std::memory_order_acquire);
+    const double fileDur  = haveMeta ? m_peakData->fileDur : 0.0;
     if (fileDur > 0.0) {
         if (m_viewDur <= 0.0 || m_viewDur > fileDur)
             m_viewDur = fileDur;
@@ -150,28 +156,32 @@ void WaveformView::paintEvent(QPaintEvent*) {
     }
 
     // Waveform
-    if (m_peaks.valid && fileDur > 0.0) {
-        const int nBuckets = (int)m_peaks.minPk[0].size();
-        const int dispCh   = std::min(m_peaks.fileCh, 2);
+    if (haveMeta && fileDur > 0.0) {
+        const int nFull  = m_peakData->nFilled.load(std::memory_order_acquire);
+        const int nLOD   = m_peakData->nFilledLOD.load(std::memory_order_acquire);
+        const int dispCh = std::min(m_peakData->fileCh, 2);
+
+        // Sample-level zoom: when fewer than one peak bucket maps to one pixel.
+        const bool useSamples = ViewportSampler::needsSampleZoom(
+            m_viewDur, W, m_peakData->totalBuckets, fileDur);
+        if (useSamples)
+            m_sampler.request(m_peakPath, m_viewStart, m_viewStart + m_viewDur,
+                              this, [this]{ update(); });
+        auto sf = useSamples ? m_sampler.current() : nullptr;
+
         for (int ch = 0; ch < dispCh; ++ch) {
             const float chTop = waveTop + ch * (waveH / dispCh);
             const float chBot = chTop + waveH / dispCh;
             const float chMid = (chTop + chBot) * 0.5f;
             const float half  = (chBot - chTop) * 0.48f;
-            // Centre line
             p.setPen(QColor(255, 255, 255, 20));
             p.drawLine(0, (int)chMid, W, (int)chMid);
             for (int px = 0; px < W; ++px) {
                 const double tL = m_viewStart + px * m_viewDur / W;
                 const double tR = m_viewStart + (px + 1) * m_viewDur / W;
-                const int bL = std::clamp((int)(tL / fileDur * nBuckets), 0, nBuckets - 1);
-                const int bR = std::clamp((int)(tR / fileDur * nBuckets), 0, nBuckets - 1);
-                float mn = m_peaks.minPk[ch][bL];
-                float mx = m_peaks.maxPk[ch][bL];
-                for (int b = bL + 1; b <= bR; ++b) {
-                    mn = std::min(mn, m_peaks.minPk[ch][b]);
-                    mx = std::max(mx, m_peaks.maxPk[ch][b]);
-                }
+                float mn, mx;
+                bool ok = sf && sf->path == m_peakPath && sampleFrame(*sf, ch, tL, tR, mn, mx);
+                if (!ok && !samplePeaks(*m_peakData, ch, tL, tR, nFull, nLOD, mn, mx)) break;
                 const double tMid = (tL + tR) * 0.5;
                 const bool active = (tMid >= startSec && tMid <= endSec);
                 const QColor wfCol = active
@@ -362,7 +372,8 @@ void WaveformView::mousePressEvent(QMouseEvent* ev) {
     const mcp::Cue* c = (m_cueIdx >= 0) ? m_model->cues().cueAt(m_cueIdx) : nullptr;
     if (!c) return;
 
-    const double fileDur = m_peaks.valid ? m_peaks.fileDur : 1.0;
+    const bool   haveMeta = m_peakData && m_peakData->metadataReady.load(std::memory_order_acquire);
+    const double fileDur  = haveMeta ? m_peakData->fileDur : 1.0;
     const double startSec = c->startTime;
     const double endSec   = (c->duration > 0.0)
         ? c->startTime + c->duration : fileDur;
@@ -428,7 +439,8 @@ void WaveformView::mouseMoveEvent(QMouseEvent* ev) {
     const mcp::Cue* c = (m_cueIdx >= 0) ? m_model->cues().cueAt(m_cueIdx) : nullptr;
     if (!c) return;
 
-    const double fileDur = m_peaks.valid ? m_peaks.fileDur : 1.0;
+    const bool   haveMeta = m_peakData && m_peakData->metadataReady.load(std::memory_order_acquire);
+    const double fileDur  = haveMeta ? m_peakData->fileDur : 1.0;
     const double startSec = c->startTime;
     const double endSec   = (c->duration > 0.0)
         ? c->startTime + c->duration : fileDur;
@@ -456,9 +468,8 @@ void WaveformView::mouseMoveEvent(QMouseEvent* ev) {
         if (std::abs(dx) > 2.0) m_rightDragging = true;
         if (m_rightDragging) {
             const double shift = -dx / width() * m_viewDur;
-            const double fd = m_peaks.valid ? m_peaks.fileDur : 1.0;
             m_viewStart = std::clamp(m_panViewStart + shift,
-                                     0.0, std::max(0.0, fd - m_viewDur));
+                                     0.0, std::max(0.0, fileDur - m_viewDur));
             update();
         }
     }
@@ -486,7 +497,8 @@ void WaveformView::mouseDoubleClickEvent(QMouseEvent* ev) {
     const mcp::Cue* c = (m_cueIdx >= 0) ? m_model->cues().cueAt(m_cueIdx) : nullptr;
     if (!c) return;
 
-    const double fileDur  = m_peaks.valid ? m_peaks.fileDur : 1.0;
+    const bool   haveMeta = m_peakData && m_peakData->metadataReady.load(std::memory_order_acquire);
+    const double fileDur  = haveMeta ? m_peakData->fileDur : 1.0;
     const double startSec = c->startTime;
     const double endSec   = (c->duration > 0.0)
         ? c->startTime + c->duration : fileDur;
@@ -516,7 +528,8 @@ void WaveformView::mouseDoubleClickEvent(QMouseEvent* ev) {
 }
 
 void WaveformView::wheelEvent(QWheelEvent* ev) {
-    const double fd = m_peaks.valid ? m_peaks.fileDur : 1.0;
+    const bool   haveMeta = m_peakData && m_peakData->metadataReady.load(std::memory_order_acquire);
+    const double fd       = haveMeta ? m_peakData->fileDur : 1.0;
     if (ev->modifiers() & Qt::ControlModifier) {
         // Cmd/Ctrl+scroll → zoom around mouse pivot
         const double steps  = ev->angleDelta().y() / 120.0;
@@ -633,7 +646,8 @@ void WaveformView::contextMenuEvent(QContextMenuEvent* ev) {
     }
 
     menu.addAction("Fit view", [this]() {
-        const double fd = m_peaks.valid ? m_peaks.fileDur : 1.0;
+        const bool   hm = m_peakData && m_peakData->metadataReady.load(std::memory_order_acquire);
+        const double fd = hm ? m_peakData->fileDur : 1.0;
         m_viewStart = 0.0;
         m_viewDur   = std::max(fd, 0.01);
         update();
@@ -751,28 +765,12 @@ void WaveformView::commitLoopEdit() {
 }
 
 void WaveformView::rebuildPeaks(const std::string& path) {
-    if (m_peaks.valid && m_peaks.path == path) return;
-    m_peaks = {};       // invalidate immediately so paintEvent draws placeholder
-    launchPeakBuild(path);
-}
-
-void WaveformView::launchPeakBuild(const std::string& path) {
-    const int gen = ++m_buildGeneration;
-    std::thread([this, path, gen]() {
-        PeakCache pc;
-        pc.path  = path;
-        pc.valid = mcp::buildWaveformPeaks(path, 2000,
-            pc.minPk, pc.maxPk, pc.fileDur, pc.fileCh);
-        // Deliver result to the main thread.
-        // Qt discards the invocation safely if 'this' has been destroyed.
-        QMetaObject::invokeMethod(this, [this, pc = std::move(pc), gen]() mutable {
-            if (gen == m_buildGeneration) {
-                m_peaks = std::move(pc);
-                // Fit to file if no saved zoom was restored.
-                if (m_viewDur <= 0.0 && m_peaks.valid)
-                    m_viewDur = m_peaks.fileDur;
-                update();
-            }
-        }, Qt::QueuedConnection);
-    }).detach();
+    m_peakPath = path;
+    m_peakData = PeakRegistry::instance().requestScan(path);
+    m_subToken = PeakRegistry::instance().subscribe(path, this, [this]() {
+        if (m_viewDur <= 0.0 && m_peakData &&
+            m_peakData->metadataReady.load(std::memory_order_acquire))
+            m_viewDur = m_peakData->fileDur;
+        update();
+    });
 }

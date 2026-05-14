@@ -1,10 +1,12 @@
 #pragma once
 
-#include "engine/AudioDecoder.h"
 #include "engine/Cue.h"
 #include "engine/MusicContext.h"
+#include "PeakRegistry.h"
+#include "ViewportSampler.h"
 
 #include <QWidget>
+#include <memory>
 #include <string>
 #include <unordered_map>
 #include <vector>
@@ -26,6 +28,7 @@ class WaveformView : public QWidget {
     Q_OBJECT
 public:
     explicit WaveformView(AppModel* model, QWidget* parent = nullptr);
+    ~WaveformView() override;
 
     // Call when the selected cue changes (rebuilds cache).
     void setCueIndex(int idx);
@@ -61,7 +64,6 @@ private:
     double xToSec(double x) const;
     QString fmtTick(double s) const;
     void    rebuildPeaks(const std::string& path);
-    void    launchPeakBuild(const std::string& path);
     void    drawLoopCountAt(QPainter&, int sliceIdx, double bL, double bR,
                             float waveBot);
     void    commitDrag();
@@ -73,15 +75,11 @@ private:
     QLineEdit* m_loopEdit{nullptr};   // inline overlay, nullptr when hidden
     int       m_cueIdx{-1};
 
-    // Peak cache
-    struct PeakCache {
-        std::string        path;
-        std::vector<float> minPk[2];
-        std::vector<float> maxPk[2];
-        double             fileDur{0.0};
-        int                fileCh{0};
-        bool               valid{false};
-    } m_peaks;
+    // Peak data (shared with PeakRegistry)
+    std::string               m_peakPath;
+    std::shared_ptr<PeakData> m_peakData;
+    int                       m_subToken{0};
+    ViewportSampler           m_sampler;
 
     // View state
     double m_viewStart{0.0};
@@ -105,9 +103,6 @@ private:
     double m_panViewStart{0.0};
 
     bool m_rightDragging{false};
-
-    // Async peak build — generation counter lets us discard stale results.
-    int  m_buildGeneration{0};
 
     // Per-cue zoom memory: cueIdx → (viewStart, viewDur).
     // Populated when switching away from a cue that has been viewed.

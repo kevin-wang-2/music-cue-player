@@ -34,11 +34,7 @@ public:
 // Produces peaks for up to 2 channels (stereo files → 2 channels; else 1).
 // fileDurationSecs and fileChannels are filled on success.
 // Returns false if the file cannot be opened.
-bool buildWaveformPeaks(const std::string& path,
-                         int numBuckets,
-                         std::vector<float> minPeaks[2],
-                         std::vector<float> maxPeaks[2],
-                         double& fileDurationSecs,
-                         int& fileChannels);
+// samplesPerBucket > 0: density mode — numBuckets is computed as
+//   fileFrames / samplesPerBucket, ignoring the numBuckets argument.
 
 } // namespace mcp

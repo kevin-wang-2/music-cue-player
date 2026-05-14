@@ -1,7 +1,10 @@
 #pragma once
 
 #include "engine/MusicContext.h"
+#include "PeakRegistry.h"
+#include "ViewportSampler.h"
 #include <QWidget>
+#include <memory>
 #include <string>
 #include <unordered_map>
 #include <vector>
@@ -12,6 +15,7 @@ class TimelineGroupView : public QWidget {
     Q_OBJECT
 public:
     explicit TimelineGroupView(AppModel* model, QWidget* parent = nullptr);
+    ~TimelineGroupView() override;
 
     void setGroupCueIndex(int groupFlatIdx);
     void clearArmCursor();
@@ -45,18 +49,10 @@ private:
         std::string audioPath;
     };
 
-    struct PeakCache {
-        std::vector<float> minPk[2];
-        std::vector<float> maxPk[2];
-        double fileDur{0.0};
-        int    fileCh{0};
-        bool   valid{false};
-    };
-
     enum class DragMode { None, Move, TrimLeft, TrimRight };
 
     void   rebuildBlocks();
-    void   buildPeaksAsync(const std::string& path);
+    void   requestPeaks(const std::string& path);
     double pixToSec(int px) const;
     int    secToPix(double sec) const;
     double viewDuration() const;
@@ -96,5 +92,7 @@ private:
     // Snap quantization: 0=none, 1=bar, 2=half, 4=quarter, 8=8th, 16=16th, 32=32nd
     int m_quantSubdiv{0};
 
-    std::unordered_map<std::string, PeakCache> m_peakCache;
+    std::unordered_map<std::string, std::shared_ptr<PeakData>>      m_peakData;
+    std::unordered_map<std::string, int>                             m_subTokens;
+    std::unordered_map<std::string, std::unique_ptr<ViewportSampler>> m_samplers;
 };

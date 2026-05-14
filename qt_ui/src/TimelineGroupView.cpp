@@ -2,11 +2,11 @@
 #include "AppModel.h"
 #include "ShowHelpers.h"
 
-#include "engine/AudioDecoder.h"
 #include "engine/Cue.h"
 
 #include <QContextMenuEvent>
 #include <QMenu>
+#include <QMetaObject>
 #include <QMouseEvent>
 #include <QPainter>
 #include <QPaintEvent>
@@ -14,7 +14,7 @@
 
 #include <algorithm>
 #include <cmath>
-#include <thread>
+#include <unordered_set>
 
 static constexpr double kSnapThreshPx = 8.0;
 static constexpr double kMinViewSec   = 5.0;
@@ -38,6 +38,11 @@ TimelineGroupView::TimelineGroupView(AppModel* model, QWidget* parent)
     setMinimumHeight(kRulerH + kTopPad + kBlockH + 8);
     setMouseTracking(true);
     setStyleSheet("background:#111;");
+}
+
+TimelineGroupView::~TimelineGroupView() {
+    for (auto& [path, token] : m_subTokens)
+        PeakRegistry::instance().unsubscribe(token);
 }
 
 void TimelineGroupView::setMusicContext(const mcp::MusicContext* mc) {
@@ -83,10 +88,20 @@ void TimelineGroupView::setGroupCueIndex(int groupFlatIdx) {
 }
 
 void TimelineGroupView::rebuildBlocks() {
+    for (auto& [path, token] : m_subTokens)
+        PeakRegistry::instance().unsubscribe(token);
+    m_subTokens.clear();
+    m_peakData.clear();
     m_blocks.clear();
-    if (m_groupIdx < 0) return;
+    if (m_groupIdx < 0) {
+        m_samplers.clear();
+        return;
+    }
     const mcp::Cue* group = m_model->cues().cueAt(m_groupIdx);
-    if (!group || group->type != mcp::CueType::Group) return;
+    if (!group || group->type != mcp::CueType::Group) {
+        m_samplers.clear();
+        return;
+    }
 
     for (int i = m_groupIdx + 1; i <= m_groupIdx + group->childCount; ) {
         const mcp::Cue* c = m_model->cues().cueAt(i);
@@ -105,7 +120,7 @@ void TimelineGroupView::rebuildBlocks() {
                                      : (c->cueNumber + (c->name.empty() ? "" : " " + c->name)));
             if (c->type == mcp::CueType::Audio && !c->path.empty()) {
                 b.audioPath = c->path;
-                buildPeaksAsync(c->path);
+                requestPeaks(c->path);
             }
             m_blocks.push_back(b);
             const int cc = (c->type == mcp::CueType::Group) ? c->childCount : 0;
@@ -114,21 +129,27 @@ void TimelineGroupView::rebuildBlocks() {
             ++i;
         }
     }
+
+    // Prune samplers for paths no longer present.
+    std::unordered_set<std::string> activePaths;
+    for (auto& b : m_blocks) if (!b.audioPath.empty()) activePaths.insert(b.audioPath);
+    for (auto it = m_samplers.begin(); it != m_samplers.end(); )
+        it = activePaths.count(it->first) ? std::next(it) : m_samplers.erase(it);
 }
 
-void TimelineGroupView::buildPeaksAsync(const std::string& path) {
-    if (m_peakCache.count(path)) return;
-    m_peakCache[path] = {};
-    std::thread([this, path]() {
-        PeakCache pc;
-        pc.valid = mcp::buildWaveformPeaks(path, 800,
-                                            pc.minPk, pc.maxPk,
-                                            pc.fileDur, pc.fileCh);
-        QMetaObject::invokeMethod(this, [this, path, pc = std::move(pc)]() mutable {
-            m_peakCache[path] = std::move(pc);
-            update();
-        }, Qt::QueuedConnection);
-    }).detach();
+void TimelineGroupView::requestPeaks(const std::string& path) {
+    if (m_peakData.count(path)) return;
+    m_peakData[path] = PeakRegistry::instance().requestScan(path);
+    m_subTokens[path] = PeakRegistry::instance().subscribe(path, this, [this, path]() {
+        const double viewEnd = m_viewStart + viewDuration();
+        for (int i = 0; i < (int)m_blocks.size(); ++i) {
+            const auto& b = m_blocks[i];
+            if (b.audioPath != path) continue;
+            if (b.offset >= viewEnd || b.offset + b.duration <= m_viewStart) continue;
+            const int ly = laneY(i);
+            if (ly + kBlockH > kRulerH && ly < height()) { update(); break; }
+        }
+    });
 }
 
 double TimelineGroupView::viewDuration() const {
@@ -251,24 +272,41 @@ void TimelineGroupView::paintEvent(QPaintEvent*) {
 
         // ── Waveform thumbnail ────────────────────────────────────────────
         if (!b.audioPath.empty()) {
-            auto it = m_peakCache.find(b.audioPath);
-            if (it != m_peakCache.end() && it->second.valid
-                && it->second.fileDur > 0.0 && !it->second.minPk[0].empty()) {
-                const PeakCache& pk = it->second;
-                const int nBuckets  = (int)pk.minPk[0].size();
-                const int waveTop   = ly + 14;   // leave room for label
-                const int waveBot   = ly + kBlockH - 3;
-                const int mid       = (waveTop + waveBot) / 2;
-                const int halfH     = (waveBot - waveTop) / 2;
+            auto it = m_peakData.find(b.audioPath);
+            if (it != m_peakData.end() && it->second &&
+                it->second->metadataReady.load(std::memory_order_acquire) &&
+                it->second->fileDur > 0.0) {
+                const PeakData& pd   = *it->second;
+                const int nFull  = pd.nFilled.load(std::memory_order_acquire);
+                const int nLOD   = pd.nFilledLOD.load(std::memory_order_acquire);
+                const int waveTop = ly + 14;
+                const int waveBot = ly + kBlockH - 3;
+                const int mid     = (waveTop + waveBot) / 2;
+                const int halfH   = (waveBot - waveTop) / 2;
+
+                // Sample-level zoom.
+                const int rawBw = x2 - x1;
+                const bool useSamples = rawBw > 0 && ViewportSampler::needsSampleZoom(
+                    b.duration, rawBw, pd.totalBuckets, pd.fileDur);
+                if (useSamples) {
+                    auto& smp = m_samplers[b.audioPath];
+                    if (!smp) smp = std::make_unique<ViewportSampler>();
+                    const double visibleEnd = m_viewStart + (m_pixPerSec > 0.0 ? (double)width() / m_pixPerSec : 1.0);
+                    const double aTL = b.startTime + std::max(0.0, m_viewStart - b.offset);
+                    const double aTR = b.startTime + std::min(b.duration, visibleEnd - b.offset);
+                    if (aTL < aTR)
+                        smp->request(b.audioPath, aTL, aTR, this, [this]{ update(); });
+                }
+                auto sf = (useSamples && m_samplers.count(b.audioPath))
+                          ? m_samplers.at(b.audioPath)->current() : nullptr;
 
                 p.setPen(QPen(QColor(0xaa, 0xdd, 0xff, 0xb0), 1));
                 for (int px2 = std::max(0, x1); px2 < std::min(W, x1 + bw); ++px2) {
-                    const double t  = b.startTime
-                                    + (double)(px2 - x1) / bw * b.duration;
-                    const int bi = std::clamp(
-                        (int)(t / pk.fileDur * nBuckets), 0, nBuckets - 1);
-                    const float mn = pk.minPk[0][bi];
-                    const float mx = pk.maxPk[0][bi];
+                    const double tL = b.startTime + (double)(px2 - x1) / bw * b.duration;
+                    const double tR = b.startTime + (double)(px2 - x1 + 1) / bw * b.duration;
+                    float mn, mx;
+                    bool ok = sf && sampleFrame(*sf, 0, tL, tR, mn, mx);
+                    if (!ok && !samplePeaks(pd, 0, tL, tR, nFull, nLOD, mn, mx)) break;
                     p.drawLine(px2, std::max(waveTop, mid - (int)(mx * halfH)),
                                px2, std::min(waveBot, mid - (int)(mn * halfH)));
                 }
