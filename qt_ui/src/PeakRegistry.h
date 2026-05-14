@@ -2,6 +2,7 @@
 #include <atomic>
 #include <condition_variable>
 #include <cstdint>
+#include <deque>
 #include <functional>
 #include <limits>
 #include <list>
@@ -114,7 +115,14 @@ public:
     static PeakRegistry& instance();
 
     // Returns (or creates) PeakData for path; enqueues a scan job if new.
+    // Jobs are ordered shortest-first (by file size as a proxy for duration).
     std::shared_ptr<PeakData> requestScan(const std::string& path);
+
+    // Like requestScan but also pushes the job to the front of the LIFO so it
+    // is picked up before anything in the normal priority queue.  Call this from
+    // views that are actively displaying a cue — view activation implies the
+    // user is waiting for this data right now.
+    std::shared_ptr<PeakData> boostScan(const std::string& path);
 
     // Subscribe to progress/completion updates for path.
     // callback is invoked (Qt::QueuedConnection) on context's thread.
@@ -122,6 +130,11 @@ public:
     // Returns a token for unsubscription.
     int subscribe(const std::string& path, QObject* context,
                   std::function<void()> callback);
+
+    // Cancel all queued (Pending) scan jobs and remove their m_data entries.
+    // Call before loading a new project to avoid scanning files from the old
+    // project.  In-flight Scanning jobs complete normally.
+    void cancelPendingScans();
 
     // Remove a subscription (idempotent).
     void unsubscribe(int token);
@@ -180,6 +193,11 @@ private:
     std::list<std::string>                                             m_lruList;
     std::unordered_map<std::string, std::list<std::string>::iterator>  m_lruIter;
     size_t                                                             m_memUsed{0};
+
+    // LIFO urgent queue — workers drain this before the normal priority queue.
+    // Entries are pushed by boostScan (front) and dropped from the back when full.
+    static constexpr size_t     kLifoMaxSize = 32;
+    std::deque<std::string>     m_lifo;
 
     std::atomic<int>         m_nextToken{1};
     std::vector<std::thread> m_workers;

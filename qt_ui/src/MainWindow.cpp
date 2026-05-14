@@ -13,6 +13,7 @@
 #include "ShowInfoDialog.h"
 #include "SettingsDialog.h"
 #include "CueTableView.h"
+#include "PeakRegistry.h"
 
 #include "InspectorWidget.h"
 #include "RenumberDialog.h"
@@ -201,6 +202,10 @@ MainWindow::MainWindow(AppModel* model, QWidget* parent)
         if (m_mixConsole) m_mixConsole->refresh();
     });
     connect(m_model, &AppModel::showModeChanged, this, &MainWindow::updateShowModeUi);
+    connect(m_model, &AppModel::showModeChanged, this, [](bool on) {
+        if (on) PeakRegistry::instance().suspend();
+        else    PeakRegistry::instance().resume();
+    });
 
     connect(m_cueTable,  &CueTableView::rowSelected,    this, &MainWindow::onRowSelected);
     connect(m_cueTable,  &CueTableView::cueListModified, this, &MainWindow::onCueListModified);
@@ -1138,6 +1143,7 @@ void MainWindow::loadUiState() {
 }
 
 void MainWindow::loadShowFile(const QString& path) {
+    PeakRegistry::instance().cancelPendingScans();
     std::string err;
     if (!m_model->sf.load(path.toStdString(), err)) {
         QMessageBox::critical(this, "Load error",

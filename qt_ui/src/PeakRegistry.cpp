@@ -8,6 +8,7 @@
 #include <chrono>
 #include <limits>
 #include <pthread.h>
+#include <sys/stat.h>
 
 // ─── singleton ────────────────────────────────────────────────────────────────
 
@@ -32,6 +33,16 @@ PeakRegistry::~PeakRegistry() {
     shutdown();
 }
 
+// ─── internal helpers ─────────────────────────────────────────────────────────
+
+// Shorter files get a higher (less negative) priority and are dequeued first
+// from the max-heap.  File size is a cheap proxy for audio duration.
+static int fileSizePriority(const std::string& path) {
+    struct stat st;
+    if (stat(path.c_str(), &st) != 0) return 0;
+    return -static_cast<int>(st.st_size >> 20);  // -(file size in MB)
+}
+
 // ─── public API ───────────────────────────────────────────────────────────────
 
 std::shared_ptr<PeakData> PeakRegistry::requestScan(const std::string& path) {
@@ -46,14 +57,42 @@ std::shared_ptr<PeakData> PeakRegistry::requestScan(const std::string& path) {
         if (st == ScanStatus::Pending || st == ScanStatus::Scanning)
             return it->second;
         // Evicted: re-queue for disk reload.
-        m_queue.push({0, path});
+        m_queue.push({fileSizePriority(path), path});
         m_cv.notify_one();
         return it->second;
     }
 
     auto pd = std::make_shared<PeakData>();
     m_data[path] = pd;
-    m_queue.push({0, path});
+    m_queue.push({fileSizePriority(path), path});
+    m_cv.notify_one();
+    return pd;
+}
+
+std::shared_ptr<PeakData> PeakRegistry::boostScan(const std::string& path) {
+    std::unique_lock<std::mutex> lock(m_mutex);
+
+    // Ensure entry exists (mirrors requestScan's create-if-absent logic).
+    auto it = m_data.find(path);
+    std::shared_ptr<PeakData> pd;
+    if (it != m_data.end()) {
+        pd = it->second;
+    } else {
+        pd = std::make_shared<PeakData>();
+        m_data[path] = pd;
+        m_queue.push({fileSizePriority(path), path});  // safety-net in normal queue
+    }
+
+    const auto st = pd->status.load(std::memory_order_acquire);
+    if (st == ScanStatus::Complete) {
+        touchLRU(path);
+        return pd;
+    }
+    if (st == ScanStatus::Scanning) return pd;
+
+    // Pending or Evicted: push to LIFO front.
+    if (m_lifo.size() >= kLifoMaxSize) m_lifo.pop_back();
+    m_lifo.push_front(path);
     m_cv.notify_one();
     return pd;
 }
@@ -92,6 +131,18 @@ void PeakRegistry::resume() {
     m_cv.notify_all();
 }
 
+void PeakRegistry::cancelPendingScans() {
+    std::unique_lock<std::mutex> lock(m_mutex);
+    while (!m_queue.empty()) m_queue.pop();
+    m_lifo.clear();
+    for (auto it = m_data.begin(); it != m_data.end(); ) {
+        if (it->second->status.load(std::memory_order_acquire) == ScanStatus::Pending)
+            it = m_data.erase(it);
+        else
+            ++it;
+    }
+}
+
 void PeakRegistry::shutdown() {
     {
         std::unique_lock<std::mutex> lock(m_mutex);
@@ -125,6 +176,7 @@ void PeakRegistry::touchLRU(const std::string& path) {
 }
 
 void PeakRegistry::addToLRU(const std::string& path, size_t bytes) {
+    if (!m_data.count(path)) return;  // erased by cancelPendingScans; don't track
     if (m_lruIter.count(path)) {
         touchLRU(path);
         return;
@@ -168,13 +220,19 @@ void PeakRegistry::workerLoop() {
         {
             std::unique_lock<std::mutex> lock(m_mutex);
             m_cv.wait(lock, [this] {
-                return (!m_queue.empty() && !m_suspended.load(std::memory_order_relaxed))
+                return ((!m_lifo.empty() || !m_queue.empty())
+                        && !m_suspended.load(std::memory_order_relaxed))
                     || m_stopping.load(std::memory_order_relaxed);
             });
-            if (m_stopping.load() && m_queue.empty()) break;
-            if (m_suspended.load() || m_queue.empty()) continue;
-            path = m_queue.top().path;
-            m_queue.pop();
+            if (m_stopping.load() && m_lifo.empty() && m_queue.empty()) break;
+            if (m_suspended.load() || (m_lifo.empty() && m_queue.empty())) continue;
+            if (!m_lifo.empty()) {
+                path = m_lifo.front();
+                m_lifo.pop_front();
+            } else {
+                path = m_queue.top().path;
+                m_queue.pop();
+            }
         }
 
         std::shared_ptr<PeakData> pd;
@@ -186,23 +244,21 @@ void PeakRegistry::workerLoop() {
         }
 
         const auto curStatus = pd->status.load(std::memory_order_acquire);
-        if (curStatus == ScanStatus::Complete) continue;
+        if (curStatus != ScanStatus::Pending && curStatus != ScanStatus::Evicted) continue;
 
         // ── Try disk cache (both fresh Pending and Evicted re-loads) ─────────
-        if (curStatus == ScanStatus::Pending || curStatus == ScanStatus::Evicted) {
-            const int64_t mtime = PeakDiskCache::fileMtime(path);
-            if (mtime > 0 && PeakDiskCache::read(path, mtime, *pd)) {
-                pd->status.store(ScanStatus::Complete, std::memory_order_release);
-                if (!m_stopping.load(std::memory_order_acquire)) {
-                    {
-                        std::unique_lock<std::mutex> lock(m_mutex);
-                        addToLRU(path, peakDataMemBytes(*pd));
-                        evictIfNeeded();
-                    }
-                    notifySubscribers(path);
+        const int64_t mtime = PeakDiskCache::fileMtime(path);
+        if (mtime > 0 && PeakDiskCache::read(path, mtime, *pd)) {
+            pd->status.store(ScanStatus::Complete, std::memory_order_release);
+            if (!m_stopping.load(std::memory_order_acquire)) {
+                {
+                    std::unique_lock<std::mutex> lock(m_mutex);
+                    addToLRU(path, peakDataMemBytes(*pd));
+                    evictIfNeeded();
                 }
-                continue;
+                notifySubscribers(path);
             }
+            continue;
         }
 
         // ── Disk miss → scan from audio ───────────────────────────────────────

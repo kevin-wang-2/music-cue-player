@@ -766,7 +766,7 @@ void WaveformView::commitLoopEdit() {
 
 void WaveformView::rebuildPeaks(const std::string& path) {
     m_peakPath = path;
-    m_peakData = PeakRegistry::instance().requestScan(path);
+    m_peakData = PeakRegistry::instance().boostScan(path);
     m_subToken = PeakRegistry::instance().subscribe(path, this, [this]() {
         if (m_viewDur <= 0.0 && m_peakData &&
             m_peakData->metadataReady.load(std::memory_order_acquire))
